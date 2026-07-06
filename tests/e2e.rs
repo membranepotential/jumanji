@@ -210,6 +210,17 @@ impl Harness {
     /// data home holds `history.toml`, so a relaunch on the same data home
     /// exercises window-state persistence.
     fn launch_in(file: PathBuf, config_home: PathBuf, data_home: PathBuf) -> Self {
+        Self::launch_in_forward(file, config_home, data_home, None)
+    }
+
+    /// As [`launch_in`](Self::launch_in), but optionally passing `--forward
+    /// <line>` (DESIGN D7 forward sync on a fresh launch).
+    fn launch_in_forward(
+        file: PathBuf,
+        config_home: PathBuf,
+        data_home: PathBuf,
+        forward: Option<u32>,
+    ) -> Self {
         let display = next_display();
         let display_arg = format!(":{display}");
 
@@ -233,8 +244,12 @@ impl Harness {
         let _ = fs::create_dir_all(&config_home);
         let _ = fs::create_dir_all(&data_home);
 
-        let app = Command::new(env!("CARGO_BIN_EXE_jumanji"))
-            .arg(&file)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_jumanji"));
+        cmd.arg(&file);
+        if let Some(line) = forward {
+            cmd.args(["--forward", &line.to_string()]);
+        }
+        let app = cmd
             .env("DISPLAY", &display_arg)
             .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
             .env("XDG_CONFIG_HOME", &config_home)
@@ -356,6 +371,22 @@ impl Harness {
             button.to_string(),
         ]);
         self.xdotool(["keyup".to_string(), "ctrl".to_string()]);
+    }
+
+    /// Ctrl + left-click at window-relative `(x, y)` (reverse editor sync). Like
+    /// [`ctrl_wheel`](Self::ctrl_wheel), the click is delivered via XTEST at the
+    /// pointer (bare Xvfb drops synthetic `--window` button events).
+    fn ctrl_click(&self, x: i32, y: i32) {
+        self.mouse_move(x, y);
+        self.xdotool(["keydown".to_string(), "ctrl".to_string()]);
+        self.xdotool(["click".to_string(), "1".to_string()]);
+        self.xdotool(["keyup".to_string(), "ctrl".to_string()]);
+    }
+
+    /// Forward editor sync over D-Bus: `GotoLine(line)`.
+    fn goto_line(&self, line: u32) {
+        self.call("GotoLine", Some(&(line,).to_variant()))
+            .unwrap_or_else(|e| panic!("GotoLine({line}) failed: {e}"));
     }
 
     fn call(
@@ -1207,6 +1238,178 @@ fn external_fence_renderer_produces_output() {
         (s.fence_width - 123.0).abs() < 5.0,
         "expected the echoed 123px SVG, got width {}",
         s.fence_width
+    );
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Editor sync (DESIGN D7)
+// ---------------------------------------------------------------------------
+
+/// A source line well down the tall demo (the `### Mindmap` heading) — forwarding
+/// to it must scroll a long way from the top.
+const FORWARD_LINE: u32 = 250;
+
+#[test]
+fn goto_line_over_dbus_scrolls_to_the_source_line() {
+    // Forward editor sync: the `GotoLine` D-Bus method scrolls the running
+    // reader to the element nearest at-or-before the given source line.
+    let Some((_g, h)) = setup() else { return };
+    assert_eq!(h.get_state().scroll_y, 0.0, "starts at top");
+
+    h.goto_line(FORWARD_LINE);
+    let s = h.wait_for_state("GotoLine scrolls down", SETTLE, |s| s.scroll_y > 0.0);
+    assert!(
+        s.scroll_y > 100.0,
+        "forwarding to a line deep in the document should scroll well down, got {}",
+        s.scroll_y
+    );
+}
+
+#[test]
+fn forward_flag_jumps_after_load_on_fresh_launch() {
+    // `jumanji --forward <line> file` with no running instance opens normally and
+    // jumps to the line once the load finishes.
+    let Some(_g) = setup_guard() else { return };
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let demo = Path::new(manifest).join("demo").join("demo.md");
+    let id = std::process::id();
+    let config_home = std::env::temp_dir().join(format!("jumanji-e2e-fwd-cfg-{id}"));
+    let data_home = std::env::temp_dir().join(format!("jumanji-e2e-fwd-data-{id}"));
+
+    let h = Harness::launch_in_forward(demo, config_home, data_home, Some(FORWARD_LINE));
+    let s = h.wait_for_state("fresh --forward jumps after load", SETTLE, |s| {
+        s.scroll_y > 0.0
+    });
+    assert!(
+        s.scroll_y > 100.0,
+        "a fresh --forward launch should land deep in the document, got {}",
+        s.scroll_y
+    );
+}
+
+#[test]
+fn forward_to_a_running_instance_exits_without_a_window() {
+    // With an instance already showing the file, a second `--forward` invocation
+    // on the same bus must drive that instance over D-Bus and exit 0 quickly,
+    // never opening a window of its own (zathura's --synctex-forward behaviour).
+    let Some((_g, h)) = setup() else { return };
+    assert_eq!(
+        h.get_state().scroll_y,
+        0.0,
+        "running instance starts at top"
+    );
+
+    let start = Instant::now();
+    let status = Command::new(env!("CARGO_BIN_EXE_jumanji"))
+        .arg(&h.file)
+        .args(["--forward", &FORWARD_LINE.to_string()])
+        // Same private bus; deliberately no DISPLAY — the forward path returns
+        // before any GTK/WebKit init, so it needs no X server.
+        .env("DBUS_SESSION_BUS_ADDRESS", &h.dbus_addr)
+        .env_remove("DISPLAY")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("spawn second --forward");
+    assert!(status.success(), "second --forward should exit 0");
+    assert!(
+        start.elapsed() < Duration::from_secs(8),
+        "second --forward should exit promptly, took {:?}",
+        start.elapsed()
+    );
+
+    // The already-running instance received the jump and scrolled.
+    let s = h.wait_for_state("running instance scrolled via forward", SETTLE, |s| {
+        s.scroll_y > 0.0
+    });
+    assert!(s.scroll_y > 100.0, "forwarded jump should scroll well down");
+}
+
+#[test]
+fn reverse_ctrl_click_spawns_editor_command() {
+    // Reverse editor sync: Ctrl+click on an element resolves its source line and
+    // spawns `editor-command` with `%l`/`%f` substituted. Point editor-command at
+    // a script that records its argv, click a paragraph, and assert the argv.
+    let Some(_g) = setup_guard() else { return };
+
+    let dir = std::env::temp_dir().join(format!("jumanji-e2e-rev-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config_home = dir.join("cfg");
+    let data_home = dir.join("data");
+    let cfg = config_home.join("jumanji");
+    std::fs::create_dir_all(&cfg).expect("create config dir");
+
+    // A recorder: write the received argv (one per line) beside the script.
+    let script = dir.join("record.sh");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv.txt\"\n",
+    )
+    .expect("write record script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    let argv_out = dir.join("argv.txt");
+
+    std::fs::write(
+        cfg.join("config.toml"),
+        format!(
+            "[options]\neditor-command = \"{} +%l %f\"\n",
+            script.display()
+        ),
+    )
+    .expect("write config");
+
+    // A doc whose first paragraph is a long wrapped block, so a click anywhere in
+    // its vertical band lands on text (never inter-block whitespace).
+    let doc = dir.join("doc.md");
+    let long = "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do \
+                eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim \
+                ad minim veniam quis nostrud exercitation ullamco laboris nisi.";
+    std::fs::write(&doc, format!("# Title\n\n{long}\n\nSecond paragraph.\n")).expect("write doc");
+
+    let h = Harness::launch_in(doc.clone(), config_home, data_home);
+
+    // Click into the long paragraph (below the title, inside the reading column).
+    h.ctrl_click(220, 160);
+
+    // The script writes argv.txt on spawn; poll for it.
+    let deadline = Instant::now() + SETTLE;
+    let contents = loop {
+        if let Ok(s) = std::fs::read_to_string(&argv_out) {
+            if !s.trim().is_empty() {
+                break s;
+            }
+        }
+        if Instant::now() >= deadline {
+            panic!("editor-command was not spawned (no argv.txt) within {SETTLE:?}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    let lines: Vec<&str> = contents.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected `+<line>` and `<file>`, got {lines:?}"
+    );
+    assert!(
+        lines[0].starts_with('+') && lines[0][1..].parse::<u32>().is_ok(),
+        "first arg should be `+<line>`, got {:?}",
+        lines[0]
+    );
+    assert_eq!(
+        lines[1],
+        doc.to_string_lossy(),
+        "second arg should be the document path"
     );
 
     drop(h);
