@@ -59,9 +59,15 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia,
-    "Times New Roman", serif;
-  font-size: 18px;
+  font-family: var(
+    --font-body,
+    "Source Serif 4",
+    "Iowan Old Style",
+    Palatino,
+    Georgia,
+    serif
+  );
+  font-size: var(--font-size, 18px);
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -184,8 +190,15 @@ blockquote > :last-child {
 code,
 kbd,
 samp {
-  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", "Cascadia Code",
-    Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(
+    --font-mono,
+    "JetBrains Mono",
+    "Fira Code",
+    "SFMono-Regular",
+    Consolas,
+    "Liberation Mono",
+    monospace
+  );
   font-size: 0.86em;
 }
 
