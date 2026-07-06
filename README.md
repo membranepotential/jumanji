@@ -6,8 +6,8 @@ you actually *want* to read in it.
 
 Open a `.md` file, read it with real typography — proportional fonts, proper
 tables, highlighted code blocks, rendered [Mermaid](https://mermaid.js.org/)
-diagrams — and drive everything from the keyboard. Close it. That's the whole
-program.
+diagrams, and LaTeX math (`$…$` / `$$…$$`) typeset as native MathML — and drive
+everything from the keyboard. Close it. That's the whole program.
 
 > **Name lineage:** pwmt (*Programs With Movie Titles*) once shipped a
 > keyboard-driven WebKit browser called [jumanji](https://pwmt.org/projects/jumanji/),
@@ -28,7 +28,7 @@ tables wider than the window, no diagrams. The existing alternatives each miss:
 - **Terminal viewers** (glow, mdcat, md-tui) are bound to the character grid — no
   real typography, no diagrams, no math.
 - **Native viewers** (inlyne) are fast but have no vim keybindings, no mermaid,
-  and hand-rolled text layout with a long tail of rendering bugs.
+  no math, and hand-rolled text layout with a long tail of rendering bugs.
 - **Editor apps** (Typora, Obsidian, Zettlr) bundle a browser engine, start
   slowly, and are editors first — reading is the afterthought.
 
@@ -74,7 +74,9 @@ Mouse: wheel scrolls, `Ctrl`+wheel zooms geometrically, `Ctrl`+`Shift`+wheel
 zooms the text, links are clickable (external links open in your browser —
 jumanji itself never touches the network). Scroll position and zoom are
 remembered per file. Drop `.css` files into `~/.config/jumanji/themes/` to
-restyle the reader; GFM alerts (`> [!NOTE]` …) render as callouts.
+restyle the reader; GFM alerts (`> [!NOTE]` …) render as callouts. LaTeX math —
+inline `$…$` and display `$$…$$`, matrices and aligned environments — is
+typeset to native MathML (no JavaScript), and recolors with the page.
 
 ## Configuration
 

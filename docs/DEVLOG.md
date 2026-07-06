@@ -2,6 +2,55 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — LaTeX math → MathML Core (M3), no JavaScript
+
+Math is the first M3 feature to land. **What:** `$inline$` / `$$display$$` /
+`` $`code`$ `` math now renders as native MathML.
+
+- **Pipeline (D8).** comrak's math extension (`math_dollars` + `math_code`)
+  yields inline `NodeValue::Math` nodes; a new pure `core::math` module walks the
+  AST and replaces each with an inline `<math>` fragment rendered by
+  **pulldown-latex 0.7.1** (pure-Rust LaTeX → MathML Core, ~95% KaTeX coverage,
+  MIT). Same parse → mutate → format shape as `diagram.rs`. `$…$` renders inline
+  style, `$$…$$` block. **Why pulldown-latex, not typst** (a whole document
+  compiler for a fragment — huge dep, wrong output model) **or KaTeX/MathJax**
+  (JavaScript, which D3 forbids).
+- **Fonts served as base64 `data:` URIs, not `app://`.** The brief assumed an
+  `app://` scheme existed; it does not — the code inlines everything
+  (`style-src 'unsafe-inline'`). So math stays consistent: `core::math` rewrites
+  pulldown-latex's `styles.css` font `url()`s to base64 `data:` URIs at runtime
+  (cached once; hand-rolled base64, no new dep). CSP gains exactly `font-src
+  data:`. The Latin Modern fonts (4 × WOFF2, ~0.5 MB, GUST Font License) and the
+  stylesheet are vendored under `src/core/assets/math/`; the math stylesheet is
+  emitted **only when the document contains math**, so math-free pages are
+  unaffected. D3's `app://` serving note updated to match reality; new D8 added.
+- **Recolor + no-page-h-scroll, by construction.** MathML inherits `color`, so
+  equations recolor with Ctrl-r for free; the one hardcoded black in the vendored
+  sheet (the negation-slash gradient) is patched to `currentColor` (marked
+  `jumanji:`). Display math is wrapped in a `.math-scroll` block (`<span>` set to
+  `display:block` — valid inside the enclosing `<p>`, unlike a `<div>`) so a wide
+  matrix/alignment scrolls in its own box, never the page — same mechanism as
+  `.table-wrap`/`.mermaid`. A narrow-viewport e2e caught this: raw block math
+  overflowed the page by ~20 px until wrapped.
+- **Graceful degradation (binding).** A parser error (pulldown-latex emits inline
+  `<merror>`) or an unbalanced environment (which *panics* inside pulldown-latex's
+  writer — contained by `catch_unwind`) degrades to the raw source as a code span
+  (inline) or a small error box with a note (display). Never a crash, never blank.
+- **State + demo.** `GetState`/`ViewportState` gain `math_width` (first `<math>`
+  rendered width, mirroring `diagram_width`) so e2e can assert MathML laid out.
+  `demo/demo.md` gains a Math section (inline, display sum, matrix + determinant,
+  Maxwell `aligned`, and a deliberately-broken fence).
+
+Tests: 108 → **123 unit** (10 new in `core::math`, 5 in `core::pipeline`
+including the comrak dollar-rule documentation test) + **23 e2e** (was 21; new
+`math_renders_as_mathml_with_width`). `cargo test && clippy -D warnings && fmt`
+all clean. Crate added: `pulldown-latex 0.7.1`. Vendored assets: 540 KB.
+
+Next M3: external fence renderers (D6.2 — the same seam merman occupies), D-Bus
+editor sync (D7), stdin streaming. Note for those: the pipeline contract is still
+"pure core emits one self-contained HTML string"; `has_math`-style conditional
+asset inclusion is the pattern to copy for any new heavyweight asset.
+
 ## 2026-07-06 — intrinsic diagram size, cursor-anchor fix, leading-edge zoom, one demo
 
 Four related fixes, driven by user feedback that big diagrams were unreadably

@@ -91,10 +91,12 @@ pipeline can later feed an export path (PDF/HTML) or a different front end.
   - Rejected: mmdc (needs Puppeteer + ~200 MB Chromium), QuickJS/boa + resvg
     (mermaid.js needs a layout-capable DOM — `getBBox()` — and resvg can't
     render `foreignObject`), kroki/mermaid.ink (network).
-- **Serving:** rendered HTML + embedded CSS/fonts via a custom `app://` URI
-  scheme handler (`WebContext::register_uri_scheme`); CSP
-  `default-src 'none'; style-src app:; img-src app: data: file:` as
-  belt-and-suspenders. Local images resolve relative to the document.
+- **Serving:** the implementation went with a fully self-contained page instead
+  of the `app://` scheme sketched here — CSS is inlined (`style-src
+  'unsafe-inline'`), math fonts are base64 `data:` URIs (D8), and there is no URI
+  scheme handler. Current CSP: `default-src 'none'; img-src file: data:;
+  style-src 'unsafe-inline'; font-src data:`. Local images resolve relative to
+  the document. (This supersedes the original `app://` plan; see D8.)
 
 ### D4: Keybindings — GTK capture phase, zathura semantics
 
@@ -214,6 +216,52 @@ CLI flag + D-Bus method (`org.pwmt.jumanji…GotoLine`) so Neovim can point the
 open reader at the heading under the cursor, and a modifier-click that shells
 out to `$EDITOR +line file` for the reverse direction.
 
+### D8: Math — pulldown-latex → MathML Core, no JavaScript (M3)
+
+LaTeX math is "the missing 5%" for a large slice of readers (notes, papers,
+lecture material). The M3 target was "KaTeX-equivalent, no JS", and the pipeline
+is 100% Rust (D3), so a JS math engine (KaTeX/MathJax) is out by construction.
+
+- **Parse:** comrak's own math extension (`math_dollars` + `math_code`). `$x$`,
+  `$$x$$`, and `` $`x`$ `` become inline `NodeValue::Math` nodes carrying the raw
+  LaTeX — a first-class parse → mutate → format seam, identical in shape to the
+  mermaid fence interception (D3). GitHub's dollar rules apply, so prose dollars
+  ("costs $5 and $10") stay text (encoded in `core::math` tests as documentation).
+- **Render:** **pulldown-latex 0.7.1** (crates.io, MIT) — a pure-Rust LaTeX →
+  MathML Core renderer (~95% KaTeX coverage). `core::math` walks the AST and
+  replaces each `Math` node with an inline raw-HTML `<math>` fragment (inline
+  display style for `$…$`, block for `$$…$$`), mirroring `diagram.rs`.
+  - **Rejected — typst:** pulling in a whole document compiler to typeset a
+    fragment is a poor fit (huge dependency, its own markup/layout model, SVG or
+    raster output rather than semantic MathML that recolors and reflows for free).
+  - **Rejected — KaTeX/MathJax:** JavaScript in the content pipeline, which D3
+    rules out (no bundled JS engine, no async render races, export-path hostile).
+- **Display:** **WebKitGTK renders MathML Core natively** — no JS. Visual quality
+  needs pulldown-latex's stylesheet plus the Latin Modern math fonts; both are
+  vendored under `src/core/assets/math/` (`styles.css` + four WOFF2 files, ~0.5 MB,
+  GUST Font License — see `font/LICENSE.fonts`).
+- **Serving — base64 `data:` URIs, not `app://`.** There is no `app://` scheme
+  in the code: D3's original plan gave way to a self-contained page (inlined CSS,
+  `style-src 'unsafe-inline'`), and math stays consistent with that. `core::math`
+  rewrites the stylesheet's `url('font/…woff2')` refs to base64 `data:` URIs at
+  runtime (cached once), so the page fetches nothing. **CSP** gains exactly one
+  token, `font-src data:` (harmless when a document has no math — nothing
+  references a font). The math stylesheet is emitted only when the document
+  actually contains math, so math-free pages carry none of its ~0.7 MB weight.
+- **Recolor (Ctrl-r):** MathML inherits `color`, so equations recolor with the
+  page for free. The one hardcoded colour in the vendored sheet — the negation
+  slash's opaque-black gradient stop — is patched to `currentColor` so it stays
+  visible in dark mode (marked `jumanji:` in `assets/math/styles.css`).
+- **No-page-h-scroll invariant (D5a):** display math is wrapped in a
+  `.math-scroll` block (a `<span>` set to `display:block`, valid inside the
+  enclosing `<p>`) so a wide matrix/alignment scrolls inside its own box, never
+  the page — the same mechanism `.table-wrap` and `.mermaid` use.
+- **Graceful degradation (binding):** a parser error (pulldown-latex emits an
+  inline `<merror>`) or an unbalanced group/environment (which *panics* inside
+  pulldown-latex's writer, contained by `catch_unwind`) degrades to the raw
+  source shown as a code span (inline) or a small error box (display) with a
+  note — never a crash, never a blank page. Mirrors `diagram.rs`.
+
 ## Non-goals
 
 - Editing. Ever. Pair with an editor instead (D7).
@@ -230,8 +278,9 @@ out to `$EDITOR +line file` for the reverse direction.
 - **M2:** Tab TOC mode (tree, zathura index keys); `f` link hints; `:` commands
   with completion; quickmarks `m`/`'`; jumplist Ctrl-o/Ctrl-i; window-state
   persistence; user CSS themes; fragment/anchor links; GFM alerts/callouts.
-- **M3:** editor sync via D-Bus (D7); external fence renderers; math (KaTeX-
-  equivalent, ideally typst-based, no JS); AUR package; stdin streaming.
+- **M3:** editor sync via D-Bus (D7); external fence renderers; **math
+  (done — D8: pulldown-latex → MathML Core, no JS)**; AUR package; stdin
+  streaming.
 
 ## Keybinding spec (M1 + M2)
 
@@ -265,7 +314,8 @@ Functional core, imperative shell. The core is pure and GTK-free.
 ┌─ core (pure, no GTK, unit-tested) ─────────────────────────────┐
 │ pipeline.rs   md text ──comrak AST──▶ transform ──▶ HTML doc   │
 │               ├─ highlight.rs  syntect adapter (two-face)      │
-│               └─ diagram.rs    ```mermaid → merman SVG inline  │
+│               ├─ diagram.rs    ```mermaid → merman SVG inline  │
+│               └─ math.rs       $…$/$$…$$ → pulldown-latex MathML│
 │ toc.rs        heading extraction → outline tree + anchors      │
 │ config.rs     serde+toml: typed options, key tables            │
 │ keymap.rs     mode × count × key-seq → Action (pure lookup)    │
