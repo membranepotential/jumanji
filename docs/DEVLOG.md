@@ -2,6 +2,40 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-07 — Statusbar/search UX polish (1.1.1)
+
+Three zathura-fidelity fixes, all in the shell:
+
+- **Live scroll percent.** Wheel / touchpad / scrollbar scrolls are handled by
+  WebKit itself, so Rust never learned about them and the statusbar percent went
+  stale until the next keypress. Added an injected `scroll` listener (rAF-
+  coalesced, fires only when the rounded percent changes) that pings a new
+  `scroll` script-message handler → `refresh_status`. Keyboard scrolls already
+  refreshed directly, so they're untouched.
+- **`Esc` clears more.** `Action::Abort` now unconditionally clears the active
+  search (highlight + `n`/`N` state via `find_clear`) and restores the statusbar
+  left to the filename, wiping any transient notice — the universal-reset
+  semantics zathura's `abort` implies. Previously it only cleared search when the
+  input bar happened to be open.
+- **Search no longer clobbers the clipboard.** WebKitGTK mirrors the DOM
+  selection into X11 PRIMARY, and `FindController` selects each match — so every
+  `/`, `n`, `N` was silently overwriting the clipboard with the hit. Two moves:
+  copy-on-select now triggers on `mouseup` (a real pointer gesture) instead of
+  `selectionchange` (which also fires for the programmatic find selection); and a
+  `FindController::found-text` handler restores PRIMARY to the user's last real
+  selection right after WebKit writes the match. `found-text` reliably fires
+  *after* WebKit's PRIMARY write (verified under Xvfb), so it wins the race —
+  clearing the DOM selection does not, since the write is already done. The match
+  highlight stays; the clipboard is left alone.
+
+Verified end-to-end under Xvfb (search doesn't copy, a genuine selection survives
+a search, `Esc` clears highlight+notice, wheel moves the percent). All 36 tests
+green.
+
+**Process note:** every tagged release must also get a GitHub release with notes
+(`gh release create`) — see CLAUDE.md. v1.0.0's was created; v1.1.0's was missed
+and is being backfilled.
+
 ## 2026-07-06 — Cross-document jumplist: go back after following a link (D10)
 
 Following a `.md` link (or `:open`) used to reset the jumplist, so there was no

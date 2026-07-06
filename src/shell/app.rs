@@ -361,6 +361,12 @@ fn install_view_handlers(shell: &Rc<RefCell<Shell>>) {
         let shell = shell.clone();
         view.set_editor_sync_handler(move |line| on_editor_sync(&shell, &line));
     }
+    {
+        // Native scrolls (wheel / touchpad / scrollbar) never run through the
+        // key dispatcher, so this ping is what keeps the statusbar percent live.
+        let shell = shell.clone();
+        view.set_scroll_handler(move |_percent| refresh_status(&shell));
+    }
 }
 
 /// Read the file, render it, and load the HTML. When `preserve_scroll`, capture
@@ -1156,13 +1162,16 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             if matches!(s.input, Input::Hint { .. }) {
                 s.view.clear_hints();
                 s.input = Input::None;
-                s.bar.set_filename(&s.filename);
             }
             if s.bar.is_input_visible() {
                 s.bar.close_input();
-                s.view.find_clear();
                 s.view.widget().grab_focus();
             }
+            // Zathura's universal abort: Esc also drops any active search
+            // (highlights + `n`/`N` state) and clears any transient statusbar
+            // notice, returning the chrome to its resting state.
+            s.view.find_clear();
+            s.bar.set_filename(&s.filename);
             s.completion = None;
         }
         Action::Quit => {

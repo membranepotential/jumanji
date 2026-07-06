@@ -139,6 +139,10 @@ const HINTS_HANDLER: &str = "hints";
 /// The script-message handler the reverse-editor-sync click posts the source
 /// line to (DESIGN D7).
 const EDITOR_SYNC_HANDLER: &str = "editorsync";
+/// The script-message handler the in-page scroll listener pings so the shell can
+/// refresh the statusbar percent on wheel / touchpad / scrollbar scrolling —
+/// scrolls WebKit handles natively otherwise never reach Rust.
+const SCROLL_HANDLER: &str = "scroll";
 
 #[derive(Clone)]
 pub struct View {
@@ -154,19 +158,40 @@ pub struct View {
     /// Called with the source line (as a string) of a Ctrl+clicked element, so
     /// the shell can spawn the editor (reverse sync, DESIGN D7).
     editor_sync_cb: Sink,
+    /// Called (with the current percent, as a string) whenever the page scrolls
+    /// by any means WebKit handles itself — wheel, touchpad, scrollbar drag — so
+    /// the shell can refresh the statusbar percent.
+    scroll_cb: Sink,
 }
 
 impl View {
     pub fn new(selection_clipboard: SelectionClipboard) -> Self {
         let ucm = UserContentManager::new();
-        install_selection_copy(&ucm, selection_clipboard);
+        let last_selection: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        install_selection_copy(&ucm, selection_clipboard, last_selection.clone());
         install_drag_select_reset(&ucm);
         let hints_cb: Sink = Rc::new(RefCell::new(None));
         install_hints(&ucm, hints_cb.clone());
         let editor_sync_cb: Sink = Rc::new(RefCell::new(None));
         install_editor_sync(&ucm, editor_sync_cb.clone());
+        let scroll_cb: Sink = Rc::new(RefCell::new(None));
+        install_scroll_notify(&ucm, scroll_cb.clone());
 
         let webview = WebView::builder().user_content_manager(&ucm).build();
+        // WebKitGTK copies the find match into PRIMARY as it selects it. `found-text`
+        // fires after that write, so restoring PRIMARY here — to the user's last real
+        // selection, or empty — reliably undoes it (see the field doc). This is the
+        // only reliable hook: clearing the DOM selection does not retract the write,
+        // and a plain post-find eval races WebKit and loses.
+        if let Some(fc) = webview.find_controller() {
+            let last = last_selection.clone();
+            fc.connect_found_text(move |_, _| {
+                if let Some(display) = gtk::gdk::Display::default() {
+                    let text = last.borrow().clone().unwrap_or_default();
+                    display.primary_clipboard().set_text(&text);
+                }
+            });
+        }
         webview.set_vexpand(true);
         webview.set_hexpand(true);
         webview.set_background_color(&BG_LIGHT);
@@ -199,6 +224,7 @@ impl View {
             hints_cb,
             navigate_cb,
             editor_sync_cb,
+            scroll_cb,
         }
     }
 
@@ -221,6 +247,12 @@ impl View {
     /// argument is the clicked element's source line, as a decimal string.
     pub fn set_editor_sync_handler(&self, f: impl Fn(String) + 'static) {
         *self.editor_sync_cb.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Install the shell's handler for native-scroll pings (wheel / touchpad /
+    /// scrollbar). The argument is the current scroll percent, as a string.
+    pub fn set_scroll_handler(&self, f: impl Fn(String) + 'static) {
+        *self.scroll_cb.borrow_mut() = Some(Box::new(f));
     }
 
     /// Forward editor sync (DESIGN D7): scroll to the element whose source line
@@ -428,6 +460,9 @@ impl View {
         self.webview.find_controller()
     }
 
+    /// Search the document. WebKit highlights every match and selects the first;
+    /// the `found-text` handler installed in [`View::new`] then restores PRIMARY,
+    /// so the highlight stays but the match never lands on the clipboard.
     pub fn find(&self, text: &str) {
         // Case-insensitive, wrapping search — the vim/zathura default.
         let opts = FindOptions::CASE_INSENSITIVE | FindOptions::WRAP_AROUND;
@@ -544,28 +579,32 @@ impl View {
     }
 }
 
-/// Wire zathura-style copy-on-select: a user-script listens for
-/// `selectionchange` (debounced ~200 ms) and posts the current non-empty
-/// selection string to a script-message handler; the Rust side writes it to the
-/// configured clipboard. An empty selection posts nothing, so we never clobber
-/// the clipboard with `""`.
-fn install_selection_copy(ucm: &UserContentManager, target: SelectionClipboard) {
+/// Wire zathura-style copy-on-select: a user-script posts the current non-empty
+/// selection on **`mouseup`** (the end of a pointer selection gesture), and the
+/// Rust side writes it to the configured clipboard. Keying off `mouseup` — not
+/// `selectionchange` — is deliberate: WebKit's find highlight sets the DOM
+/// selection programmatically, so a `selectionchange` listener would copy every
+/// search match (and each `n`/`N` step), which is not what a copy-*on-select*
+/// feature should do. A find never synthesises `mouseup`, so search leaves the
+/// clipboard alone. An empty selection posts nothing, so a plain click (which
+/// collapses any selection) never clobbers the clipboard with `""`.
+fn install_selection_copy(
+    ucm: &UserContentManager,
+    target: SelectionClipboard,
+    last_selection: Rc<RefCell<Option<String>>>,
+) {
     // register_script_message_handler returns false if the name is already
     // taken; on a fresh manager it always succeeds. The user-script only reaches
     // `postMessage` after this registers the handler.
     ucm.register_script_message_handler(SELECTION_HANDLER, None);
 
     const SOURCE: &str = "(function () {\n\
-        let timer = null;\n\
-        document.addEventListener('selectionchange', function () {\n\
-          if (timer) clearTimeout(timer);\n\
-          timer = setTimeout(function () {\n\
-            const sel = window.getSelection ? window.getSelection().toString() : '';\n\
-            if (sel && sel.length > 0) {\n\
-              window.webkit.messageHandlers.selection.postMessage(sel);\n\
-            }\n\
-          }, 200);\n\
-        });\n\
+        document.addEventListener('mouseup', function () {\n\
+          const sel = window.getSelection ? window.getSelection().toString() : '';\n\
+          if (sel && sel.length > 0) {\n\
+            window.webkit.messageHandlers.selection.postMessage(sel);\n\
+          }\n\
+        }, true);\n\
       })();";
     let script = UserScript::new(
         SOURCE,
@@ -581,12 +620,57 @@ fn install_selection_copy(ucm: &UserContentManager, target: SelectionClipboard) 
         if text.is_empty() {
             return;
         }
+        // Remember the last real selection so a later search can restore PRIMARY
+        // to it after WebKit clobbers it with the find match.
+        *last_selection.borrow_mut() = Some(text.to_string());
         if let Some(display) = gtk::gdk::Display::default() {
             let clipboard = match target {
                 SelectionClipboard::Primary => display.primary_clipboard(),
                 SelectionClipboard::Clipboard => display.clipboard(),
             };
             clipboard.set_text(&text);
+        }
+    });
+}
+
+/// Wire the in-page scroll listener: a passive `scroll` listener, coalesced to
+/// one report per animation frame and only firing when the *rounded* percent
+/// changes, posts the current percent back to Rust. This is the only signal for
+/// scrolls WebKit performs itself (wheel, touchpad, scrollbar) — keyboard
+/// scrolls are Rust-driven and refresh the statusbar directly. The percent
+/// formula mirrors [`View::scroll_state`] so the two agree.
+fn install_scroll_notify(ucm: &UserContentManager, sink: Sink) {
+    ucm.register_script_message_handler(SCROLL_HANDLER, None);
+
+    const SOURCE: &str = "(function () {\n\
+        let ticking = false, last = -1;\n\
+        window.addEventListener('scroll', function () {\n\
+          if (ticking) return;\n\
+          ticking = true;\n\
+          requestAnimationFrame(function () {\n\
+            ticking = false;\n\
+            const d = document.documentElement, b = document.body;\n\
+            const max = (b.scrollHeight || d.scrollHeight) - window.innerHeight;\n\
+            const p = max > 0 ? Math.min(100, Math.max(0, Math.round((window.scrollY / max) * 100))) : 0;\n\
+            if (p !== last) {\n\
+              last = p;\n\
+              window.webkit.messageHandlers.scroll.postMessage(String(p));\n\
+            }\n\
+          });\n\
+        }, { passive: true });\n\
+      })();";
+    let script = UserScript::new(
+        SOURCE,
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::Start,
+        &[],
+        &[],
+    );
+    ucm.add_script(&script);
+
+    ucm.connect_script_message_received(Some(SCROLL_HANDLER), move |_, value| {
+        if let Some(cb) = sink.borrow().as_ref() {
+            cb(value.to_str().to_string());
         }
     });
 }

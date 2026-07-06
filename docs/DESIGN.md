@@ -131,8 +131,16 @@ Options surface (all optional; defaults in parentheses):
 Font names are CSS-escaped and quoted before emission into the generated
 `:root{…}` block (the stylesheet already consumes `--font-body`/`--font-mono`/
 `--font-size`). Copy-on-select is zathura parity: a `UserContentManager` script
-message handler + injected user-script post the current (debounced, non-empty)
-selection to Rust, which writes it to the configured GDK clipboard.
+message handler + injected user-script post the current non-empty selection to
+Rust on **`mouseup`** — the end of a real pointer-selection gesture — which
+writes it to the configured GDK clipboard. Keying off `mouseup` (not
+`selectionchange`) is deliberate: WebKit's `FindController` sets the DOM
+selection on the active match programmatically, and a `selectionchange` listener
+would copy every search hit. For the same reason search must actively *protect*
+the clipboard: WebKitGTK mirrors the find match into the X11 PRIMARY selection as
+it selects it, so the `FindController::found-text` handler restores PRIMARY to
+the user's last real selection (or clears it) after every `/`, `n`, `N` — the
+match highlight stays, but a search never lands on the clipboard.
 
 ### D5a: Two-axis zoom
 
@@ -194,6 +202,16 @@ off 100%, and nothing when both are 100%. `GetState` exposes both as `zoom` and
 `text_zoom`. The wheel controller lives on the **toplevel window** in capture
 phase — the same architectural guarantee the key controller relies on (D4); a
 controller attached to the WebView never receives the scroll events.
+
+The scroll **percent** on the right updates live on any scroll. Keyboard scrolls
+are Rust-driven and refresh the statusbar directly, but WebKit handles wheel /
+touchpad / scrollbar scrolls itself and Rust never hears about them — so an
+injected `scroll` listener (coalesced to one report per animation frame, and only
+when the rounded percent changes) pings Rust to re-query and repaint the percent.
+
+`Esc`/abort is the universal reset: besides leaving TOC/hint/input modes, it
+clears any active search (highlight + `n`/`N` state) and any transient statusbar
+notice, returning the chrome to its resting state.
 
 ### D6: Extensibility — pipeline seams, not a plugin ABI
 
