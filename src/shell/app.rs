@@ -464,37 +464,55 @@ fn connect_motion(shell: &Rc<RefCell<Shell>>) {
     window.add_controller(controller);
 }
 
-/// Coalescing window for Ctrl+wheel zoom. Long enough that a physical burst of
-/// wheel ticks collapses into one anchored reflow; short enough to feel
+/// Trailing-window for Ctrl+wheel zoom coalescing. The first tick of a burst
+/// applies immediately (leading edge, so a single tick feels instant); ticks
+/// arriving within this window after it are batched into one further anchored
+/// reflow. Long enough that a physical burst collapses, short enough to feel
 /// immediate.
 const WHEEL_ZOOM_COALESCE: std::time::Duration = std::time::Duration::from_millis(40);
 
-/// Accumulate one Ctrl+wheel tick and schedule a single coalesced apply.
+/// Accumulate one Ctrl+wheel tick. Leading-edge coalescing: the first tick of a
+/// burst applies right away and opens a trailing window; subsequent ticks in
+/// that window only accumulate, and the timer flushes the remainder when it
+/// fires. No tick is ever lost — every tick adds a step, and `flush_wheel_zoom`
+/// drains all accumulated steps.
 fn accumulate_wheel_zoom(shell: &Rc<RefCell<Shell>>, dy: f64) {
-    {
+    let leading = {
         let mut s = shell.borrow_mut();
         s.pending_zoom_steps += if dy < 0.0 { 1 } else { -1 };
         if s.zoom_flush_scheduled {
-            return;
+            false // a window is already open; the timer will flush this tick.
+        } else {
+            s.zoom_flush_scheduled = true;
+            true
         }
-        s.zoom_flush_scheduled = true;
+    };
+    if leading {
+        // Apply the first tick immediately, then open the trailing window.
+        flush_wheel_zoom(shell);
+        let sh = shell.clone();
+        glib::timeout_add_local_once(WHEEL_ZOOM_COALESCE, move || {
+            sh.borrow_mut().zoom_flush_scheduled = false;
+            flush_wheel_zoom(&sh);
+        });
     }
-    let sh = shell.clone();
-    glib::timeout_add_local_once(WHEEL_ZOOM_COALESCE, move || flush_wheel_zoom(&sh));
 }
 
 /// Apply all accumulated Ctrl+wheel ticks as one cursor-anchored zoom change.
+/// A no-op when nothing is pending (the trailing flush after an empty window).
 fn flush_wheel_zoom(shell: &Rc<RefCell<Shell>>) {
     let applied = {
         let mut s = shell.borrow_mut();
-        s.zoom_flush_scheduled = false;
         let steps = std::mem::take(&mut s.pending_zoom_steps);
         if steps == 0 {
             None
         } else {
             let level = (s.zoom + s.zoom_step * steps as f64).max(0.2);
-            s.zoom = level;
+            // Capture the anchor from the *current* (pre-change) zoom: the page
+            // is still laid out at `s.zoom`, and `cursor_anchor` divides by that
+            // to convert to CSS px. Must run before `s.zoom` is updated.
             let anchor = cursor_anchor(&s);
+            s.zoom = level;
             s.view.zoom_to(level, anchor);
             Some(())
         }
