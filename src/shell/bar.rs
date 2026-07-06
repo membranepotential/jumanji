@@ -62,13 +62,19 @@ impl Bar {
         self.status_left.set_text(name);
     }
 
-    /// Right-hand status: scroll percent plus any pending count/key indicator.
-    pub fn set_status_right(&self, percent: u32, pending: &str) {
-        let text = if pending.is_empty() {
-            format!("{percent}%")
-        } else {
-            format!("{pending}   {percent}%")
-        };
+    /// Right-hand status: any pending count/key indicator, a zoom indicator when
+    /// either zoom axis is off 100% (e.g. `150%/120%T`), and the scroll percent.
+    pub fn set_status_right(&self, percent: u32, pending: &str, zoom: &str) {
+        let mut text = String::new();
+        if !pending.is_empty() {
+            text.push_str(pending);
+            text.push_str("   ");
+        }
+        if !zoom.is_empty() {
+            text.push_str(zoom);
+            text.push_str("   ");
+        }
+        text.push_str(&format!("{percent}%"));
         self.status_right.set_text(&text);
     }
 

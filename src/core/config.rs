@@ -13,17 +13,49 @@ use serde::Deserialize;
 use super::keymap::{Key, KeyPress, KeySequence, Keymap};
 use super::{Action, Direction, Mode};
 
+/// Which system clipboard a text selection is copied to, zathura-style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectionClipboard {
+    /// The X11 PRIMARY selection (middle-click paste). Zathura's default.
+    #[default]
+    Primary,
+    /// The CLIPBOARD selection (Ctrl-V paste).
+    Clipboard,
+}
+
+impl SelectionClipboard {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "primary" => Ok(Self::Primary),
+            "clipboard" => Ok(Self::Clipboard),
+            other => Err(format!(
+                "expected \"primary\" or \"clipboard\", got {other:?}"
+            )),
+        }
+    }
+}
+
 /// Typed rendering/interaction options with zathura-style defaults.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Options {
     /// Pixels scrolled per `j`/`k`/`h`/`l` (before count multiplication).
     pub scroll_step_px: u32,
-    /// Multiplicative zoom step per `+`/`-`.
+    /// Geometric zoom step (added to the webkit `zoom_level` per step).
     pub zoom_step: f64,
+    /// Text zoom step: fraction of the base font size added per step.
+    pub text_zoom_step: f64,
     /// Rendered content column width, in pixels.
     pub page_width_px: u32,
     /// Whether dark-mode recoloring is on at startup.
     pub default_recolor: bool,
+    /// Body/prose font family (empty = the stylesheet's default serif stack).
+    pub font_body: String,
+    /// Monospace/code font family (empty = the stylesheet's default stack).
+    pub font_mono: String,
+    /// Base body font size in pixels; also the text-zoom 100% reference.
+    pub font_size_px: u32,
+    /// Which clipboard a selection is copied to on select.
+    pub selection_clipboard: SelectionClipboard,
 }
 
 impl Default for Options {
@@ -31,8 +63,13 @@ impl Default for Options {
         Self {
             scroll_step_px: 60,
             zoom_step: 0.1,
+            text_zoom_step: 0.1,
             page_width_px: 720,
             default_recolor: false,
+            font_body: String::new(),
+            font_mono: String::new(),
+            font_size_px: 18,
+            selection_clipboard: SelectionClipboard::Primary,
         }
     }
 }
@@ -56,6 +93,8 @@ pub enum ConfigError {
         key: String,
         message: String,
     },
+    #[error("option `{key}`: {message}")]
+    OptionValue { key: &'static str, message: String },
 }
 
 impl Config {
@@ -78,11 +117,25 @@ impl Config {
         let raw: RawConfig = toml::from_str(text)?;
 
         let defaults = Options::default();
+        let selection_clipboard = match raw.selection_clipboard {
+            Some(s) => {
+                SelectionClipboard::parse(&s).map_err(|message| ConfigError::OptionValue {
+                    key: "selection-clipboard",
+                    message,
+                })?
+            }
+            None => defaults.selection_clipboard,
+        };
         let options = Options {
             scroll_step_px: raw.scroll_step.unwrap_or(defaults.scroll_step_px),
             zoom_step: raw.zoom_step.unwrap_or(defaults.zoom_step),
+            text_zoom_step: raw.text_zoom_step.unwrap_or(defaults.text_zoom_step),
             page_width_px: raw.page_width.unwrap_or(defaults.page_width_px),
             default_recolor: raw.default_recolor.unwrap_or(defaults.default_recolor),
+            font_body: raw.font_body.unwrap_or(defaults.font_body),
+            font_mono: raw.font_mono.unwrap_or(defaults.font_mono),
+            font_size_px: raw.font_size.unwrap_or(defaults.font_size_px),
+            selection_clipboard,
         };
 
         let mut keymap = Keymap::default();
@@ -235,6 +288,8 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
         "goto bottom" => GotoBottom,
         "zoom in" => ZoomIn,
         "zoom out" => ZoomOut,
+        "text zoom in" => TextZoomIn,
+        "text zoom out" => TextZoomOut,
         "zoom reset" => ZoomReset,
         "search" | "search start" => SearchStart,
         "search next" => SearchNext,
@@ -255,10 +310,20 @@ struct RawConfig {
     scroll_step: Option<u32>,
     #[serde(rename = "zoom-step")]
     zoom_step: Option<f64>,
+    #[serde(rename = "text-zoom-step")]
+    text_zoom_step: Option<f64>,
     #[serde(rename = "page-width")]
     page_width: Option<u32>,
     #[serde(rename = "default-recolor")]
     default_recolor: Option<bool>,
+    #[serde(rename = "font-body")]
+    font_body: Option<String>,
+    #[serde(rename = "font-mono")]
+    font_mono: Option<String>,
+    #[serde(rename = "font-size")]
+    font_size: Option<u32>,
+    #[serde(rename = "selection-clipboard")]
+    selection_clipboard: Option<String>,
     keys: Option<RawKeys>,
 }
 
@@ -401,6 +466,84 @@ mod tests {
     fn action_parsing_is_lenient() {
         assert_eq!(parse_action("Section  Next").unwrap(), Action::SectionNext);
         assert_eq!(parse_action("goto top").unwrap(), Action::GotoTop);
+    }
+
+    #[test]
+    fn zoom_actions_cover_both_axes() {
+        assert_eq!(parse_action("zoom in").unwrap(), Action::ZoomIn);
+        assert_eq!(parse_action("zoom out").unwrap(), Action::ZoomOut);
+        assert_eq!(parse_action("text zoom in").unwrap(), Action::TextZoomIn);
+        assert_eq!(parse_action("text zoom out").unwrap(), Action::TextZoomOut);
+        assert_eq!(parse_action("zoom reset").unwrap(), Action::ZoomReset);
+    }
+
+    #[test]
+    fn plus_minus_default_to_text_zoom() {
+        let km = Keymap::default();
+        let mut m = Matcher::new(Mode::Normal);
+        assert_eq!(
+            m.feed(KeyPress::char('+'), &km),
+            MatchResult::Matched {
+                action: Action::TextZoomIn,
+                count: None
+            }
+        );
+        assert_eq!(
+            m.feed(KeyPress::char('-'), &km),
+            MatchResult::Matched {
+                action: Action::TextZoomOut,
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn font_and_zoom_options_parse() {
+        let c = Config::parse(
+            r#"
+            font-body = "Inter"
+            font-mono = "Fira Code"
+            font-size = 20
+            text-zoom-step = 0.2
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.options.font_body, "Inter");
+        assert_eq!(c.options.font_mono, "Fira Code");
+        assert_eq!(c.options.font_size_px, 20);
+        assert_eq!(c.options.text_zoom_step, 0.2);
+        // Untouched fields keep their defaults.
+        assert_eq!(c.options.font_size_px, 20);
+    }
+
+    #[test]
+    fn selection_clipboard_parses_and_defaults() {
+        assert_eq!(
+            Config::parse("").unwrap().options.selection_clipboard,
+            SelectionClipboard::Primary
+        );
+        assert_eq!(
+            Config::parse("selection-clipboard = \"clipboard\"")
+                .unwrap()
+                .options
+                .selection_clipboard,
+            SelectionClipboard::Clipboard
+        );
+        assert_eq!(
+            Config::parse("selection-clipboard = \"PRIMARY\"")
+                .unwrap()
+                .options
+                .selection_clipboard,
+            SelectionClipboard::Primary
+        );
+    }
+
+    #[test]
+    fn bad_selection_clipboard_errors() {
+        let err = Config::parse("selection-clipboard = \"middle\"").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("selection-clipboard"), "{msg}");
+        assert!(msg.contains("middle"), "{msg}");
     }
 
     #[test]

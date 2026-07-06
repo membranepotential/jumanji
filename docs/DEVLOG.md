@@ -2,6 +2,60 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — Feature batch: two-axis zoom, copy-on-select, fonts, dark hardening
+
+Five-feature batch. **54 core + 10 e2e = 64 tests, clippy `-D warnings` clean,
+fmt clean.** Manually smoke-tested under Xvfb (copy-on-select, Ctrl+wheel and
+Ctrl+Shift+wheel zoom, dark-first-paint).
+
+- **Diagram-zoom diagnosis (done first, empirically).** Question: does webkit
+  `zoom_level` scale mermaid SVGs? merman emits `<svg width="100%"
+  style="max-width:<intrinsic>px" viewBox=…>`. Measured a diagram's
+  `getBoundingClientRect` in a real WebView at zoom 1.0 vs 2.0 against the actual
+  stylesheet: the svg's **layout** px stays constant (111.9) across zoom while
+  the CSS viewport halves — i.e. it occupies 35 % → 70 % of the viewport from
+  1.0× → 2.0×. **Conclusion: geometric zoom already scales diagrams correctly**,
+  because `zoom-text-only` defaults off (full-page zoom scales the px unit
+  itself, inline `max-width:<px>` included). No CSS fix needed — and a
+  `max-width:100% !important` override was tested and *rejected* (it stretches
+  small diagrams to fill and breaks proportional scaling).
+- **Two-axis zoom.** `Action` split: `ZoomIn`/`ZoomOut` = geometric (webkit
+  `zoom_level`), new `TextZoomIn`/`TextZoomOut` = the `--font-size` CSS var on
+  `<html>` (reflow, no geometry change, clamped 8 px…3× base), `ZoomReset` resets
+  both. Defaults: `+`/`-` → text zoom, `=` → reset both; geometric has no default
+  key (config `zoom in`/`zoom out` — zathura spelling — and `Ctrl`+wheel).
+  `Ctrl`+wheel = geometric, `Ctrl`+`Shift`+wheel = text; plain wheel scrolls
+  untouched. Statusbar shows `150%/120%T` when either axis ≠ 100 %. `GetState`
+  gains `text_zoom`.
+- **Copy-on-select (zathura parity).** `WebView` now built with a
+  `UserContentManager`; an injected user-script posts the debounced (~200 ms),
+  non-empty selection to a `selection` message handler; Rust writes it to the
+  primary or clipboard selection per new `selection-clipboard` option (default
+  `primary`). Empty selections post nothing.
+- **Font config.** New `font-body`/`font-mono`/`font-size` options thread into
+  the pipeline and emit CSS-escaped, quoted `--font-*` overrides in the generated
+  `:root{…}` block (the stylesheet already consumed these vars). `font-size` is
+  the text-zoom base.
+- **Reload/dark hardening (flicker follow-up).** `View` tracks desired dark state
+  internally; `load_document` pre-applies `class="dark"` on `<html>` so reloads
+  and `default-recolor = true` starts paint dark from the first frame, and the
+  WebView's native background color switches with the theme (white / `#1a1a1a`)
+  so unpainted regions never flash.
+
+**Deviation from brief:** the Ctrl+wheel controller is attached to the
+**toplevel window** (capture phase), not the WebView. A capture-phase controller
+on the WebView never receives the scroll events (verified: 0 events on the
+webview, fires on the window) — the window+capture placement is the same
+architectural guarantee the key controller already relies on (DESIGN D4).
+
+Copy-on-select is not e2e'd (a real selection drag under Xvfb is flaky); the
+clipboard-target parsing is unit-tested and the write path is a thin
+`Clipboard::set_text`. Wheel zoom is likewise verified manually, not in the
+suite (`xdotool click 4/5` only delivers scroll pointer-based, never via
+`--window`).
+
+**Next:** M2 — TOC mode, `:` commands, link hints.
+
 ## 2026-07-06 — Flicker root-caused: self-sustaining reload loop
 
 User-reported "flicker after scrolling" reproduced headlessly (Xvfb + 30 fps

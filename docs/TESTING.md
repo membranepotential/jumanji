@@ -50,9 +50,12 @@ state):
 | `count_multiplies_scroll` | `5j` scrolls ~5× a single `j` (delta comparison) |
 | `g_jumps_to_bottom_and_top` | `G` → 100 %, `gg` → top |
 | `ctrl_r_toggles_dark` | `Ctrl-r` toggles dark mode on/off |
-| `zoom_in_and_reset` | `+` raises zoom, `=` resets to 1.0 |
+| `geometric_zoom_in_and_reset` | `zoom in` (D-Bus) raises geometric `zoom`, `zoom reset` clears it |
+| `text_zoom_changes_and_reset_clears_both_axes` | `+` raises `text_zoom`; `=` resets *both* `zoom` and `text_zoom` to 100 % |
 | `section_next_and_previous` | `J` next section, `K` previous |
 | `execute_action_scrolls_without_keys` | `ExecuteAction("scroll down", 3)` — pure D-Bus, no key injection |
+| `external_reads_do_not_storm_reload` | scroll, `fs::read` the file ×5, wait 1.5 s → scroll unchanged (reload-loop regression) |
+| `live_reload_grows_toc_and_preserves_dark` | append a heading to a temp-dir copy → TOC grows and dark mode survives the reload |
 
 ## The D-Bus interface is the automation / editor-sync surface
 
@@ -67,7 +70,8 @@ feature (DESIGN.md D7). Each running reader owns
 with two methods:
 
 - `GetState() -> (s)` — a JSON snapshot: `file`, `scroll_y`, `scroll_percent`,
-  `dark`, `zoom`, `mode`, `section`, `toc_len`, `loaded`. Scroll figures are
+  `dark`, `zoom` (geometric), `text_zoom`, `mode`, `section`, `toc_len`,
+  `loaded`. Scroll figures are
   queried live from the webview (async JS); the reply is completed from the JS
   callback, so the main loop never blocks.
 - `ExecuteAction(s action, u count)` — parses an action string with the config

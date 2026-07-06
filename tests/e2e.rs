@@ -88,6 +88,7 @@ struct State {
     scroll_percent: u32,
     dark: bool,
     zoom: f64,
+    text_zoom: f64,
     #[allow(dead_code)]
     mode: String,
     section: usize,
@@ -105,6 +106,7 @@ impl State {
             scroll_percent: field(json, "scroll_percent")?.parse().ok()?,
             dark: field(json, "dark")? == "true",
             zoom: field(json, "zoom")?.parse().ok()?,
+            text_zoom: field(json, "text_zoom")?.parse().ok()?,
             mode: field_str(json, "mode")?,
             section: field(json, "section")?.parse().ok()?,
             toc_len: field(json, "toc_len")?.parse().ok()?,
@@ -140,6 +142,8 @@ struct Harness {
     conn: gio::DBusConnection,
     dest: String,
     window_id: String,
+    /// The document the reader was launched on (used by reload tests).
+    file: PathBuf,
     app: Child,
     dbus: Child,
     xvfb: Child,
@@ -149,6 +153,14 @@ impl Harness {
     /// Bring up Xvfb, a private session bus, and the reader on `demo/demo.md`;
     /// block until the initial load has finished and the window is focusable.
     fn launch() -> Self {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let demo = Path::new(manifest).join("demo").join("demo.md");
+        Self::launch_file(demo)
+    }
+
+    /// As [`launch`](Self::launch), but against an arbitrary document — used by
+    /// the live-reload test, which mutates a throwaway copy.
+    fn launch_file(file: PathBuf) -> Self {
         let display = next_display();
         let display_arg = format!(":{display}");
 
@@ -166,10 +178,8 @@ impl Harness {
 
         let (dbus, dbus_addr) = spawn_private_bus();
 
-        let manifest = env!("CARGO_MANIFEST_DIR");
-        let demo = Path::new(manifest).join("demo").join("demo.md");
         let app = Command::new(env!("CARGO_BIN_EXE_jumanji"))
-            .arg(&demo)
+            .arg(&file)
             .env("DISPLAY", &display_arg)
             .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
             .stdout(Stdio::null())
@@ -193,6 +203,7 @@ impl Harness {
             conn,
             dest,
             window_id: String::new(),
+            file,
             app,
             dbus,
             xvfb,
@@ -355,11 +366,27 @@ fn setup() -> Option<(std::sync::MutexGuard<'static, ()>, Harness)> {
     Some((guard, Harness::launch()))
 }
 
+/// As [`setup`], but launches the reader against `file` (a caller-owned copy the
+/// test may mutate to exercise live reload).
+fn setup_file(file: PathBuf) -> Option<(std::sync::MutexGuard<'static, ()>, Harness)> {
+    let guard = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if should_skip() {
+        return None;
+    }
+    Some((guard, Harness::launch_file(file)))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 const SETTLE: Duration = Duration::from_secs(5);
+
+// Note: copy-on-select is intentionally *not* covered here. Exercising it needs a
+// real selection drag (mouse press-move-release across glyphs under Xvfb), which
+// is inherently flaky and slow. The clipboard *target* selection (primary vs
+// clipboard) is unit-tested in `core::config` (`selection_clipboard_parses_*`);
+// the JS→Rust write path is a thin `Clipboard::set_text` call in `shell::view`.
 
 #[test]
 fn j_and_k_scroll() {
@@ -425,15 +452,19 @@ fn ctrl_r_toggles_dark() {
 }
 
 #[test]
-fn zoom_in_and_reset() {
+fn geometric_zoom_in_and_reset() {
+    // Geometric zoom has no default key (it's Ctrl+wheel, awkward to inject), so
+    // drive it via the D-Bus `zoom in` action; `zoom reset` clears it.
     let Some((_g, h)) = setup() else { return };
     assert_eq!(h.get_state().zoom, 1.0, "starts at 1.0");
 
-    h.key(&["plus"]);
-    h.wait_for_state("+ raises zoom", SETTLE, |s| s.zoom > 1.0);
+    h.execute_action("zoom in", 1);
+    h.wait_for_state("zoom in raises geometric zoom", SETTLE, |s| s.zoom > 1.0);
 
-    h.key(&["equal"]);
-    h.wait_for_state("= resets zoom", SETTLE, |s| (s.zoom - 1.0).abs() < 1e-9);
+    h.execute_action("zoom reset", 1);
+    h.wait_for_state("zoom reset clears zoom", SETTLE, |s| {
+        (s.zoom - 1.0).abs() < 1e-9
+    });
 }
 
 #[test]
@@ -458,4 +489,101 @@ fn execute_action_scrolls_without_keys() {
     // Pure D-Bus path — no key injection, no window focus needed.
     h.execute_action("scroll down", 3);
     h.wait_for_state("ExecuteAction scrolls", SETTLE, |s| s.scroll_y > 0.0);
+}
+
+#[test]
+fn text_zoom_changes_and_reset_clears_both_axes() {
+    let Some((_g, h)) = setup() else { return };
+    let start = h.get_state();
+    assert!(
+        (start.text_zoom - 1.0).abs() < 1e-9,
+        "text zoom starts at 1.0"
+    );
+    assert!(
+        (start.zoom - 1.0).abs() < 1e-9,
+        "geometric zoom starts at 1.0"
+    );
+
+    // `+` is the text-zoom action by default (geometric zoom is Ctrl+wheel only).
+    h.key(&["plus"]);
+    h.wait_for_state("+ raises text zoom", SETTLE, |s| s.text_zoom > 1.0);
+
+    // Also push geometric zoom via the pure D-Bus path, then assert `=` resets
+    // *both* axes to 100%.
+    h.execute_action("zoom in", 2);
+    h.wait_for_state("zoom in raises geometric zoom", SETTLE, |s| s.zoom > 1.0);
+
+    h.key(&["equal"]);
+    h.wait_for_state("= resets both axes", SETTLE, |s| {
+        (s.zoom - 1.0).abs() < 1e-9 && (s.text_zoom - 1.0).abs() < 1e-9
+    });
+}
+
+#[test]
+fn external_reads_do_not_storm_reload() {
+    // Regression for the self-sustaining reload loop: an *external read* of the
+    // document must not trigger a reload (a storm would reset scroll to the top).
+    let Some((_g, h)) = setup() else { return };
+
+    h.execute_action("scroll down", 5);
+    let scrolled = h
+        .wait_for_state("scrolled down", SETTLE, |s| s.scroll_y > 0.0)
+        .scroll_y;
+
+    // Read the file several times, exactly as the buggy reload handler did.
+    for _ in 0..5 {
+        let _ = std::fs::read(&h.file).expect("read demo file");
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let after = h.get_state();
+    assert!(after.loaded, "still loaded after external reads");
+    assert!(
+        (after.scroll_y - scrolled).abs() < 1.0,
+        "scroll must be unchanged by external reads (a reload storm would reset it): \
+         was {scrolled}, now {}",
+        after.scroll_y
+    );
+}
+
+#[test]
+fn live_reload_grows_toc_and_preserves_dark() {
+    // Launch against a throwaway copy so we can mutate it. A genuine content
+    // change (appending a heading) must reload — observed as the TOC growing —
+    // and dark mode must survive the reload (no light flash, stays dark).
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest).join("demo").join("demo.md");
+    let dir = std::env::temp_dir().join(format!("jumanji-e2e-reload-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let copy = dir.join("live.md");
+    std::fs::copy(&src, &copy).expect("copy demo");
+
+    let Some((_g, h)) = setup_file(copy.clone()) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+
+    let start = h.get_state();
+    let toc0 = start.toc_len;
+
+    // Turn on dark mode, then append a new heading to trigger a real reload.
+    h.execute_action("recolor", 1);
+    h.wait_for_state("dark enabled", SETTLE, |s| s.dark);
+
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&copy)
+            .expect("open copy for append");
+        writeln!(f, "\n\n## Appended Section For Reload\n\nBody text.\n").expect("append");
+    }
+
+    let reloaded = h.wait_for_state("reload grows the TOC", Duration::from_secs(10), |s| {
+        s.toc_len > toc0
+    });
+    assert!(reloaded.dark, "dark mode must persist across a live reload");
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
 }

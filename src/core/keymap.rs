@@ -152,8 +152,11 @@ impl Default for Keymap {
         );
         // `G` alone → GotoBottom; the matcher rewrites `<count>G` → GotoSection.
         km.bind(n, c('G'), GotoBottom);
-        km.bind(n, c('+'), ZoomIn);
-        km.bind(n, c('-'), ZoomOut);
+        // `+`/`-` drive *text* zoom (reflow prose); geometric zoom has no default
+        // key (reachable via config `zoom in`/`zoom out` and Ctrl+wheel). `=`
+        // resets both axes.
+        km.bind(n, c('+'), TextZoomIn);
+        km.bind(n, c('-'), TextZoomOut);
         km.bind(n, c('='), ZoomReset);
         km.bind(n, c('/'), SearchStart);
         km.bind(n, c('n'), SearchNext);

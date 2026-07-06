@@ -26,12 +26,65 @@ const CSP: &str = "default-src 'none'; img-src file: data:; style-src 'unsafe-in
 pub struct Options {
     /// Content column width in pixels (the centred reading measure).
     pub page_width_px: u32,
+    /// Body/prose font family; empty means keep the stylesheet default stack.
+    pub font_body: String,
+    /// Monospace/code font family; empty means keep the stylesheet default.
+    pub font_mono: String,
+    /// Base body font size in pixels (the text-zoom 100% reference).
+    pub font_size_px: u32,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { page_width_px: 720 }
+        Self {
+            page_width_px: 720,
+            font_body: String::new(),
+            font_mono: String::new(),
+            font_size_px: 18,
+        }
     }
+}
+
+/// Emit the `:root` custom-property overrides the stylesheet consumes:
+/// `--content-width`, `--font-size`, and — only when the user set them —
+/// `--font-body`/`--font-mono`. Font names are CSS-escaped and quoted.
+fn root_vars_css(opts: &Options) -> String {
+    let mut vars = format!(
+        "--content-width:{}px;--font-size:{}px;",
+        opts.page_width_px, opts.font_size_px
+    );
+    if !opts.font_body.trim().is_empty() {
+        vars.push_str(&format!(
+            "--font-body:{};",
+            css_font_family(&opts.font_body)
+        ));
+    }
+    if !opts.font_mono.trim().is_empty() {
+        vars.push_str(&format!(
+            "--font-mono:{};",
+            css_font_family(&opts.font_mono)
+        ));
+    }
+    format!(":root{{{vars}}}")
+}
+
+/// Render a user-supplied font family as a safe, quoted CSS string token.
+/// A CSS string literal cannot contain a raw newline or its own quote unescaped;
+/// we wrap in double quotes and backslash-escape `"` and `\`, dropping control
+/// characters. This keeps a stray value from breaking out of the `<style>` rule.
+fn css_font_family(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('"');
+    for c in name.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Render a markdown document to a complete HTML page (embedded CSS, inline
@@ -119,7 +172,7 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options) -> String {
          <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\n\
          <title>{title}</title>\n\
          <style>{base}</style>\n\
-         <style>:root{{--content-width:{width}px;}}</style>\n\
+         <style>{root_vars}</style>\n\
          <style>{light}</style>\n\
          <style>{dark}</style>\n\
          </head>\n\
@@ -132,7 +185,7 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options) -> String {
         csp = CSP,
         title = title,
         base = BASE_CSS,
-        width = opts.page_width_px,
+        root_vars = root_vars_css(opts),
         light = highlight::light_css(),
         dark = highlight::dark_css(),
         body = body,
@@ -159,8 +212,57 @@ mod tests {
 
     #[test]
     fn content_width_comes_from_options() {
-        let html = render("# x\n", &Options { page_width_px: 999 }).html;
+        let html = render(
+            "# x\n",
+            &Options {
+                page_width_px: 999,
+                ..Options::default()
+            },
+        )
+        .html;
         assert!(html.contains("--content-width:999px"));
+    }
+
+    #[test]
+    fn font_size_var_always_emitted_as_base() {
+        let html = render(
+            "# x\n",
+            &Options {
+                font_size_px: 21,
+                ..Options::default()
+            },
+        )
+        .html;
+        assert!(html.contains("--font-size:21px"));
+    }
+
+    #[test]
+    fn font_families_emitted_only_when_set_and_are_quoted() {
+        // Default (empty) => no font-family override assignments (the base CSS
+        // still *references* `var(--font-body, …)`, so match the `:` set form).
+        let plain = render_str("# x\n");
+        assert!(!plain.contains("--font-body:"));
+        assert!(!plain.contains("--font-mono:"));
+
+        let html = render(
+            "# x\n",
+            &Options {
+                font_body: "Source Serif 4".to_string(),
+                font_mono: "JetBrains Mono".to_string(),
+                ..Options::default()
+            },
+        )
+        .html;
+        assert!(html.contains("--font-body:\"Source Serif 4\""));
+        assert!(html.contains("--font-mono:\"JetBrains Mono\""));
+    }
+
+    #[test]
+    fn font_family_is_css_escaped() {
+        // A quote in the value must not break out of the CSS string / style rule.
+        let escaped = css_font_family("Ev\"il</style>");
+        assert_eq!(escaped, "\"Ev\\\"il</style>\"");
+        assert!(!escaped.contains("\"Ev\"il"));
     }
 
     #[test]

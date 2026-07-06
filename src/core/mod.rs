@@ -53,8 +53,17 @@ pub enum Action {
     GotoSection(u32),
     SectionNext,
     SectionPrevious,
+    /// Geometric zoom in (webkit `zoom_level`): scales the whole page,
+    /// diagrams included. Zathura's `zoom in` maps here for muscle memory.
     ZoomIn,
+    /// Geometric zoom out.
     ZoomOut,
+    /// Text zoom in (`--font-size` CSS variable): reflows text without
+    /// touching layout geometry or diagram sizing.
+    TextZoomIn,
+    /// Text zoom out.
+    TextZoomOut,
+    /// Reset *both* zoom axes to 100%.
     ZoomReset,
     SearchStart,
     SearchNext,

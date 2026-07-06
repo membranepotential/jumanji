@@ -11,8 +11,8 @@ use gtk::glib;
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{
-    Application, ApplicationWindow, Box as GtkBox, EventControllerKey, Orientation,
-    PropagationPhase,
+    Application, ApplicationWindow, Box as GtkBox, EventControllerKey, EventControllerScroll,
+    EventControllerScrollFlags, Orientation, PropagationPhase,
 };
 use webkit6::LoadEvent;
 use webkit6::prelude::*;
@@ -34,7 +34,14 @@ struct Shell {
     file: PathBuf,
     render_opts: RenderOptions,
     scroll_step: i64,
+    /// Geometric zoom step (added to the webkit `zoom_level` per step).
     zoom_step: f64,
+    /// Text-zoom step: fraction of the base font size added per step.
+    text_zoom_step: f64,
+    /// Base body font size in px (text-zoom 100% reference; from config).
+    font_base_px: f64,
+    /// Current text-zoom factor (1.0 = 100%); geometric zoom lives in the webview.
+    text_zoom: f64,
     matcher: Matcher,
     view: View,
     bar: Bar,
@@ -74,7 +81,7 @@ fn build_ui(
     options: crate::core::config::Options,
     keymap: Rc<Keymap>,
 ) {
-    let view = View::new();
+    let view = View::new(options.selection_clipboard);
     let bar = Bar::new();
 
     let layout = GtkBox::new(Orientation::Vertical, 0);
@@ -99,9 +106,15 @@ fn build_ui(
         file,
         render_opts: RenderOptions {
             page_width_px: options.page_width_px,
+            font_body: options.font_body.clone(),
+            font_mono: options.font_mono.clone(),
+            font_size_px: options.font_size_px,
         },
         scroll_step: options.scroll_step_px as i64,
         zoom_step: options.zoom_step,
+        text_zoom_step: options.text_zoom_step,
+        font_base_px: options.font_size_px as f64,
+        text_zoom: 1.0,
         matcher: Matcher::new(Mode::Normal),
         view: view.clone(),
         bar: bar.clone(),
@@ -117,6 +130,7 @@ fn build_ui(
 
     connect_load_finished(&shell);
     connect_keys(&shell, keymap);
+    connect_scroll(&shell);
     connect_search_entry(&shell);
     start_watch(&shell);
     serve_dbus(&shell);
@@ -151,6 +165,10 @@ fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
             let doc = pipeline::render(&md, &s.render_opts);
             s.toc = doc.toc.clone();
             s.section = 0;
+            // Record the desired recolor state before loading so `load_document`
+            // pre-applies the `dark` class and paints dark from the first frame.
+            let dark = s.dark;
+            s.view.set_dark(dark);
             s.view.load_document(&doc, &path);
         }
         Err(err) => {
@@ -172,6 +190,10 @@ fn connect_load_finished(shell: &Rc<RefCell<Shell>>) {
         {
             let s = shell.borrow();
             s.view.set_dark(s.dark);
+            // Re-apply text zoom: the inline `--font-size` is lost on reload.
+            if s.text_zoom != 1.0 {
+                s.view.set_text_zoom_px(s.font_base_px * s.text_zoom);
+            }
             if let Some(y) = s.pending_restore {
                 s.view.restore_scroll(y);
             }
@@ -217,6 +239,36 @@ fn connect_keys(shell: &Rc<RefCell<Shell>>, keymap: Rc<Keymap>) {
         };
         refresh_status(&shell);
         propagation
+    });
+
+    window.add_controller(controller);
+}
+
+/// Bind Ctrl+wheel → geometric zoom and Ctrl+Shift+wheel → text zoom on the
+/// webview (capture phase, so we intercept before WebKit's own scroll handling).
+/// A plain wheel with no Ctrl is passed through untouched, so normal scrolling
+/// still works. Wheel-up (`dy < 0`) zooms in, wheel-down zooms out.
+fn connect_scroll(shell: &Rc<RefCell<Shell>>) {
+    let controller = EventControllerScroll::new(EventControllerScrollFlags::BOTH_AXES);
+    controller.set_propagation_phase(PropagationPhase::Capture);
+    let window = shell.borrow().window.clone();
+
+    let shell = shell.clone();
+    controller.connect_scroll(move |ctrl, _dx, dy| {
+        let mods = ctrl.current_event_state();
+        if !mods.contains(ModifierType::CONTROL_MASK) || dy == 0.0 {
+            return glib::Propagation::Proceed;
+        }
+        let text = mods.contains(ModifierType::SHIFT_MASK);
+        let action = match (text, dy < 0.0) {
+            (false, true) => Action::ZoomIn,
+            (false, false) => Action::ZoomOut,
+            (true, true) => Action::TextZoomIn,
+            (true, false) => Action::TextZoomOut,
+        };
+        execute(&shell, action, 1);
+        refresh_status(&shell);
+        glib::Propagation::Stop
     });
 
     window.add_controller(controller);
@@ -273,20 +325,23 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
             // Snapshot the synchronous state under a short borrow, then query
             // the live scroll offset async and complete the reply in its
             // callback — never blocking the main loop.
-            let (view, file, dark, zoom, section, toc_len, loaded) = {
+            let (view, file, dark, zoom, text_zoom, section, toc_len, loaded) = {
                 let s = shell.borrow();
                 (
                     s.view.clone(),
                     s.file.to_string_lossy().into_owned(),
                     s.dark,
                     s.view.zoom_level(),
+                    s.text_zoom,
                     s.section,
                     s.toc.len(),
                     s.loaded,
                 )
             };
             view.scroll_state(move |y, pct| {
-                let json = state_json(&file, y, pct, dark, zoom, section, toc_len, loaded);
+                let json = state_json(
+                    &file, y, pct, dark, zoom, text_zoom, section, toc_len, loaded,
+                );
                 invocation.return_value(Some(&(json,).to_variant()));
             });
         }) as dbus::GetState
@@ -319,14 +374,15 @@ fn state_json(
     scroll_percent: u32,
     dark: bool,
     zoom: f64,
+    text_zoom: f64,
     section: usize,
     toc_len: usize,
     loaded: bool,
 ) -> String {
     format!(
         "{{\"file\":{file},\"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
-         \"dark\":{dark},\"zoom\":{zoom},\"mode\":\"normal\",\"section\":{section},\
-         \"toc_len\":{toc_len},\"loaded\":{loaded}}}",
+         \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":\"normal\",\
+         \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded}}}",
         file = json_string(file),
     )
 }
@@ -348,6 +404,25 @@ fn json_string(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// Clamp the text-zoom factor to a sane range: no smaller than 8 px, no larger
+/// than 3× the base font size.
+fn clamp_text_zoom(factor: f64, base_px: f64) -> f64 {
+    let min = if base_px > 0.0 { 8.0 / base_px } else { 0.5 };
+    factor.clamp(min, 3.0)
+}
+
+/// The right-hand zoom indicator: `{geometric}%/{text}%T` (e.g. `150%/120%T`)
+/// when *either* axis differs from 100%, empty when both are exactly 100%.
+fn zoom_indicator(geometric: f64, text: f64) -> String {
+    let g = (geometric * 100.0).round() as i64;
+    let t = (text * 100.0).round() as i64;
+    if g == 100 && t == 100 {
+        String::new()
+    } else {
+        format!("{g}%/{t}%T")
+    }
 }
 
 /// Execute one [`Action`], `count` times where meaningful.
@@ -407,7 +482,26 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             let level = s.view.zoom_level() - s.zoom_step * count as f64;
             s.view.set_zoom(level);
         }
-        Action::ZoomReset => s.view.set_zoom(1.0),
+        Action::TextZoomIn => {
+            s.text_zoom = clamp_text_zoom(
+                s.text_zoom + s.text_zoom_step * count as f64,
+                s.font_base_px,
+            );
+            s.view.set_text_zoom_px(s.font_base_px * s.text_zoom);
+        }
+        Action::TextZoomOut => {
+            s.text_zoom = clamp_text_zoom(
+                s.text_zoom - s.text_zoom_step * count as f64,
+                s.font_base_px,
+            );
+            s.view.set_text_zoom_px(s.font_base_px * s.text_zoom);
+        }
+        Action::ZoomReset => {
+            // Reset both axes to 100%.
+            s.view.set_zoom(1.0);
+            s.text_zoom = 1.0;
+            s.view.set_text_zoom_px(s.font_base_px);
+        }
         Action::SearchStart => {
             s.bar.open_input("/");
         }
@@ -437,11 +531,16 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
 
 /// Refresh the right-hand status: scroll percentage plus the pending-key echo.
 fn refresh_status(shell: &Rc<RefCell<Shell>>) {
-    let (view, bar, pending) = {
+    let (view, bar, pending, zoom) = {
         let s = shell.borrow();
-        (s.view.clone(), s.bar.clone(), s.matcher.pending_indicator())
+        (
+            s.view.clone(),
+            s.bar.clone(),
+            s.matcher.pending_indicator(),
+            zoom_indicator(s.view.zoom_level(), s.text_zoom),
+        )
     };
-    view.scroll_percent(move |pct| bar.set_status_right(pct, &pending));
+    view.scroll_percent(move |pct| bar.set_status_right(pct, &pending, &zoom));
 }
 
 /// Convert a GDK keyval + modifiers into the core [`KeyPress`] abstraction.

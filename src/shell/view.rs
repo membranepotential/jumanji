@@ -6,24 +6,47 @@
 //! JavaScript snippets. Content itself is rendered 100% in Rust (see
 //! `core::pipeline`); JS here only drives the viewport.
 
+use std::cell::Cell;
 use std::path::Path;
+use std::rc::Rc;
 
+use gtk::gdk::RGBA;
 use gtk::prelude::*;
 use webkit6::prelude::*;
-use webkit6::{FindController, FindOptions, WebView};
+use webkit6::{
+    FindController, FindOptions, UserContentInjectedFrames, UserContentManager, UserScript,
+    UserScriptInjectionTime, WebView,
+};
 
 use crate::core::RenderedDocument;
+use crate::core::config::SelectionClipboard;
+
+/// Native WebView background painted behind the document, matched to the theme
+/// so unpainted regions never flash a mismatched colour (light `#ffffff`,
+/// dark `#1a1a1a` — the same values `style.css` uses for `--bg`).
+const BG_LIGHT: RGBA = RGBA::WHITE;
+const BG_DARK: RGBA = RGBA::new(0.101, 0.101, 0.101, 1.0);
+
+/// The script-message handler name the selection user-script posts to.
+const SELECTION_HANDLER: &str = "selection";
 
 #[derive(Clone)]
 pub struct View {
     webview: WebView,
+    /// The desired recolor (dark) state, tracked so `load_document` can pre-apply
+    /// the `dark` class on `<html>` and paint dark from the very first frame.
+    dark: Rc<Cell<bool>>,
 }
 
 impl View {
-    pub fn new() -> Self {
-        let webview = WebView::new();
+    pub fn new(selection_clipboard: SelectionClipboard) -> Self {
+        let ucm = UserContentManager::new();
+        install_selection_copy(&ucm, selection_clipboard);
+
+        let webview = WebView::builder().user_content_manager(&ucm).build();
         webview.set_vexpand(true);
         webview.set_hexpand(true);
+        webview.set_background_color(&BG_LIGHT);
 
         if let Some(settings) = WebViewExt::settings(&webview) {
             // We drive the viewport with `window.*` JS, so JavaScript stays on,
@@ -40,7 +63,10 @@ impl View {
             settings.set_enable_smooth_scrolling(true);
         }
 
-        Self { webview }
+        Self {
+            webview,
+            dark: Rc::new(Cell::new(false)),
+        }
     }
 
     pub fn widget(&self) -> &WebView {
@@ -48,10 +74,19 @@ impl View {
     }
 
     /// Load a rendered document. `base` is the source file; its URI becomes the
-    /// base against which document-relative images resolve.
+    /// base against which document-relative images resolve. When dark mode is
+    /// desired the `dark` class is pre-applied to `<html>` so the very first
+    /// painted frame is already dark — no light flash on reloads or a
+    /// `default-recolor = true` start.
     pub fn load_document(&self, doc: &RenderedDocument, base: &Path) {
         let base_uri = gtk::gio::File::for_path(base).uri();
-        self.webview.load_html(&doc.html, Some(base_uri.as_str()));
+        let html = if self.dark.get() {
+            doc.html
+                .replacen("<html lang=\"en\">", "<html lang=\"en\" class=\"dark\">", 1)
+        } else {
+            doc.html.clone()
+        };
+        self.webview.load_html(&html, Some(base_uri.as_str()));
     }
 
     fn run_js(&self, script: &str) {
@@ -93,6 +128,8 @@ impl View {
         ));
     }
 
+    /// Geometric zoom: webkit full-page zoom (scales everything, diagrams
+    /// included, because `zoom-text-only` is off by default).
     pub fn set_zoom(&self, level: f64) {
         self.webview.set_zoom_level(level.max(0.2));
     }
@@ -101,8 +138,23 @@ impl View {
         self.webview.zoom_level()
     }
 
-    /// Toggle the `dark` class on `<html>`, matching the pipeline's recolor CSS.
+    /// Text zoom: set the effective body font size (px) via the `--font-size`
+    /// custom property on `<html>`, reflowing prose without touching layout
+    /// geometry or diagram sizing. Re-applied after each load (the inline style
+    /// is lost when the document reloads).
+    pub fn set_text_zoom_px(&self, px: f64) {
+        self.run_js(&format!(
+            "document.documentElement.style.setProperty('--font-size', '{px}px');"
+        ));
+    }
+
+    /// Record the desired recolor state and apply it: toggle the `dark` class on
+    /// `<html>` (matching the pipeline's recolor CSS) and switch the native
+    /// WebView background so unpainted regions match the theme.
     pub fn set_dark(&self, dark: bool) {
+        self.dark.set(dark);
+        self.webview
+            .set_background_color(if dark { &BG_DARK } else { &BG_LIGHT });
         self.run_js(&format!(
             "document.documentElement.classList.toggle('dark', {dark});"
         ));
@@ -199,6 +251,53 @@ impl View {
     pub fn restore_scroll(&self, y: f64) {
         self.run_js(&format!("window.scrollTo(0, {y});"));
     }
+}
+
+/// Wire zathura-style copy-on-select: a user-script listens for
+/// `selectionchange` (debounced ~200 ms) and posts the current non-empty
+/// selection string to a script-message handler; the Rust side writes it to the
+/// configured clipboard. An empty selection posts nothing, so we never clobber
+/// the clipboard with `""`.
+fn install_selection_copy(ucm: &UserContentManager, target: SelectionClipboard) {
+    // register_script_message_handler returns false if the name is already
+    // taken; on a fresh manager it always succeeds. The user-script only reaches
+    // `postMessage` after this registers the handler.
+    ucm.register_script_message_handler(SELECTION_HANDLER, None);
+
+    const SOURCE: &str = "(function () {\n\
+        let timer = null;\n\
+        document.addEventListener('selectionchange', function () {\n\
+          if (timer) clearTimeout(timer);\n\
+          timer = setTimeout(function () {\n\
+            const sel = window.getSelection ? window.getSelection().toString() : '';\n\
+            if (sel && sel.length > 0) {\n\
+              window.webkit.messageHandlers.selection.postMessage(sel);\n\
+            }\n\
+          }, 200);\n\
+        });\n\
+      })();";
+    let script = UserScript::new(
+        SOURCE,
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::Start,
+        &[],
+        &[],
+    );
+    ucm.add_script(&script);
+
+    ucm.connect_script_message_received(Some(SELECTION_HANDLER), move |_, value| {
+        let text = value.to_str();
+        if text.is_empty() {
+            return;
+        }
+        if let Some(display) = gtk::gdk::Display::default() {
+            let clipboard = match target {
+                SelectionClipboard::Primary => display.primary_clipboard(),
+                SelectionClipboard::Clipboard => display.clipboard(),
+            };
+            clipboard.set_text(&text);
+        }
+    });
 }
 
 /// Encode a string as a JS single-quoted string literal.

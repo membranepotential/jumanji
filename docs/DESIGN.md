@@ -112,6 +112,46 @@ Typed options + remappable keys, three concepts only (options, key maps, later
 `include`). serde + toml; XDG paths. Every default keybinding remappable;
 mode-scoped key tables (`[keys.normal]`, `[keys.toc]`).
 
+Options surface (all optional; defaults in parentheses):
+
+| Key | Type | Meaning |
+|---|---|---|
+| `scroll-step` | u32 (`60`) | pixels per `j`/`k`/`h`/`l` before count |
+| `zoom-step` | f64 (`0.1`) | geometric zoom increment per step |
+| `text-zoom-step` | f64 (`0.1`) | text zoom increment (fraction of base) per step |
+| `page-width` | u32 (`720`) | content column width, px |
+| `default-recolor` | bool (`false`) | start in dark mode |
+| `font-body` | string (`""`) | prose font family; empty = stylesheet default serif stack |
+| `font-mono` | string (`""`) | code font family; empty = stylesheet default mono stack |
+| `font-size` | u32 (`18`) | base body font px; also the text-zoom 100% reference |
+| `selection-clipboard` | `"primary"` \| `"clipboard"` (`primary`) | which clipboard copy-on-select writes to |
+
+Font names are CSS-escaped and quoted before emission into the generated
+`:root{…}` block (the stylesheet already consumes `--font-body`/`--font-mono`/
+`--font-size`). Copy-on-select is zathura parity: a `UserContentManager` script
+message handler + injected user-script post the current (debounced, non-empty)
+selection to Rust, which writes it to the configured GDK clipboard.
+
+### D5a: Two-axis zoom
+
+Zoom has two independent axes, both count-multiplied and reset together by `=`:
+
+- **Geometric** = webkit full-page `zoom_level` — scales *everything*, diagrams
+  included (verified: `zoom-text-only` is off by default, so the px unit itself
+  scales, and an inline `max-width:<px>` on a merman SVG scales with it). Bound
+  to `Ctrl`+wheel and reachable in config as `zoom in` / `zoom out` (the zathura
+  spelling, for muscle memory). No default *key* — geometric zoom is a
+  pointer/config affordance.
+- **Text** = the `--font-size` CSS variable on `<html>` — reflows prose without
+  touching layout geometry or diagram sizing; clamped to 8 px … 3× base. Bound
+  to `+`/`-` (config `text zoom in` / `text zoom out`) and `Ctrl`+`Shift`+wheel.
+
+The statusbar shows `{geometric}%/{text}%T` on the right whenever either axis is
+off 100%, and nothing when both are 100%. `GetState` exposes both as `zoom` and
+`text_zoom`. The wheel controller lives on the **toplevel window** in capture
+phase — the same architectural guarantee the key controller relies on (D4); a
+controller attached to the WebView never receives the scroll events.
+
 ### D6: Extensibility — pipeline seams, not a plugin ABI
 
 Zathura's C-ABI plugin system is overkill for one format. The extensibility
@@ -162,7 +202,10 @@ Adapted from zathura; "page" becomes "section" (heading-delimited).
 | `d`/`u` | half-page down/up | M1 |
 | `J`/`K` | next/previous section | M1 |
 | `gg`/`G`, `<N>G` | top / bottom / section N | M1 |
-| `+`/`-`/`=` | zoom in/out/reset (× count) | M1 |
+| `+`/`-` | **text** zoom in/out (× count) | M1 |
+| `=` | reset **both** zoom axes | M1 |
+| `Ctrl`+wheel | geometric zoom in/out | M1 |
+| `Ctrl`+`Shift`+wheel | text zoom in/out | M1 |
 | `/`,`?`, `n`/`N` | search fwd/back, next/prev match | M1 |
 | `Ctrl-r` | recolor (dark mode) | M1 |
 | `r` | reload | M1 |
