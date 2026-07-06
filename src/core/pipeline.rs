@@ -124,6 +124,14 @@ pub fn render(md: &str, opts: &Options) -> RenderedDocument {
     let has_math = math::transform_math(root);
     wrap_tables(&arena, root);
 
+    // Editor sync (DESIGN D7): the code-block-replacing passes above turn their
+    // nodes into raw `HtmlBlock`s, which comrak emits verbatim *without* the
+    // `data-sourcepos` attribute its `render.sourcepos` option adds to native
+    // blocks — yet the node still carries the original source position. Inject it
+    // so mermaid/fence/highlighted blocks stay addressable for forward/reverse
+    // search, uniform with comrak's own `data-sourcepos`.
+    annotate_html_block_lines(root);
+
     let toc = toc::extract(root);
 
     let mut body = String::new();
@@ -152,6 +160,12 @@ fn comrak_options<'a>() -> ComrakOptions<'a> {
     // GitHub-style alerts (`> [!NOTE]` …) → `<div class="markdown-alert
     // markdown-alert-note">…`. Styled in assets/style.css.
     o.extension.alerts = true;
+    // Editor sync (DESIGN D7): emit `data-sourcepos="startLine:col-endLine:col"`
+    // on every rendered element, so the shell can map a source line to the
+    // nearest element (forward) and a clicked element back to its source line
+    // (reverse). `core::pipeline::annotate_html_block_lines` extends this to the
+    // raw-HTML blocks the code-fence passes inject (which comrak does not tag).
+    o.render.sourcepos = true;
     // Empty prefix => ids are the bare GitHub-style slug. `toc::extract`
     // mirrors this to keep TOC anchors identical to the emitted ids.
     o.extension.header_id_prefix = Some(String::new());
@@ -173,16 +187,64 @@ fn wrap_tables<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>) {
     }
 }
 
-/// Allocate a raw-HTML block node holding `html`.
+/// Allocate a raw-HTML block node holding `html`. Line 0 marks it as synthetic
+/// (the table-wrap scroll containers): [`annotate_html_block_lines`] skips it, so
+/// a wrapper never inherits a bogus source line.
 fn html_block<'a>(arena: &'a Arena<'a>, html: &str) -> &'a AstNode<'a> {
     let ast = Ast::new(
         NodeValue::HtmlBlock(NodeHtmlBlock {
             block_type: 0,
             literal: html.to_string(),
         }),
-        LineColumn { line: 1, column: 1 },
+        LineColumn { line: 0, column: 0 },
     );
     arena.alloc(AstNode::new(RefCell::new(ast)))
+}
+
+/// AST pass (DESIGN D7): give every raw-`HtmlBlock` node that stands in for a
+/// real source block a `data-sourcepos` attribute, matching what comrak's
+/// `render.sourcepos` emits for native blocks. The code-fence passes
+/// (mermaid/fence/highlight) replace a `CodeBlock` with an `HtmlBlock` but only
+/// swap `.value`, leaving `.sourcepos` intact — so the node still knows its
+/// origin line. Nodes with line 0 (the synthetic table-wrap wrappers) are
+/// skipped.
+fn annotate_html_block_lines<'a>(root: &'a AstNode<'a>) {
+    for node in root.descendants() {
+        let line = {
+            let data = node.data.borrow();
+            match &data.value {
+                NodeValue::HtmlBlock(_) => data.sourcepos.start.line,
+                _ => continue,
+            }
+        };
+        if line == 0 {
+            continue;
+        }
+        let mut data = node.data.borrow_mut();
+        if let NodeValue::HtmlBlock(block) = &mut data.value {
+            block.literal = inject_sourcepos(&block.literal, line);
+        }
+    }
+}
+
+/// Insert a `data-sourcepos="line:1-line:1"` attribute into the first opening
+/// tag of `html`, so a raw-HTML wrapper carries its source line the same way
+/// comrak's native `data-sourcepos` does. The wrapper always begins with a
+/// single opening tag whose first `>` closes it (our wrappers never place a `>`
+/// inside an attribute value), so inserting just before that `>` is unambiguous.
+/// If there is no `>`, the fragment is returned unchanged.
+fn inject_sourcepos(html: &str, line: usize) -> String {
+    match html.find('>') {
+        Some(i) => {
+            let attr = format!(" data-sourcepos=\"{line}:1-{line}:1\"");
+            let mut out = String::with_capacity(html.len() + attr.len());
+            out.push_str(&html[..i]);
+            out.push_str(&attr);
+            out.push_str(&html[i..]);
+            out
+        }
+        None => html.to_string(),
+    }
 }
 
 /// Wrap the rendered body in a complete, self-contained HTML document. The math
@@ -321,18 +383,21 @@ mod tests {
     #[test]
     fn gfm_table_renders_and_is_wrapped_for_scroll() {
         let html = render_str("| a | b |\n|---|---|\n| 1 | 2 |\n");
-        assert!(html.contains("<table>"));
+        // With `render.sourcepos` on, the table opens `<table data-sourcepos=…>`.
+        assert!(html.contains("<table"));
         assert!(html.contains("<div class=\"table-wrap\">"));
         // Wrapper opens before the table and closes after it.
         let wrap = html.find("table-wrap").unwrap();
-        let table = html.find("<table>").unwrap();
+        let table = html.find("<table").unwrap();
         assert!(wrap < table);
     }
 
     #[test]
     fn code_fence_gets_syntect_classes() {
         let html = render_str("```rust\nfn main() {}\n```\n");
-        assert!(html.contains("<pre class=\"code\">"));
+        // The highlighted block carries an injected `data-sourcepos` (D7), so the
+        // opening tag is `<pre class="code" data-sourcepos=…>`.
+        assert!(html.contains("<pre class=\"code\""));
         assert!(html.contains("class=\"source rust\"") || html.contains("class=\""));
     }
 
@@ -375,7 +440,8 @@ mod tests {
         // `cat` echoes the fence body; the output lands in a `.rendered-fence`
         // scroll box, and the fence is not left as a highlighted code block.
         let html = render_with_renderers("```d2\n<svg>hi</svg>\n```\n", &[("d2", "cat")]);
-        assert!(html.contains("<div class=\"rendered-fence\">"));
+        // The wrapper carries an injected `data-sourcepos` (D7).
+        assert!(html.contains("<div class=\"rendered-fence\""));
         assert!(html.contains("<svg>hi</svg>"));
     }
 
@@ -383,10 +449,10 @@ mod tests {
     fn unconfigured_fence_is_highlighted_as_usual() {
         // Only `d2` is configured; a `rust` fence keeps the syntect path.
         let html = render_with_renderers("```rust\nfn main() {}\n```\n", &[("d2", "cat")]);
-        assert!(html.contains("<pre class=\"code\">"));
+        assert!(html.contains("<pre class=\"code\""));
         // (The embedded stylesheet mentions `.rendered-fence`, so match the
         // actual wrapper element, not the bare class name.)
-        assert!(!html.contains("<div class=\"rendered-fence\">"));
+        assert!(!html.contains("<div class=\"rendered-fence\""));
     }
 
     #[test]
@@ -415,7 +481,8 @@ mod tests {
             "```mermaid\nflowchart TD\nA --> B\n```\n",
             &[("mermaid", "printf 'OVERRIDDEN'")],
         );
-        assert!(html.contains("<div class=\"rendered-fence\">OVERRIDDEN</div>"));
+        assert!(html.contains("<div class=\"rendered-fence\""));
+        assert!(html.contains(">OVERRIDDEN</div>"));
         assert!(!html.contains("<svg"));
     }
 
@@ -501,8 +568,10 @@ mod tests {
     #[test]
     fn strikethrough_and_autolink_extensions_active() {
         let html = render_str("~~gone~~ and https://example.com\n");
-        assert!(html.contains("<del>"));
-        assert!(html.contains("<a href=\"https://example.com\""));
+        // `render.sourcepos` adds `data-sourcepos` to inline elements too, so the
+        // tags open `<del data-sourcepos=…>` / `<a data-sourcepos=… href=…>`.
+        assert!(html.contains("<del"));
+        assert!(html.contains("href=\"https://example.com\""));
     }
 
     #[test]
@@ -580,5 +649,94 @@ mod tests {
         // Default options carry no themes; the four built-in blocks are all.
         let html = render_str("# x\n");
         assert_eq!(html.matches("<style>").count(), 4);
+    }
+
+    // --- editor sync: source-line mapping (DESIGN D7) ---------------------
+
+    /// Collect the start lines of every `data-sourcepos="L:…"` in document order.
+    fn source_lines(html: &str) -> Vec<usize> {
+        let pat = "data-sourcepos=\"";
+        let mut lines = Vec::new();
+        let mut rest = html;
+        while let Some(i) = rest.find(pat) {
+            rest = &rest[i + pat.len()..];
+            let value = &rest[..rest.find('"').unwrap_or(rest.len())];
+            let line = value.split(':').next().unwrap_or("");
+            if let Ok(n) = line.parse::<usize>() {
+                lines.push(n);
+            }
+        }
+        lines
+    }
+
+    #[test]
+    fn inject_sourcepos_inserts_into_the_first_tag() {
+        assert_eq!(
+            inject_sourcepos("<pre class=\"code\"><code>x</code></pre>", 12),
+            "<pre class=\"code\" data-sourcepos=\"12:1-12:1\"><code>x</code></pre>"
+        );
+        // A wrapper carrying a style attribute keeps it; the injection lands
+        // before the first `>`, after existing attributes.
+        assert_eq!(
+            inject_sourcepos("<div class=\"mermaid\" style=\"--dw:40px\">s</div>", 3),
+            "<div class=\"mermaid\" style=\"--dw:40px\" data-sourcepos=\"3:1-3:1\">s</div>"
+        );
+    }
+
+    #[test]
+    fn blocks_and_wrappers_carry_source_lines() {
+        // A paragraph (native comrak sourcepos), a heading, a highlighted code
+        // fence and a mermaid fence (injected sourcepos) each carry a line.
+        let md = "para one\n\n## Heading\n\n```rust\nfn a() {}\n```\n\n\
+                  ```mermaid\nflowchart TD\nA --> B\n```\n";
+        let html = render_str(md);
+        // Heading is on line 3, the rust fence opens on line 5, the mermaid fence
+        // on line 9 — all must appear as data-sourcepos start lines.
+        let lines = source_lines(&html);
+        assert!(lines.contains(&1), "paragraph line 1 missing: {lines:?}");
+        assert!(lines.contains(&3), "heading line 3 missing: {lines:?}");
+        assert!(lines.contains(&5), "rust fence line 5 missing: {lines:?}");
+        assert!(
+            lines.contains(&9),
+            "mermaid fence line 9 missing: {lines:?}"
+        );
+        // The highlighted code block itself carries the line (reverse-click walks
+        // up to it), not just some inline descendant.
+        assert!(html.contains("<pre class=\"code\" data-sourcepos=\"5:1-5:1\""));
+        assert!(
+            html.contains("<div class=\"mermaid\"") && html.contains("data-sourcepos=\"9:1-9:1\"")
+        );
+    }
+
+    #[test]
+    fn source_lines_are_monotonically_non_decreasing() {
+        // Forward search relies on document-order start lines never going
+        // backwards, across prose, nested lists, tables, code and math.
+        let md = "# Title\n\nIntro *em* text.\n\n\
+                  - a\n- b\n  - nested\n\n\
+                  | x | y |\n|---|---|\n| 1 | 2 |\n\n\
+                  ```rust\nfn f() {}\n```\n\n\
+                  Inline $x^2$ and display:\n\n$$\\sum_{n} n$$\n\n\
+                  Final paragraph.\n";
+        let lines = source_lines(&render_str(md));
+        assert!(
+            lines.len() > 5,
+            "expected many annotated elements: {lines:?}"
+        );
+        for pair in lines.windows(2) {
+            assert!(
+                pair[0] <= pair[1],
+                "source lines must be non-decreasing in document order: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn table_wrap_scroll_containers_carry_no_source_line() {
+        // The synthetic `.table-wrap` divs are line 0 → never annotated; the
+        // table itself (a native block) still is.
+        let html = render_str("| a | b |\n|---|---|\n| 1 | 2 |\n");
+        assert!(!html.contains("<div class=\"table-wrap\" data-sourcepos"));
+        assert!(html.contains("<table data-sourcepos="));
     }
 }

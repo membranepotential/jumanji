@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::editor::EditorCommand;
 use super::keymap::{CharArgKind, Key, KeyPress, KeySequence, Keymap};
 use super::{Action, Direction, Mode};
 
@@ -56,6 +57,10 @@ pub struct Options {
     pub font_size_px: u32,
     /// Which clipboard a selection is copied to on select.
     pub selection_clipboard: SelectionClipboard,
+    /// Reverse editor sync (DESIGN D7): the command spawned on Ctrl+click, with
+    /// `%l`/`%f` substituted for the source line and file. Config-only (parsed
+    /// once at load; not a `:set` target). Default: `$EDITOR +%l %f`.
+    pub editor_command: EditorCommand,
     /// External fence renderers (DESIGN D6.2): fence language token → shell
     /// command run via `sh -c` with the fence body on stdin, producing SVG/HTML
     /// on stdout. Keys are normalised to lowercase (matching is
@@ -76,6 +81,7 @@ impl Default for Options {
             font_mono: String::new(),
             font_size_px: 18,
             selection_clipboard: SelectionClipboard::Primary,
+            editor_command: EditorCommand::default(),
             renderers: BTreeMap::new(),
         }
     }
@@ -217,6 +223,13 @@ impl Config {
             }
             None => defaults.selection_clipboard,
         };
+        let editor_command = match raw_opts.editor_command {
+            Some(s) => EditorCommand::parse(&s).map_err(|message| ConfigError::OptionValue {
+                key: "editor-command",
+                message,
+            })?,
+            None => defaults.editor_command,
+        };
         let options = Options {
             scroll_step_px: raw_opts.scroll_step.unwrap_or(defaults.scroll_step_px),
             zoom_step: raw_opts.zoom_step.unwrap_or(defaults.zoom_step),
@@ -227,6 +240,7 @@ impl Config {
             font_mono: raw_opts.font_mono.unwrap_or(defaults.font_mono),
             font_size_px: raw_opts.font_size.unwrap_or(defaults.font_size_px),
             selection_clipboard,
+            editor_command,
             // Normalise fence-language keys to lowercase so the lookup (which
             // lowercases the fence token) is case-insensitive.
             renderers: raw
@@ -549,6 +563,8 @@ struct RawOptions {
     font_size: Option<u32>,
     #[serde(rename = "selection-clipboard")]
     selection_clipboard: Option<String>,
+    #[serde(rename = "editor-command")]
+    editor_command: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -800,6 +816,29 @@ mod tests {
     #[test]
     fn no_renderers_table_is_empty() {
         assert!(Config::parse("").unwrap().options.renderers.is_empty());
+    }
+
+    #[test]
+    fn editor_command_defaults_and_parses() {
+        use std::path::Path;
+        // Default is the `$EDITOR +%l %f` template.
+        let default = Config::parse("").unwrap().options.editor_command;
+        assert_eq!(
+            default.to_argv(12, Path::new("/a/b.md")),
+            vec!["$EDITOR", "+12", "/a/b.md"]
+        );
+        // A configured template is parsed and applied.
+        let c = Config::parse("[options]\neditor-command = \"code -g %f:%l\"").unwrap();
+        assert_eq!(
+            c.options.editor_command.to_argv(3, Path::new("n.md")),
+            vec!["code", "-g", "n.md:3"]
+        );
+    }
+
+    #[test]
+    fn empty_editor_command_errors() {
+        let err = Config::parse("[options]\neditor-command = \"\"").unwrap_err();
+        assert!(err.to_string().contains("editor-command"), "{err}");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 
 pub mod command;
 pub mod config;
+pub mod editor;
 pub mod history;
 pub mod jumplist;
 pub mod keymap;
