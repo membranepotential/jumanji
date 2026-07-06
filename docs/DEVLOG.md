@@ -2,6 +2,60 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — intrinsic diagram size, cursor-anchor fix, leading-edge zoom, one demo
+
+Four related fixes, driven by user feedback that big diagrams were unreadably
+small at zoom 1 and that Ctrl+wheel didn't zoom towards the cursor near the
+bottom of the page:
+
+- **Diagrams render at intrinsic (natural) size.** The old model shrank every
+  diagram to fit the reading column, so a large flowchart was tiny at zoom 1 and
+  zooming to read it blew the prose up. New model: `core::diagram` parses the
+  intrinsic pixel width from merman's SVG root (`max-width:<N>px`) and emits
+  `<div class="mermaid" style="--dw:<N>px">`; `.mermaid svg` is now
+  `width: var(--dw, auto)`. A diagram wider than the column renders full-size and
+  overflows into its own `.mermaid` scroll box, never the page. Because WebKit's
+  native geometric zoom multiplies CSS px → device px, device size = intrinsic ×
+  zoom *for free* — so the `--zoom` custom property and the old
+  `min(100vw × --zoom − chrome, …)` formula are **gone** (`--diagram-chrome`
+  deleted with them). Parse-failure degrades to a plain wrapper (svg `auto`).
+  Text-zoom invariance is now by construction (diagrams don't read `--font-size`).
+  Sample intrinsic widths: flowchart-LR 1200 px, gantt 1184 px, timeline 1390 px,
+  sequence 650 px.
+- **Cursor-anchored zoom bug fixed.** `flush_wheel_zoom` set `Shell.zoom` to the
+  new level *before* calling `cursor_anchor`, but the capture JS runs while the
+  page is still laid out at the OLD zoom; `cursor_anchor` divides the pointer by
+  the zoom to get CSS px, so it used the wrong divisor and the error grew with
+  distance from the origin — hence "doesn't zoom towards the cursor" near the
+  bottom. Now the anchor is captured from the pre-change zoom. New e2e drives a
+  real Ctrl+wheel with the pointer ~80 % down and asserts the reflow direction +
+  no page h-scroll.
+- **Leading-edge wheel-zoom coalescing.** Every Ctrl+wheel tick used to wait the
+  full 40 ms before anything happened. Now the first tick of a burst applies
+  immediately and the 40 ms timer only batches ticks that arrive during the
+  trailing window (no-op if none do); no tick is ever lost. Combined with the
+  `--zoom` removal — which drops a root-level custom-property write (a full
+  document style invalidation) from *every* zoom step — this is the zoom-latency
+  win. (WebKit reflow remains the measured floor; no other speculative perf.)
+- **Native zoom survives reload**, so the load-finished handler no longer
+  re-applies geometric zoom (only text zoom's `--font-size`, which *is* lost on
+  reload). Verified: `zoom_level` is a WebView property, and the live-reload e2e
+  now zooms in a narrow window and asserts the CSS viewport stays collapsed
+  across the reload.
+- **One demo.** `docs/demo.md` (the richer 11-diagram rendering showcase) is now
+  the single `demo/demo.md`, with the run command + image path fixed, the
+  zathura driving hint expanded (Tab/TOC, f/hints, q), and the old demo's
+  unknown-language-fence coverage folded in. The duplicate `Notes` headings
+  (anchor disambiguation) are preserved. Old `docs/demo.md` deleted.
+
+e2e: `narrow_viewport_zoom_reflows_without_page_overflow` gains an assertion that
+at zoom 1 the diagram width exceeds the narrow viewport (overflow inside its
+box); device-growth assertion unchanged. New `ctrl_wheel_zoom_anchors_with_cursor_near_bottom`.
+108 unit + e2e.
+
+Next: user feel-test on real GPU (intrinsic diagrams, cursor anchor, leading-edge
+snappiness).
+
 ## 2026-07-06 — v0.2.1: zoom mechanics reworked — reflow, cursor anchor, coalescing
 
 User feedback on v0.2.0: scrolling fixed, but zoom felt janky, should zoom

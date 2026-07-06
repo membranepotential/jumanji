@@ -144,30 +144,42 @@ Zoom has two independent axes, both count-multiplied and reset together by `=`:
   viewport, so the page never scrolls horizontally at any zoom level — wide
   tables, code blocks and diagrams scroll inside their own `overflow-x` boxes
   instead. Three consequences are engineered rather than emergent:
-  - **Diagrams still zoom.** The shell mirrors the level into a `--zoom`
-    custom property, and `.mermaid svg` pins its **CSS-px width to the zoom-1
-    value** via `min(100vw × --zoom − chrome, --content-width − chrome)`
-    (`100vw × zoom` is numerically the constant device viewport width), so the
-    diagram's device size scales linearly with zoom and the overflow scrolls
-    inside `.mermaid`. Chrome paddings are `rem`-based: `rem` resolves against
-    the root font (fixed 16 px), so the formula is invariant under text zoom.
-    Inline `max-width:<intrinsic>` from merman keeps capping small diagrams.
+  - **Diagrams render at intrinsic size and zoom by construction.** merman
+    lays out each diagram at a natural pixel width (emitted as the SVG root's
+    inline `max-width:<N>px`); the pipeline parses that value and pins it onto a
+    per-diagram `--dw` custom property, and `.mermaid svg` sets
+    `width: var(--dw)`. The CSS width is therefore the **intrinsic** width — a
+    diagram bigger than the reading column renders full-size at zoom 1 and
+    overflows into its own `.mermaid` scroll box (`overflow-x: auto`), never the
+    page (the earlier fit-to-column shrinking made large diagrams unreadably
+    small). Under WebKit's native geometric zoom — which multiplies CSS px →
+    device px — the device size is simply `intrinsic × zoom`, with **no `--zoom`
+    mirroring** needed. Text zoom rewrites only the body `--font-size`, so it
+    leaves diagrams untouched by construction. If the width can't be parsed the
+    pipeline omits `--dw` and the svg falls back to `auto`.
   - **The reading position is anchored, not accidental.** One anchor
     mechanism (capture `elementFromPoint` + viewport offset before the change,
     scroll it back after) is shared by both axes, parameterised by probe
     point: `Ctrl`+wheel anchors **at the cursor** (pointer tracked via a
-    motion controller; GTK-logical → CSS px is `v / zoom`), keyboard/D-Bus
+    motion controller; GTK-logical → CSS px is `v / zoom`, evaluated at the
+    **pre-change** zoom the page is still laid out at — using the post-change
+    zoom misplaces the anchor, worst near the viewport bottom), keyboard/D-Bus
     zoom and text zoom anchor at the top of the viewport. Sequencing is
-    race-free: capture-JS → (completion callback) native `set_zoom_level` +
-    `--zoom` → restore-JS. `Shell.zoom` is the source of truth (the native
-    level lands async).
-  - **Wheel zoom is coalesced** (~40 ms window): a tick burst applies as one
-    anchored reflow instead of N (measured 10 → 1 applications, settle time
-    ~5.5× faster under Xvfb).
+    race-free: capture-JS → (completion callback) native `set_zoom_level` →
+    restore-JS. `Shell.zoom` is the source of truth (the native level lands
+    async); the native level survives a document reload (a WebView property), so
+    no re-apply is needed on load.
+  - **Wheel zoom is coalesced, leading-edge** (~40 ms trailing window): the
+    first tick of a burst applies immediately (a single tick feels instant), and
+    any ticks arriving within the window after it are batched into one further
+    anchored reflow — a burst becomes at most 2 applications instead of N, and
+    no tick is ever lost (every tick adds a step; the flush drains all
+    accumulated steps).
 
   `GetState` exposes `content_width` (reflows with zoom now), plus
   `viewport_width`, `doc_scroll_width` (the no-page-h-scroll invariant) and
-  `diagram_width` (CSS px; device size = × zoom) for tests.
+  `diagram_width` (CSS px, now constant ≈ intrinsic under zoom; device size =
+  × zoom) for tests.
 - **Text** = the `--font-size` CSS variable on `<html>` — reflows prose without
   touching layout geometry or diagram sizing; clamped to 8 px … 3× base. Bound
   to `Ctrl`+`Shift`+wheel (config `text zoom in` / `text zoom out`); no default
