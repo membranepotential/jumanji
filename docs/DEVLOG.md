@@ -2,6 +2,55 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — stdin streaming (M3, DESIGN D9 — the last M3 item)
+
+**What:** `some-tool | jumanji` (and `jumanji -`) reads markdown from stdin and
+progressively re-renders as more arrives, until EOF.
+
+- **CLI (`main.rs`).** `file` is now `Option<PathBuf>`. New pure core type
+  `core::source::Source::resolve(file, stdin_is_terminal)`: `-` → stdin, a path →
+  file, no arg + piped stdin → stdin, no arg + a terminal → a clap usage error
+  (nothing to read). `--forward` + stdin is rejected up front with a clap
+  `ArgumentConflict` (it targets a saved source line / running-instance handoff —
+  meaningless for a pipe). File sources keep the absolute-path + existence check +
+  D7 forward-to-running shortcut; stdin skips all of it.
+- **Reader (`shell::stdin::StdinReader`).** A background thread reads stdin into a
+  growing `Vec<u8>` and posts ticks over an `mpsc` channel; a `glib` 120 ms poll
+  (matching `watch.rs`'s cadence) drains a burst into **one** `render_and_load(
+  preserve_scroll = true)` — the exact live-reload path, so scroll position is
+  preserved across streaming re-renders for free. EOF sends a final tick and the
+  thread exits (no error state); `echo x | jumanji -` renders once and settles.
+  Content is `from_utf8_lossy`-decoded per render, so a chunk boundary splitting a
+  multibyte char self-corrects on the next chunk. Thread/IO is shell-only; core
+  stays pure.
+- **Stream degradations.** Watcher skipped (nothing to watch); per-file history
+  skipped (no identity, zathura parity); statusbar + `GetState.file` report
+  `stdin` (the latter keeps the D7 forward-search from mistaking a stream for a
+  file); reverse editor sync (`%f`) suppressed with a statusbar notice;
+  relative links/images resolve against the CWD via a never-touched
+  `<cwd>/stdin.md` base sentinel. `:open`/a link click ends the stream and
+  switches to a normal file document (watcher/history/editor sync resume). TOC,
+  math, mermaid, external fence renderers, search, marks work unchanged (they run
+  on pipeline output).
+
+**Tests:** **160 → 166 unit** (`core::source`: 6 — the resolve matrix,
+`is_stdin`, `display_name`). **32 → 35 e2e**: a new `Harness::launch_stdin()`
+spawns `jumanji -` with `Stdio::piped()` and returns the child stdin;
+`stdin_dash_renders_after_content_then_close` (write + close → TOC fills),
+`stdin_streaming_grows_toc_and_preserves_scroll` (write half → render + scroll,
+write rest → TOC grows and reading position restored — mirrors the live-reload
+test), and `stdin_instant_eof_renders_fine` (`echo |`-style empty EOF still
+loads and drives). `cargo test && clippy -D warnings && fmt` all clean. No new
+dependencies.
+
+**Note:** the streaming scroll assertion waits for the position to *settle* after
+the TOC grows — `toc_len` updates synchronously as the new doc is built, but the
+scroll restore lands later in the load-finished handler, so reading `scroll_y`
+the instant the TOC grows catches a mid-reload top (flaked under load until the
+settle-wait was added).
+
+Next: AUR package is the only remaining M3 item.
+
 ## 2026-07-06 — fix: TOC click+Enter jumped to the wrong (stale) entry
 
 **What:** in TOC/index mode, clicking a heading row and pressing `Enter` jumped

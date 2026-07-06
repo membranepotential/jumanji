@@ -138,6 +138,8 @@ pacman, so it upgrades/removes cleanly like any other package.
 ```sh
 cargo build --release
 ./target/release/jumanji README.md
+./target/release/jumanji -      # read markdown from stdin
+some-tool | ./target/release/jumanji   # or just pipe it (renders as data streams in)
 ```
 
 ## Documentation
