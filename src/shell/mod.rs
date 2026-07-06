@@ -4,5 +4,6 @@
 
 pub mod app;
 mod bar;
+mod dbus;
 mod view;
 mod watch;

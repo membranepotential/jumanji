@@ -171,6 +171,30 @@ impl View {
         );
     }
 
+    /// Query scroll offset (px) and percentage (0..=100) in one JS round-trip,
+    /// delivering both to `callback`. Used by the D-Bus `GetState` method so a
+    /// single reply reflects a single, consistent viewport snapshot.
+    pub fn scroll_state<F: FnOnce(f64, u32) + 'static>(&self, callback: F) {
+        let script = "(() => { const d = document.documentElement, b = document.body; \
+             const max = (b.scrollHeight || d.scrollHeight) - window.innerHeight; \
+             const p = max > 0 ? Math.round((window.scrollY / max) * 100) : 0; \
+             return { y: window.scrollY, p: Math.min(100, Math.max(0, p)) }; })()";
+        self.webview.evaluate_javascript(
+            script,
+            None,
+            None,
+            None::<&gtk::gio::Cancellable>,
+            move |res| match res {
+                Ok(v) => {
+                    let y = v.object_get_property("y").map_or(0.0, |n| n.to_double());
+                    let p = v.object_get_property("p").map_or(0.0, |n| n.to_double());
+                    callback(y, p.clamp(0.0, 100.0) as u32);
+                }
+                Err(_) => callback(0.0, 0),
+            },
+        );
+    }
+
     /// Restore a scroll offset (px) after a reload once layout is available.
     pub fn restore_scroll(&self, y: f64) {
         self.run_js(&format!("window.scrollTo(0, {y});"));

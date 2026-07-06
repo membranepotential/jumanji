@@ -16,10 +16,16 @@ jumanji — a zathura-inspired markdown reader. Rust, GTK4 + system WebKitGTK 6,
 
 ```sh
 cargo build                 # needs system gtk4 + webkitgtk-6.0
-cargo test                  # core is pure and unit-tested
+cargo test                  # core unit tests + headless e2e (tests/e2e.rs)
+cargo test --test e2e       # just the e2e suite (real Xvfb + WebKit + D-Bus)
 cargo clippy -- -D warnings
 cargo run -- demo/demo.md
 ```
+
+The e2e suite drives the real app under a virtual X server and asserts via the
+D-Bus interface; it needs `xorg-server-xvfb`, `xdotool`, and `dbus`
+(`pacman -S xorg-server-xvfb xdotool dbus`) and **skips cleanly** (passes as a
+no-op) when they're absent. See `docs/TESTING.md`.
 
 ## Architecture (enforced boundaries)
 

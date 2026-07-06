@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use gtk::gdk::{Key as GdkKey, ModifierType};
 use gtk::glib;
+use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{
     Application, ApplicationWindow, Box as GtkBox, EventControllerKey, Orientation,
@@ -16,12 +17,13 @@ use gtk::{
 use webkit6::LoadEvent;
 use webkit6::prelude::*;
 
-use crate::core::config::Config;
+use crate::core::config::{self, Config};
 use crate::core::keymap::{Key, KeyPress, Keymap, MatchResult, Matcher};
 use crate::core::pipeline::{self, Options as RenderOptions};
 use crate::core::{Action, Direction, Heading, Mode};
 
 use super::bar::Bar;
+use super::dbus;
 use super::view::View;
 use super::watch::{FileEvent, Watch};
 
@@ -40,9 +42,15 @@ struct Shell {
     toc: Vec<Heading>,
     section: usize,
     dark: bool,
+    /// Whether the initial [`LoadEvent::Finished`] has fired. Key/D-Bus actions
+    /// are no-ops before this; the D-Bus `loaded` flag lets clients (tests,
+    /// editor integrations) wait for a driveable window.
+    loaded: bool,
     /// Scroll offset to restore once the next load finishes (reload only).
     pending_restore: Option<f64>,
     _watch: Option<Watch>,
+    /// Keeps the per-instance D-Bus name owned for the process lifetime.
+    _dbus: Option<gtk::gio::OwnerId>,
 }
 
 /// Launch the application for `file` with the resolved `config`.
@@ -101,14 +109,17 @@ fn build_ui(
         toc: Vec::new(),
         section: 0,
         dark: options.default_recolor,
+        loaded: false,
         pending_restore: None,
         _watch: None,
+        _dbus: None,
     }));
 
     connect_load_finished(&shell);
     connect_keys(&shell, keymap);
     connect_search_entry(&shell);
     start_watch(&shell);
+    serve_dbus(&shell);
 
     window.present();
     view.widget().grab_focus();
@@ -165,7 +176,11 @@ fn connect_load_finished(shell: &Rc<RefCell<Shell>>) {
                 s.view.restore_scroll(y);
             }
         }
-        shell.borrow_mut().pending_restore = None;
+        {
+            let mut s = shell.borrow_mut();
+            s.pending_restore = None;
+            s.loaded = true;
+        }
         refresh_status(&shell);
     });
 }
@@ -245,6 +260,94 @@ fn start_watch(shell: &Rc<RefCell<Shell>>) {
             .bar
             .set_message(&format!("live reload disabled: {err}")),
     }
+}
+
+/// Register the per-instance D-Bus automation surface (DESIGN.md D7 foundation).
+/// `GetState` snapshots shell state plus a live (async) scroll query;
+/// `ExecuteAction` parses an action string and runs it through the same
+/// [`execute`] path the keyboard uses. Failure to own the name is non-fatal.
+fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
+    let get_state = {
+        let shell = shell.clone();
+        Rc::new(move |invocation: gtk::gio::DBusMethodInvocation| {
+            // Snapshot the synchronous state under a short borrow, then query
+            // the live scroll offset async and complete the reply in its
+            // callback — never blocking the main loop.
+            let (view, file, dark, zoom, section, toc_len, loaded) = {
+                let s = shell.borrow();
+                (
+                    s.view.clone(),
+                    s.file.to_string_lossy().into_owned(),
+                    s.dark,
+                    s.view.zoom_level(),
+                    s.section,
+                    s.toc.len(),
+                    s.loaded,
+                )
+            };
+            view.scroll_state(move |y, pct| {
+                let json = state_json(&file, y, pct, dark, zoom, section, toc_len, loaded);
+                invocation.return_value(Some(&(json,).to_variant()));
+            });
+        }) as dbus::GetState
+    };
+
+    let execute_action = {
+        let shell = shell.clone();
+        Rc::new(move |action: &str, count: u32| -> Result<(), String> {
+            let parsed = config::parse_action(action)?;
+            execute(&shell, parsed, count.max(1));
+            refresh_status(&shell);
+            Ok(())
+        }) as dbus::ExecuteAction
+    };
+
+    let owner = dbus::serve(dbus::Automation {
+        get_state,
+        execute_action,
+    });
+    shell.borrow_mut()._dbus = owner;
+}
+
+/// Serialize the reader state as the compact JSON object `GetState` returns.
+/// `mode` is fixed to `"normal"` in M1 (the only user-reachable mode; TOC mode
+/// arrives in M2).
+#[allow(clippy::too_many_arguments)]
+fn state_json(
+    file: &str,
+    scroll_y: f64,
+    scroll_percent: u32,
+    dark: bool,
+    zoom: f64,
+    section: usize,
+    toc_len: usize,
+    loaded: bool,
+) -> String {
+    format!(
+        "{{\"file\":{file},\"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
+         \"dark\":{dark},\"zoom\":{zoom},\"mode\":\"normal\",\"section\":{section},\
+         \"toc_len\":{toc_len},\"loaded\":{loaded}}}",
+        file = json_string(file),
+    )
+}
+
+/// Encode `s` as a JSON string literal (double-quoted, minimally escaped).
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Execute one [`Action`], `count` times where meaningful.
