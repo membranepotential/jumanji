@@ -2,6 +2,69 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — Flicker root-caused: self-sustaining reload loop
+
+User-reported "flicker after scrolling" reproduced headlessly (Xvfb + 30 fps
+ffmpeg frame capture + per-frame brightness analysis): a sustained ~4 Hz
+light/dark oscillation. Root cause: `watch.rs` filtered file events by *path*
+only, so `Access` (read) events counted as changes — and the reload handler
+itself reads the file, so **one external read of the document started an
+infinite reload loop** (read → Access event → debounce 150 ms → poll 120 ms →
+reload → read → …). Every cycle reset scroll and repainted; in dark mode each
+fresh load painted light before recolor re-applied, hence the strobe.
+
+Fix: filter to content-mutating event kinds (`Create`/`Modify`/`Remove`).
+Verified with the same frame harness under deliberate external reads:
+150 frames, brightness stddev 0.003, zero flashes (buggy build: 0.374
+oscillation amplitude). Remaining hardening queued: pre-apply the dark class
+at load (no light flash on *legitimate* reloads) and set the WebView native
+background to the theme color.
+
+Testing method note: GUI verification now runs on Xvfb — never on the live
+X session (the earlier live-session testing caused visible window flicker on
+the desktop).
+
+## 2026-07-06 — D-Bus state interface + headless e2e harness
+
+Added a per-instance D-Bus service and a real-app e2e test suite. **53/53 tests
+(46 core + 7 e2e), clippy `-D warnings` clean, e2e green across repeated runs
+(~9.5 s/run under Xvfb).**
+
+- `shell/dbus.rs`: zathura-style per-instance service — owns
+  `org.membranepotential.jumanji.PID-<pid>` on the **session** bus, object
+  `/org/membranepotential/jumanji`, interface `org.membranepotential.jumanji`.
+  Built on `gtk::gio` (`bus_own_name` + `register_object` with introspection
+  XML) — **no new deps, no zbus**. Two methods:
+  - `GetState() -> (s)` — JSON snapshot (`file`, `scroll_y`, `scroll_percent`,
+    `dark`, `zoom`, `mode`, `section`, `toc_len`, `loaded`). Scroll figures are
+    queried live from the webview; the reply is completed from the async JS
+    callback (`DBusMethodInvocation` finished later) so the main loop never
+    blocks.
+  - `ExecuteAction(s, u)` — parses via `core::config::parse_action` and runs the
+    same `execute()` path the keyboard uses; unknown action → D-Bus error.
+  The module is pure transport: the app injects two closures, so `dbus.rs` never
+  sees `Shell` and `app.rs` never sees a `Variant`. This is deliberately the M3
+  editor-sync (D7) foundation, not test-only. Name-acquisition failure (no
+  session bus) logs to stderr and the reader still runs.
+- `app.rs`: added a `loaded` flag (set on the first `LoadEvent::Finished`) so
+  clients can wait for a driveable window — keys/actions before load are
+  no-ops. Wired `serve_dbus`; `_dbus` owner id kept for process lifetime.
+- `tests/e2e.rs`: spins up a private `Xvfb` + private `dbus-daemon` per test,
+  launches the real binary on `demo/demo.md`, waits for `loaded`, injects real
+  GTK keys via `xdotool`, asserts on `GetState`. RAII teardown even on panic;
+  serialized behind a mutex (concurrent WebKit instances are flaky); skips
+  cleanly if `Xvfb`/`xdotool`/`dbus-daemon` are absent. Covers j/k, counts,
+  gg/G, Ctrl-r, +/=, J/K, and the pure-D-Bus ExecuteAction path.
+- **Two Xvfb gotchas found and documented** (`docs/TESTING.md`): with no window
+  manager, `xdotool key --window` is dropped unless the window is first given X
+  input focus (`windowfocus --sync`; `windowactivate` needs EWMH); and Shift
+  must be the explicit `shift+g` form, not the bare `G` keysym. A prior debug
+  session's *stale overlapping app processes* — not a code bug — were what made
+  section state look like it reset; a clean run is deterministic.
+
+**Next:** M2 — TOC mode, `:` commands, link hints; and the reverse D7 direction
+(modifier-click → `$EDITOR +line`).
+
 ## 2026-07-06 — M1 MVP: it renders, it scrolls, it recolors
 
 Core pipeline and GTK shell implemented (in parallel, by two agents with

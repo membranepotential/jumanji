@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use gtk::glib;
-use notify::RecursiveMode;
+use notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{Debouncer, RecommendedCache, new_debouncer};
 
 /// What happened to the watched file.
@@ -63,6 +63,15 @@ impl Watch {
             while let Ok(result) = rx.try_recv() {
                 if let Ok(events) = result {
                     for event in events {
+                        // Only content-mutating kinds. `Access` events fire on
+                        // every read — including our own reload's — and would
+                        // otherwise feed a self-sustaining reload loop.
+                        if !matches!(
+                            event.kind,
+                            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                        ) {
+                            continue;
+                        }
                         let hits = event.paths.iter().any(|p| {
                             *p == file || p.file_name().map(|n| n.to_owned()) == target_name
                         });
