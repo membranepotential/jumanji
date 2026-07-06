@@ -102,6 +102,9 @@ struct State {
     /// First `<math>` rendered width in CSS px (0 if none). Nonzero proves the
     /// MathML actually laid out.
     math_width: f64,
+    /// First `.rendered-fence svg` width in CSS px (0 if none). Nonzero proves a
+    /// configured external fence renderer (DESIGN D6.2) produced visible output.
+    fence_width: f64,
     /// Computed `color` of the first python function-name span, as a CSS
     /// `rgb(...)` string ("" if the document has no python). In dark mode it must
     /// not be `InspiredGithub`'s near-black light colour (`rgb(50, 50, 50)`).
@@ -128,6 +131,7 @@ impl State {
             doc_scroll_width: field(json, "doc_scroll_width")?.parse().ok()?,
             diagram_width: field(json, "diagram_width")?.parse().ok()?,
             math_width: field(json, "math_width")?.parse().ok()?,
+            fence_width: field(json, "fence_width")?.parse().ok()?,
             fn_color: field_str(json, "fn_color")?,
             dark: field(json, "dark")? == "true",
             zoom: field(json, "zoom")?.parse().ok()?,
@@ -1142,5 +1146,45 @@ fn history_persists_scroll_across_relaunch() {
         );
     }
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn external_fence_renderer_produces_output() {
+    // DESIGN D6.2: a `[renderers]` entry maps a fence language to a shell
+    // command whose stdout replaces the fence. Configure a `box` renderer that
+    // echoes a fixed-size SVG, load a document with a `box` fence, and assert
+    // the SVG actually rendered (nonzero `.rendered-fence svg` width) — the
+    // pipeline ran the subprocess and embedded its output.
+    let Some(_g) = setup_guard() else { return };
+
+    let dir = std::env::temp_dir().join(format!("jumanji-e2e-fence-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let config_home = dir.join("cfg");
+    let data_home = dir.join("data");
+    let cfg = config_home.join("jumanji");
+    std::fs::create_dir_all(&cfg).expect("create config dir");
+    std::fs::write(
+        cfg.join("config.toml"),
+        "[renderers]\n\
+         box = \"printf '<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" \
+         width=\\\"123\\\" height=\\\"40\\\"></svg>'\"\n",
+    )
+    .expect("write config");
+
+    let doc = dir.join("doc.md");
+    std::fs::write(&doc, "# Fence renderer\n\n```box\nignored body\n```\n").expect("write doc");
+
+    let h = Harness::launch_in(doc, config_home, data_home);
+    let s = h.wait_for_state("fence renderer output rendered", SETTLE, |s| {
+        s.fence_width > 0.0
+    });
+    assert!(
+        (s.fence_width - 123.0).abs() < 5.0,
+        "expected the echoed 123px SVG, got width {}",
+        s.fence_width
+    );
+
+    drop(h);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -2,6 +2,61 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — external fence renderers (M3, DESIGN D6 seam 2)
+
+**What:** any fenced code block whose language has a configured renderer is now
+replaced by that command's output. Config gains a `[renderers]` table
+(`d2 = "d2 - -"`, `dot = "dot -Tsvg"`, …); jumanji runs the command via `sh -c`
+with the fence body on stdin and inlines its stdout (SVG/HTML). Covers graphviz,
+d2, typst, … with no plugin API — the same pipeline seam merman occupies
+internally.
+
+- **Placement (D6.2): core, injectable.** New pure module `core::fence` sits
+  beside `diagram.rs`/`math.rs` and runs as the pipeline's first transform pass.
+  It is the first core code to spawn a subprocess, but the functional-core
+  boundary holds: the exec is local, `Result`-shaped I/O (no display), and the
+  transform is injectable — `transform_fences(root, &renderers, &run)` takes the
+  runner as a closure, so unit tests drive it with a fake and `pipeline::render`
+  passes the real `fence::run_command`. No-network rule untouched (subprocesses
+  are local; the page CSP still blocks all egress).
+- **Contract:** `language = "command"`, run via `sh -c`, fence body on **stdin**,
+  **stdout** replaces the fence. Minimal by design — no temp files, no `%f`
+  substitution. Language keys lowercased and matched case-insensitively. Typed
+  as `BTreeMap<String,String>` on both `config::Options` and `pipeline::Options`;
+  parsed from a free `[renderers]` table (no `deny_unknown_fields`). Not a `:set`
+  target (a table, wired once at render-construction; live reload re-runs the
+  pipeline, so renderers re-execute for free).
+- **Safety:** hard **5 s** timeout (child killed on expiry, via a reader thread +
+  `recv_timeout`), **4 MiB** stdout cap, stderr discarded. Every failure — spawn
+  error, non-zero exit, timeout, over-cap, empty/non-UTF-8 output — degrades to
+  the fence as a highlighted code block + a `.diagram-error` note (mirrors
+  `diagram.rs`). No `catch_unwind` needed here (outcomes are `Result`-shaped, no
+  panic to contain).
+- **Output container:** a `.rendered-fence` block that is *only* an
+  `overflow-x: auto` scroll box, so wide output scrolls in its own box, never the
+  page (same invariant as `.mermaid`/`.table-wrap`/`.math-scroll`). Deliberately
+  **no `--dw` intrinsic-width parsing** — the output is arbitrary SVG *or* HTML,
+  so a plain scroller is the honest primitive.
+- **Mermaid override:** a configured `mermaid` renderer wins over the built-in
+  merman path — `transform_fences` runs before `transform_mermaid`, so a consumed
+  fence is no longer a `CodeBlock` by the time the built-in pass runs. Documented
+  and tested both ways.
+- **Observability:** `ViewportState`/`GetState` gain `fence_width` (first
+  `.rendered-fence svg` width), the same probe pattern as `diagram_width`/
+  `math_width`.
+
+Tests: **123 → 145 unit** (`core::fence`: transform with a fake runner +
+`run_command` with deterministic commands — `cat`/`printf`/`false`/`true`/`sleep
+10`/over-cap/non-UTF-8; `core::pipeline`: replace, untouched, degrade, garbage,
+mermaid override; `core::config`: `[renderers]` parse + key lowercasing) + **24
+→ 25 e2e** (`external_fence_renderer_produces_output` writes a private config
+with an echo-SVG renderer and asserts `fence_width` via `GetState`). `cargo test
+&& clippy -D warnings && fmt` all clean. No new dependencies (the runner is std
+`Command` + threads + `mpsc::recv_timeout`). DESIGN D6.2 filled in; M3 line
+updated; README + config.example.toml document the `[renderers]` table.
+
+Next: editor sync (D7) and stdin streaming remain for M3.
+
 ## 2026-07-06 — three user-reported bug fixes: dark-mode syntax colour, GPU layer dropouts, drag-select
 
 Three independent user reports, three small fixes.

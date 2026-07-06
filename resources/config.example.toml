@@ -46,6 +46,27 @@
 # "primary" (X11 PRIMARY, middle-click paste) or "clipboard" (Ctrl-V paste).
 # selection-clipboard = "primary"
 
+# External fence renderers (DESIGN D6.2). Each key is a fenced-code-block
+# language token; the value is a shell command run via `sh -c` with the fence
+# body piped in on stdin. Whatever the command writes to stdout (SVG or HTML)
+# replaces the fence, wrapped in a horizontal-scroll box. This is the same
+# pipeline seam the built-in mermaid renderer occupies — no plugin API.
+#
+# Language matching is case-insensitive. A command that fails (non-zero exit,
+# a 5-second timeout, >4 MiB of output, or empty/non-UTF-8 output) degrades
+# gracefully: the fence falls back to a highlighted code block plus an error
+# note, never a crash. Renderers re-run on live reload. A renderer keyed on
+# "mermaid" overrides the built-in mermaid diagram support.
+#
+# jumanji runs whatever you configure here (as zathura trusts its plugins);
+# only add commands you trust. Examples (uncomment and adjust to taste):
+#
+# [renderers]
+# d2 = "d2 - -"                    # https://d2lang.com  (```d2 fences)
+# dot = "dot -Tsvg"               # Graphviz            (```dot fences)
+# graphviz = "dot -Tsvg"          #   alias for the same
+# typst = "typst compile - -"     # Typst → SVG         (```typst fences)
+
 [keys.normal]
 # Remap examples, zathura key notation (bare chars are literal, angle
 # brackets denote specials/modifiers: <C-r>, <Tab>, <Esc>, <S-Tab>, <Space>).

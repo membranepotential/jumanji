@@ -78,6 +78,12 @@ restyle the reader; GFM alerts (`> [!NOTE]` …) render as callouts. LaTeX math 
 inline `$…$` and display `$$…$$`, matrices and aligned environments — is
 typeset to native MathML (no JavaScript), and recolors with the page.
 
+External fence renderers extend the diagram support to any tool: map a fence
+language to a shell command in `[renderers]` (e.g. `d2 = "d2 - -"`, `dot =
+"dot -Tsvg"`) and jumanji pipes the fence body to it and inlines the SVG/HTML it
+prints — the same pipeline seam mermaid uses internally, no plugin API. A
+failing command degrades to a highlighted code block plus an error note.
+
 ## Configuration
 
 `~/.config/jumanji/config.toml`:
@@ -92,6 +98,10 @@ page-width = 720        # px, content column width
 [keys.normal]
 "J" = "section next"
 "K" = "section previous"
+
+[renderers]              # optional: fence language → shell command (stdin → stdout)
+d2 = "d2 - -"            # ```d2 fences rendered with d2lang.com
+dot = "dot -Tsvg"        # ```dot fences rendered with Graphviz
 ```
 
 ## Installation

@@ -205,7 +205,46 @@ seams, in order of arrival:
 2. **External fence renderers** — config maps a fence language to a command
    producing SVG/HTML on stdout (`renderers.d2 = "d2 - -"`), the same seam
    merman occupies internally. Covers graphviz, d2, typst-math, … without any
-   plugin API. (v2)
+   plugin API. **(Built — decisions below.)**
+
+   - **Placement — core, not shell.** The AST transform (`core::fence`) lives
+     beside `diagram.rs`/`math.rs` and runs inside the pipeline as one more
+     parse → mutate → format pass. It is the first thing in the core that spawns
+     a subprocess, but that does not breach the functional-core boundary: the
+     exec is local I/O with a `Result`-shaped outcome (no display, no GTK), so it
+     stays unit-testable, and the transform is injectable — `transform_fences`
+     takes the renderer table plus a `run` closure, so tests drive it with a
+     fake while `pipeline::render` passes the real `fence::run_command`. The
+     no-network rule is unaffected: subprocesses are local, and the page's CSP
+     still blocks every egress from the rendered document.
+   - **Contract — `sh -c` + stdin.** Each `[renderers]` entry is `language =
+     "command"`; the command runs via `sh -c` with the fence body on **stdin**
+     (no temp files, no `%f` substitution — kept minimal) and its **stdout**
+     (SVG or HTML) replaces the fence. Language keys are normalised to lowercase
+     and matched case-insensitively against the fence's first info token. Typed
+     as a `BTreeMap<String,String>` on `Options`, parsed from a free `[renderers]`
+     table (no `deny_unknown_fields` — any language key is valid). It is not a
+     `:set` target (a table, wired once at render construction).
+   - **Safety.** Hard **5 s** wall-clock timeout (child killed on expiry), **4
+     MiB** stdout cap, stderr discarded. Any failure — spawn error, non-zero
+     exit, timeout, over-cap, empty or non-UTF-8 output — degrades gracefully to
+     the fence shown as a highlighted code block plus a styled error note,
+     mirroring `diagram.rs` (reusing `.diagram-error`). Unlike `math.rs` no
+     `catch_unwind` is needed: subprocess outcomes are `Result`-shaped, so there
+     is no panic to contain (a crash is still structurally impossible).
+   - **Output container — plain scroll box.** Output is wrapped in a
+     `.rendered-fence` block that is *only* an `overflow-x: auto` scroller, so a
+     wide SVG scrolls inside its own box and never the page (the same
+     no-page-h-scroll invariant `.mermaid`/`.table-wrap`/`.math-scroll` keep).
+     Unlike `.mermaid` there is **no intrinsic-width (`--dw`) parsing**: the
+     output is arbitrary (SVG *or* HTML), so a plain scroll box is the honest
+     primitive rather than over-fitting a width model to unknown markup.
+   - **Trust & override.** jumanji runs whatever the user configures, exactly as
+     zathura trusts its plugins — output is inlined verbatim (the CSP is the
+     downstream guard). A configured `mermaid` renderer **overrides** the
+     built-in merman path: `transform_fences` runs *before* `transform_mermaid`,
+     so a consumed fence is no longer a `CodeBlock` when the built-in pass runs.
+     Live reload re-runs the whole pipeline, so renderers re-execute for free.
 3. **Trait-based document backends** (the zathura seam: outline / render /
    links per section) if other formats (AsciiDoc, rST) ever land. (v3, maybe)
 
@@ -278,9 +317,9 @@ is 100% Rust (D3), so a JS math engine (KaTeX/MathJax) is out by construction.
 - **M2:** Tab TOC mode (tree, zathura index keys); `f` link hints; `:` commands
   with completion; quickmarks `m`/`'`; jumplist Ctrl-o/Ctrl-i; window-state
   persistence; user CSS themes; fragment/anchor links; GFM alerts/callouts.
-- **M3:** editor sync via D-Bus (D7); external fence renderers; **math
-  (done — D8: pulldown-latex → MathML Core, no JS)**; AUR package; stdin
-  streaming.
+- **M3:** editor sync via D-Bus (D7); **external fence renderers (done — D6.2:
+  `sh -c` + stdin, 5 s timeout, graceful degradation)**; **math (done — D8:
+  pulldown-latex → MathML Core, no JS)**; AUR package; stdin streaming.
 
 ## Keybinding spec (M1 + M2)
 
