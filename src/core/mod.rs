@@ -10,6 +10,7 @@ pub mod jumplist;
 pub mod keymap;
 pub mod marks;
 pub mod pipeline;
+pub mod source;
 pub mod toc;
 
 mod diagram;
