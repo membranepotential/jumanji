@@ -2,6 +2,44 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — v0.2.1: zoom mechanics reworked — reflow, cursor anchor, coalescing
+
+User feedback on v0.2.0: scrolling fixed, but zoom felt janky, should zoom
+towards the cursor, and should *reflow* the text — no horizontal page scroll
+after zooming. That reverses the reflow-free design from earlier today, so
+D5a was rewritten rather than patched (the original requirements it served —
+diagrams must really zoom, position must not drift — still hold and are now
+met by construction instead of by rigidity):
+
+- **Text reflows**: the column re-fits the viewport again; the page never
+  scrolls horizontally (e2e-asserted: `doc_scroll_width ≤ viewport_width` at
+  every zoom × width combination). A pre-existing overflow leak surfaced by
+  the new assertion — an unbreakable long-URL link — fixed with
+  `overflow-wrap: break-word` on the column.
+- **Diagrams keep zooming**: `.mermaid svg` pins its CSS width to the zoom-1
+  value (`min(100vw × --zoom − chrome, --content-width − chrome)`; chrome in
+  `rem`, invariant under text zoom since `rem` tracks the fixed root font,
+  not `--font-size`). Device width scales ∝ zoom — verified empirically over
+  zoom {0.7, 1, 1.5, 2} × window {500, 800, 1200}; overflow scrolls inside
+  the `.mermaid` box. `.mermaid` padding normalised 1.1em → 1.25rem (0.4 px).
+- **Anchored zoom, one mechanism**: capture the element under a probe point +
+  its viewport offset, apply the zoom, scroll it back. `Ctrl`+wheel probes
+  the cursor (motion-controller-tracked; GTK→CSS coords divide by zoom);
+  keys/D-Bus/text zoom probe the viewport top. Race-free by sequencing the
+  native `set_zoom_level` inside the capture eval's completion callback.
+  `Shell.zoom` is now the source of truth (native level lands async).
+- **De-janked**: wheel ticks coalesce into one anchored application per
+  ~40 ms (10-tick burst: 10 reflows → 1, settle ~5.5× faster under Xvfb;
+  absolute feel needs the user's GPU).
+
+e2e: `narrow_viewport_zoom_does_not_reflow` rewritten as
+`narrow_viewport_zoom_reflows_without_page_overflow` (the old invariant is
+intentionally dead); new tests for position anchoring (±8 % band), real
+synthetic Ctrl+wheel at the pointer (XTEST button 4/5 works under Xvfb), and
+burst coalescing. 105 unit + 21 e2e.
+
+Next: user feel-test on real GPU (cursor anchor, jank, 40 ms window).
+
 ## 2026-07-06 — v0.2.0: performance investigation — measure, don't guess
 
 User: "startup could be faster, scrolling feels janky." A dedicated

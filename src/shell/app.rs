@@ -13,8 +13,8 @@ use gtk::glib;
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{
-    Application, ApplicationWindow, Box as GtkBox, EventControllerKey, EventControllerScroll,
-    EventControllerScrollFlags, Orientation, PropagationPhase, Stack,
+    Application, ApplicationWindow, Box as GtkBox, EventControllerKey, EventControllerMotion,
+    EventControllerScroll, EventControllerScrollFlags, Orientation, PropagationPhase, Stack,
 };
 use webkit6::LoadEvent;
 use webkit6::prelude::*;
@@ -31,7 +31,7 @@ use crate::core::{Action, Direction, Heading, Mode};
 use super::bar::{Bar, Prompt};
 use super::dbus;
 use super::toc::TocView;
-use super::view::View;
+use super::view::{View, ViewportState, ZoomAnchor};
 use super::watch::{FileEvent, Watch};
 
 const APP_ID: &str = "org.membranepotential.jumanji";
@@ -93,8 +93,22 @@ struct Shell {
     text_zoom_step: f64,
     /// Base body font size in px (text-zoom 100% reference; from config).
     font_base_px: f64,
-    /// Current text-zoom factor (1.0 = 100%); geometric zoom lives in the webview.
+    /// Current geometric zoom factor (1.0 = 100%). The shell owns the intended
+    /// level; the webview is driven to match. Kept in the shell (rather than read
+    /// back from `zoom_level()`) because anchored zoom sets the native level in an
+    /// async callback, so `zoom_level()` briefly lags the intent.
+    zoom: f64,
+    /// Current text-zoom factor (1.0 = 100%).
     text_zoom: f64,
+    /// Last pointer position in *window* coordinates (from the motion
+    /// controller), translated to the webview at wheel-zoom time to anchor at
+    /// the cursor.
+    pointer: (f64, f64),
+    /// Ctrl+wheel ticks accumulated but not yet applied (+ = zoom in). Coalesced
+    /// so a rapid burst becomes one anchored reflow, not one per tick.
+    pending_zoom_steps: i32,
+    /// Whether a coalesced wheel-zoom flush is already queued on the main loop.
+    zoom_flush_scheduled: bool,
     matcher: Matcher,
     /// Mirror of the matcher's mode (the matcher does not expose a getter);
     /// kept in lockstep by every `set_mode` call so `GetState` can report it.
@@ -200,7 +214,11 @@ fn build_ui(app: &Application, file: PathBuf, options: Options, keymap: Rc<Keyma
         zoom_step: options.zoom_step,
         text_zoom_step: options.text_zoom_step,
         font_base_px: options.font_size_px as f64,
+        zoom: 1.0,
         text_zoom: 1.0,
+        pointer: (0.0, 0.0),
+        pending_zoom_steps: 0,
+        zoom_flush_scheduled: false,
         matcher: Matcher::new(Mode::Normal),
         mode: Mode::Normal,
         view: view.clone(),
@@ -231,6 +249,7 @@ fn build_ui(app: &Application, file: PathBuf, options: Options, keymap: Rc<Keyma
     if let Some(st) = saved {
         let mut s = shell.borrow_mut();
         s.text_zoom = st.text_zoom;
+        s.zoom = st.zoom;
         s.view.set_zoom(st.zoom);
         s.pending_restore = Some(st.scroll_y);
     }
@@ -239,6 +258,7 @@ fn build_ui(app: &Application, file: PathBuf, options: Options, keymap: Rc<Keyma
     connect_load_finished(&shell);
     connect_keys(&shell, keymap);
     connect_scroll(&shell);
+    connect_motion(&shell);
     connect_input_entry(&shell);
     connect_close(&shell);
     start_watch(&shell);
@@ -317,13 +337,13 @@ fn connect_load_finished(shell: &Rc<RefCell<Shell>>) {
             let s = shell.borrow();
             s.view.set_dark(s.dark);
             // Re-apply both zoom axes: the inline `--font-size`/`--zoom`
-            // custom properties are lost on reload.
+            // custom properties are lost on reload. No anchoring here — the
+            // scroll offset is restored explicitly below.
             if s.text_zoom != 1.0 {
                 s.view.set_text_zoom_px(s.font_base_px * s.text_zoom);
             }
-            let zoom = s.view.zoom_level();
-            if zoom != 1.0 {
-                s.view.set_zoom(zoom);
+            if s.zoom != 1.0 {
+                s.view.set_zoom(s.zoom);
             }
             if let Some(y) = s.pending_restore {
                 s.view.restore_scroll(y);
@@ -411,19 +431,98 @@ fn connect_scroll(shell: &Rc<RefCell<Shell>>) {
         if !mods.contains(ModifierType::CONTROL_MASK) || dy == 0.0 {
             return glib::Propagation::Proceed;
         }
-        let text = mods.contains(ModifierType::SHIFT_MASK);
-        let action = match (text, dy < 0.0) {
-            (false, true) => Action::ZoomIn,
-            (false, false) => Action::ZoomOut,
-            (true, true) => Action::TextZoomIn,
-            (true, false) => Action::TextZoomOut,
-        };
-        execute(&shell, action, 1);
-        refresh_status(&shell);
+        if mods.contains(ModifierType::SHIFT_MASK) {
+            // Ctrl+Shift+wheel → text zoom, immediate (top-anchored).
+            let action = if dy < 0.0 {
+                Action::TextZoomIn
+            } else {
+                Action::TextZoomOut
+            };
+            execute(&shell, action, 1);
+            refresh_status(&shell);
+        } else {
+            // Ctrl+wheel → geometric zoom, coalesced + cursor-anchored: each
+            // step is now a full reflow, so a burst is batched into one apply.
+            accumulate_wheel_zoom(&shell, dy);
+        }
         glib::Propagation::Stop
     });
 
     window.add_controller(controller);
+}
+
+/// Track the pointer (window coordinates) so Ctrl+wheel can anchor at the
+/// cursor. Capture phase on the toplevel, mirroring the key/scroll controllers —
+/// a controller on the WebView itself never sees these events (DESIGN.md D5a).
+fn connect_motion(shell: &Rc<RefCell<Shell>>) {
+    let controller = EventControllerMotion::new();
+    controller.set_propagation_phase(PropagationPhase::Capture);
+    let window = shell.borrow().window.clone();
+    let sh = shell.clone();
+    controller.connect_motion(move |_, x, y| {
+        sh.borrow_mut().pointer = (x, y);
+    });
+    window.add_controller(controller);
+}
+
+/// Coalescing window for Ctrl+wheel zoom. Long enough that a physical burst of
+/// wheel ticks collapses into one anchored reflow; short enough to feel
+/// immediate.
+const WHEEL_ZOOM_COALESCE: std::time::Duration = std::time::Duration::from_millis(40);
+
+/// Accumulate one Ctrl+wheel tick and schedule a single coalesced apply.
+fn accumulate_wheel_zoom(shell: &Rc<RefCell<Shell>>, dy: f64) {
+    {
+        let mut s = shell.borrow_mut();
+        s.pending_zoom_steps += if dy < 0.0 { 1 } else { -1 };
+        if s.zoom_flush_scheduled {
+            return;
+        }
+        s.zoom_flush_scheduled = true;
+    }
+    let sh = shell.clone();
+    glib::timeout_add_local_once(WHEEL_ZOOM_COALESCE, move || flush_wheel_zoom(&sh));
+}
+
+/// Apply all accumulated Ctrl+wheel ticks as one cursor-anchored zoom change.
+fn flush_wheel_zoom(shell: &Rc<RefCell<Shell>>) {
+    let applied = {
+        let mut s = shell.borrow_mut();
+        s.zoom_flush_scheduled = false;
+        let steps = std::mem::take(&mut s.pending_zoom_steps);
+        if steps == 0 {
+            None
+        } else {
+            let level = (s.zoom + s.zoom_step * steps as f64).max(0.2);
+            s.zoom = level;
+            let anchor = cursor_anchor(&s);
+            s.view.zoom_to(level, anchor);
+            Some(())
+        }
+    };
+    if applied.is_some() {
+        refresh_status(shell);
+    }
+}
+
+/// The current cursor as a [`ZoomAnchor`] in the webview's CSS-px coordinates.
+/// Translate window→webview (GTK logical px), then divide by the zoom level to
+/// get CSS px for `elementFromPoint`: the CSS viewport is `deviceWidth /
+/// (scale × zoom)` and GTK logical px is `deviceWidth / scale`, so the display
+/// scale factor cancels and only the zoom divisor remains.
+fn cursor_anchor(s: &Shell) -> ZoomAnchor {
+    let (wx, wy) = s.pointer;
+    let webview = s.view.widget();
+    let src = gtk::graphene::Point::new(wx as f32, wy as f32);
+    let p = s
+        .window
+        .compute_point(webview, &src)
+        .unwrap_or_else(|| gtk::graphene::Point::new(wx as f32, wy as f32));
+    let zoom = s.zoom.max(0.2);
+    ZoomAnchor::Point {
+        x: p.x() as f64 / zoom,
+        y: p.y() as f64 / zoom,
+    }
 }
 
 /// Wire the input bar's `Enter`: run a search or a `:` command depending on the
@@ -534,7 +633,7 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
                     s.view.clone(),
                     s.file.to_string_lossy().into_owned(),
                     s.dark,
-                    s.view.zoom_level(),
+                    s.zoom,
                     s.text_zoom,
                     s.section,
                     s.toc.len(),
@@ -542,19 +641,9 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
                     mode_str(&s).to_string(),
                 )
             };
-            view.scroll_state(move |y, pct, content_width| {
+            view.scroll_state(move |vs| {
                 let json = state_json(
-                    &file,
-                    y,
-                    pct,
-                    content_width,
-                    dark,
-                    zoom,
-                    text_zoom,
-                    section,
-                    toc_len,
-                    loaded,
-                    &mode,
+                    &file, &vs, dark, zoom, text_zoom, section, toc_len, loaded, &mode,
                 );
                 invocation.return_value(Some(&(json,).to_variant()));
             });
@@ -579,12 +668,12 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
 }
 
 /// Serialize the reader state as the compact JSON object `GetState` returns.
+/// The viewport widths (`viewport_width`, `doc_scroll_width`, `diagram_width`)
+/// let e2e tests assert the reflow invariants; the rest are unchanged.
 #[allow(clippy::too_many_arguments)]
 fn state_json(
     file: &str,
-    scroll_y: f64,
-    scroll_percent: u32,
-    content_width: f64,
+    vs: &ViewportState,
     dark: bool,
     zoom: f64,
     text_zoom: f64,
@@ -595,10 +684,17 @@ fn state_json(
 ) -> String {
     format!(
         "{{\"file\":{file},\"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
-         \"content_width\":{content_width},\
+         \"content_width\":{content_width},\"viewport_width\":{viewport_width},\
+         \"doc_scroll_width\":{doc_scroll_width},\"diagram_width\":{diagram_width},\
          \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded}}}",
         file = json_string(file),
+        scroll_y = vs.scroll_y,
+        scroll_percent = vs.scroll_percent,
+        content_width = vs.content_width,
+        viewport_width = vs.viewport_width,
+        doc_scroll_width = vs.doc_scroll_width,
+        diagram_width = vs.diagram_width,
         mode = json_string(mode),
     )
 }
@@ -718,13 +814,17 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
                 s.view.scroll_to_anchor(&anchor);
             }
         }
+        // Keyboard / D-Bus zoom is immediate (counts already batch) and
+        // top-anchored — the reflow keeps the top of the viewport fixed.
         Action::ZoomIn => {
-            let level = s.view.zoom_level() + s.zoom_step * count as f64;
-            s.view.set_zoom(level);
+            s.zoom = (s.zoom + s.zoom_step * count as f64).max(0.2);
+            let level = s.zoom;
+            s.view.zoom_to(level, ZoomAnchor::Top);
         }
         Action::ZoomOut => {
-            let level = s.view.zoom_level() - s.zoom_step * count as f64;
-            s.view.set_zoom(level);
+            s.zoom = (s.zoom - s.zoom_step * count as f64).max(0.2);
+            let level = s.zoom;
+            s.view.zoom_to(level, ZoomAnchor::Top);
         }
         Action::TextZoomIn => {
             s.text_zoom = clamp_text_zoom(
@@ -741,9 +841,12 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             s.view.set_text_zoom_px(s.font_base_px * s.text_zoom);
         }
         Action::ZoomReset => {
-            s.view.set_zoom(1.0);
+            s.zoom = 1.0;
             s.text_zoom = 1.0;
-            s.view.set_text_zoom_px(s.font_base_px);
+            let base = s.font_base_px;
+            // Reset both axes under a single top anchor (avoids two anchors
+            // fighting over the combined reflow).
+            s.view.reset_zoom(base);
         }
         Action::SearchStart => s.bar.open_input(Prompt::Search),
         Action::SearchNext => s.view.find_next(),
@@ -773,7 +876,7 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
         }
         Action::QuickmarkSet(c) => {
             let view = s.view.clone();
-            let zoom = s.view.zoom_level();
+            let zoom = s.zoom;
             drop(s);
             let sh = shell.clone();
             view.scroll_position(move |y| {
@@ -793,6 +896,7 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
                         {
                             let mut s = sh.borrow_mut();
                             s.jumplist.push(cur);
+                            s.zoom = p.zoom;
                             s.view.set_zoom(p.zoom);
                             s.view.restore_scroll(p.scroll_y);
                         }
@@ -866,12 +970,12 @@ fn refresh_status(shell: &Rc<RefCell<Shell>>) {
             s.view.clone(),
             s.bar.clone(),
             s.matcher.pending_indicator(),
-            zoom_indicator(s.view.zoom_level(), s.text_zoom),
+            zoom_indicator(s.zoom, s.text_zoom),
         )
     };
-    view.scroll_state(move |y, pct, _w| {
-        sh.borrow_mut().last_scroll = y;
-        bar.set_status_right(pct, &pending, &zoom);
+    view.scroll_state(move |vs| {
+        sh.borrow_mut().last_scroll = vs.scroll_y;
+        bar.set_status_right(vs.scroll_percent, &pending, &zoom);
     });
 }
 
@@ -1182,11 +1286,13 @@ fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf) {
         match s.history.get(&path) {
             Some(st) => {
                 s.text_zoom = st.text_zoom;
+                s.zoom = st.zoom;
                 s.view.set_zoom(st.zoom);
                 s.pending_restore = Some(st.scroll_y);
             }
             None => {
                 s.text_zoom = 1.0;
+                s.zoom = 1.0;
                 s.view.set_zoom(1.0);
                 s.pending_restore = Some(0.0);
             }
@@ -1416,7 +1522,7 @@ fn jump_to(shell: &Rc<RefCell<Shell>>, after: impl FnOnce(&mut Shell) + 'static)
 fn record_current_state(s: &mut Shell) {
     let state = FileState {
         scroll_y: s.last_scroll,
-        zoom: s.view.zoom_level(),
+        zoom: s.zoom,
         text_zoom: s.text_zoom,
     };
     let file = s.file.clone();

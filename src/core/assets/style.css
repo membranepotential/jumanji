@@ -16,6 +16,18 @@
   /* Overridden by a generated block using opts.page_width_px. */
   --content-width: 720px;
 
+  /* Horizontal chrome constants, deliberately in `rem`. `rem` resolves against
+   * the root (<html>) font size, which is the browser default 16px and never
+   * changes — text zoom only rewrites the *body* `--font-size`, so these stay
+   * invariant under both zoom axes. They are used both as real padding below
+   * and, summed into `--diagram-chrome`, by the diagram-width formula. */
+  --main-pad-x: 1.5rem;
+  --mermaid-pad: 1.25rem;
+  /* Total horizontal space between the viewport/column edge and a diagram's
+   * svg element: both main paddings + both .mermaid paddings + both 1px borders. Must
+   * match the real box geometry exactly or the pinned diagram width drifts. */
+  --diagram-chrome: calc(2 * var(--main-pad-x) + 2 * var(--mermaid-pad) + 2px);
+
   --bg: #ffffff;
   --fg: #1f2328;
   --fg-muted: #59636e;
@@ -92,14 +104,20 @@ body {
 }
 
 main.markdown-body {
-  /* `--zoom` mirrors the webkit zoom level (set by the shell). Multiplying the
-   * viewport-relative bound by it keeps the layout width constant in CSS px
-   * across zoom changes: zooming never reflows — content instead grows past
-   * the viewport edge (pan with h/l), zathura-style — and diagrams scale even
-   * when the column is viewport-constrained (narrow windows). */
-  width: min(var(--content-width), calc(100% * var(--zoom, 1)));
+  /* Fit the viewport: never wider than the window, so the page itself never
+   * scrolls horizontally at any geometric-zoom level (device viewport shrinks
+   * in CSS px as zoom rises, and this column shrinks with it — the prose
+   * reflows). Wide tables / code / diagrams scroll inside their own
+   * `overflow-x: auto` boxes, which is where all horizontal scrolling lives. */
+  width: min(var(--content-width), 100%);
   margin: 0 auto;
-  padding: 3.5rem 1.5rem 6rem;
+  padding: 3.5rem var(--main-pad-x) 6rem;
+  /* Break long unbreakable inline runs (URLs, long tokens) instead of letting
+   * them push the page wider than the viewport. Now that zoom reflows into a
+   * narrow column, an un-wrappable link would otherwise force horizontal page
+   * scroll — the one thing that must never happen. Code blocks (white-space:
+   * pre) and diagrams keep their own overflow-x scrollers and are unaffected. */
+  overflow-wrap: break-word;
 }
 
 /* ---- Headings ------------------------------------------------------------ */
@@ -401,7 +419,9 @@ details[open] > summary {
  * it stays legible regardless of the page theme. */
 .mermaid {
   margin: 1.6em 0;
-  padding: 1.1em;
+  /* `rem` (not `em`) so the padding — and thus `--diagram-chrome` — stays fixed
+   * under text zoom; the diagram-width formula depends on this being exact. */
+  padding: var(--mermaid-pad);
   background: #ffffff;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -409,7 +429,21 @@ details[open] > summary {
   text-align: center;
 }
 .mermaid svg {
-  max-width: 100%;
+  /* Pin the diagram's CSS width to its zoom-1 value so its *device* size scales
+   * linearly with geometric zoom (device px = CSS px × zoom); any excess scrolls
+   * inside .mermaid (overflow-x: auto), never the page. `100vw * --zoom` is
+   * numerically the device viewport width in CSS px — 100vw = deviceWidth / zoom,
+   * so the product is the constant device width regardless of zoom — from which
+   * we subtract the chrome to the svg edge. We cap at the reading column so a
+   * full-width diagram never exceeds `--content-width`. merman emits the svg with
+   * an inline `max-width:<intrinsic>px`; that inline style still caps small
+   * diagrams (effective width = min(this width, intrinsic)), so no stylesheet
+   * `max-width` is needed — and a `max-width: 100%` here would wrongly clamp the
+   * device growth and defeat the zoom. */
+  width: min(
+    calc(100vw * var(--zoom, 1) - var(--diagram-chrome)),
+    calc(var(--content-width) - var(--diagram-chrome))
+  );
   height: auto;
 }
 

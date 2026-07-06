@@ -6,3 +6,9 @@
 # already existing elements were commented out
 
 #/target
+
+# makepkg build residue (running makepkg -si inside packaging/aur/)
+packaging/aur/src/
+packaging/aur/pkg/
+packaging/aur/*.tar.gz
+packaging/aur/*.pkg.tar.zst

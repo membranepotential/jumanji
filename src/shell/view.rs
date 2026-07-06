@@ -26,6 +26,85 @@ use crate::core::config::SelectionClipboard;
 /// and a resolved target URI, respectively).
 type Sink = Rc<RefCell<Option<Box<dyn Fn(String)>>>>;
 
+/// Where a reflow-preserving zoom keeps the reading position pinned.
+///
+/// Both geometric and text zoom now reflow the page, so an anchor is captured
+/// before the change and scrolled back into view after — this picks the anchor
+/// element. One mechanism ([`capture_anchor_js`] + [`RESTORE_ANCHOR_JS`]),
+/// parameterised by the probe point.
+#[derive(Clone, Copy)]
+pub enum ZoomAnchor {
+    /// Keep the element at the top of the viewport fixed (keyboard / D-Bus
+    /// zoom, and text zoom). Only anchors when scrolled, so an exact top stays
+    /// exactly at the top.
+    Top,
+    /// Keep the element under a viewport point (CSS px) fixed — the cursor, for
+    /// Ctrl+wheel zoom ("zoom towards the cursor").
+    Point { x: f64, y: f64 },
+}
+
+/// A single, consistent viewport snapshot read by `GetState` and the statusbar.
+/// All widths are CSS px.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewportState {
+    pub scroll_y: f64,
+    /// Scroll progress 0..=100.
+    pub scroll_percent: u32,
+    /// Layout width of the content column (`main`). Reflows with geometric zoom
+    /// now (it tracks the CSS viewport when the window is narrower than the
+    /// column), unlike the old reflow-free design.
+    pub content_width: f64,
+    /// `window.innerWidth` — the CSS viewport width.
+    pub viewport_width: f64,
+    /// `document.scrollWidth` — must stay ≤ `viewport_width` (no page h-scroll).
+    pub doc_scroll_width: f64,
+    /// Rendered width of the first `.mermaid svg` (0 if none). CSS px, so its
+    /// device size is `diagram_width × zoom`.
+    pub diagram_width: f64,
+}
+
+/// JS that captures the anchor element into `window.__jmnj_anchor` (element +
+/// its current viewport-top offset) for the given probe point. Paired with
+/// [`RESTORE_ANCHOR_JS`], which runs after the zoom change reflows the page.
+fn capture_anchor_js(anchor: &ZoomAnchor) -> String {
+    // (x expression, y-probe list, guard) — Top probes a few px down the column
+    // centre and only when scrolled; Point probes exactly the given point.
+    let (cx, ys, guard_open, guard_close) = match anchor {
+        ZoomAnchor::Top => (
+            "(() => { const m = document.querySelector('main') || document.body; \
+              const r = m.getBoundingClientRect(); return r.left + r.width / 2; })()"
+                .to_string(),
+            "[8, 40, 80, 140]".to_string(),
+            "if (window.scrollY > 0) {",
+            "}",
+        ),
+        ZoomAnchor::Point { x, y } => (
+            format!("Math.max(1, Math.min(innerWidth - 1, {x}))"),
+            format!("[Math.max(1, Math.min(innerHeight - 1, {y}))]"),
+            "",
+            "",
+        ),
+    };
+    format!(
+        "(() => {{ window.__jmnj_anchor = null; {guard_open} \
+           const cx = Math.max(1, Math.min(innerWidth - 1, {cx})); \
+           for (const py of {ys}) {{ \
+             const c = document.elementFromPoint(cx, py); \
+             if (c && c !== document.body && c !== document.documentElement \
+                 && c.tagName !== 'MAIN') {{ \
+               window.__jmnj_anchor = {{ el: c, top: c.getBoundingClientRect().top }}; \
+               break; }} }} {guard_close} }})();"
+    )
+}
+
+/// JS that restores the reading position: scroll so the captured anchor returns
+/// to the same viewport y it had before the reflow. No-op if nothing was
+/// captured (e.g. an unscrolled Top anchor).
+const RESTORE_ANCHOR_JS: &str = "(() => { const a = window.__jmnj_anchor; \
+    if (a && a.el) { const nt = a.el.getBoundingClientRect().top; \
+      window.scrollBy({ top: nt - a.top, left: 0, behavior: 'instant' }); } \
+    window.__jmnj_anchor = null; })();";
+
 /// Native WebView background painted behind the document, matched to the theme
 /// so unpainted regions never flash a mismatched colour (light `#ffffff`,
 /// dark `#1a1a1a` — the same values `style.css` uses for `--bg`).
@@ -194,11 +273,12 @@ impl View {
         );
     }
 
-    /// Geometric zoom: webkit full-page zoom (scales everything, diagrams
-    /// included, because `zoom-text-only` is off by default). The level is
-    /// mirrored into the `--zoom` custom property so the stylesheet can keep
-    /// the layout width constant under zoom (no reflow; see `style.css`).
-    /// Like text zoom, the property is re-applied after each load.
+    /// Geometric zoom without anchoring: set webkit full-page zoom and mirror
+    /// the level into the `--zoom` custom property (which the stylesheet reads
+    /// to keep each diagram's device size scaling linearly with zoom; see
+    /// `style.css`). Used where the position is restored by other means — the
+    /// post-load re-apply (`--zoom` is lost on reload) and quickmark/history
+    /// restores, which set the scroll offset explicitly.
     pub fn set_zoom(&self, level: f64) {
         let level = level.max(0.2);
         self.webview.set_zoom_level(level);
@@ -207,37 +287,83 @@ impl View {
         ));
     }
 
-    pub fn zoom_level(&self) -> f64 {
-        self.webview.zoom_level()
+    /// Geometric zoom anchored at `anchor`. Because zoom now reflows the page,
+    /// the reading position drifts unless pinned.
+    ///
+    /// `set_zoom_level` is a native call and cannot be issued from JS, so the
+    /// sequence is race-free by construction: capture the anchor (async JS), and
+    /// only in its completion callback set the native zoom + `--zoom` and restore
+    /// the position (a second JS eval). The two evals share `window.__jmnj_anchor`
+    /// and can never interleave for one call, since the second is scheduled from
+    /// the first's callback.
+    pub fn zoom_to(&self, level: f64, anchor: ZoomAnchor) {
+        let level = level.max(0.2);
+        let webview = self.webview.clone();
+        let capture = capture_anchor_js(&anchor);
+        self.webview.evaluate_javascript(
+            &capture,
+            None,
+            None,
+            None::<&gtk::gio::Cancellable>,
+            move |_res| {
+                webview.set_zoom_level(level);
+                let restore = format!(
+                    "document.documentElement.style.setProperty('--zoom', {level});{RESTORE_ANCHOR_JS}"
+                );
+                webview.evaluate_javascript(
+                    &restore,
+                    None,
+                    None,
+                    None::<&gtk::gio::Cancellable>,
+                    |_| {},
+                );
+            },
+        );
+    }
+
+    /// Reset both zoom axes to 100%, anchored once at the top of the viewport.
+    /// A single capture spans both changes (geometric + text) so the reflow from
+    /// each is corrected together rather than fighting two anchors.
+    pub fn reset_zoom(&self, font_base_px: f64) {
+        let webview = self.webview.clone();
+        let capture = capture_anchor_js(&ZoomAnchor::Top);
+        self.webview.evaluate_javascript(
+            &capture,
+            None,
+            None,
+            None::<&gtk::gio::Cancellable>,
+            move |_res| {
+                webview.set_zoom_level(1.0);
+                let restore = format!(
+                    "document.documentElement.style.setProperty('--zoom', 1);\
+                     document.documentElement.style.setProperty('--font-size', '{font_base_px}px');\
+                     {RESTORE_ANCHOR_JS}"
+                );
+                webview.evaluate_javascript(
+                    &restore,
+                    None,
+                    None,
+                    None::<&gtk::gio::Cancellable>,
+                    |_| {},
+                );
+            },
+        );
     }
 
     /// Text zoom: set the effective body font size (px) via the `--font-size`
-    /// custom property on `<html>`, reflowing prose without touching layout
-    /// geometry or diagram sizing. Re-applied after each load (the inline style
-    /// is lost when the document reloads).
+    /// custom property on `<html>`, reflowing prose. Re-applied after each load
+    /// (the inline style is lost when the document reloads).
     ///
-    /// Reflow moves content, so the element at the top of the viewport is
-    /// captured before the change and scrolled back into view after — the
-    /// reading position stays anchored instead of jumping.
+    /// Reflow moves content, so the top-of-viewport anchor is captured before the
+    /// change and the position restored after. Pure JS (no native call), so
+    /// capture → apply → restore fit in one eval — the same anchoring mechanism
+    /// the geometric zoom uses, just applied inline.
     pub fn set_text_zoom_px(&self, px: f64) {
+        let capture = capture_anchor_js(&ZoomAnchor::Top);
         self.run_js(&format!(
-            "(() => {{
-                let anchor = null;
-                if (window.scrollY > 0) {{
-                    const m = document.querySelector('main') || document.body;
-                    const r = m.getBoundingClientRect();
-                    const cx = Math.max(1, Math.min(innerWidth - 1, r.left + r.width / 2));
-                    for (const py of [8, 40, 80, 140]) {{
-                        const c = document.elementFromPoint(cx, py);
-                        if (c && c !== document.body && c !== document.documentElement && c !== m) {{
-                            anchor = c;
-                            break;
-                        }}
-                    }}
-                }}
-                document.documentElement.style.setProperty('--font-size', '{px}px');
-                if (anchor) anchor.scrollIntoView({{ block: 'start' }});
-            }})();"
+            "{capture}\
+             document.documentElement.style.setProperty('--font-size', '{px}px');\
+             {RESTORE_ANCHOR_JS}"
         ));
     }
 
@@ -298,19 +424,21 @@ impl View {
         );
     }
 
-    /// Query scroll offset (px), percentage (0..=100) and the content column's
-    /// layout width (CSS px) in one JS round-trip, delivering all three to
-    /// `callback`. Used by the D-Bus `GetState` method so a single reply
-    /// reflects a single, consistent viewport snapshot. The layout width is in
-    /// CSS px, so it must stay *constant* under geometric zoom (the no-reflow
-    /// invariant of D5a) — tests assert on exactly that.
-    pub fn scroll_state<F: FnOnce(f64, u32, f64) + 'static>(&self, callback: F) {
+    /// Snapshot the viewport in one JS round-trip, delivering a [`ViewportState`]
+    /// to `callback`. Used by the D-Bus `GetState` method (and the statusbar) so
+    /// a single reply reflects one consistent snapshot. The extra widths let
+    /// tests assert the reflow invariants: `doc_scroll_width ≤ viewport_width`
+    /// (no page h-scroll) and diagram device growth (`diagram_width × zoom`).
+    pub fn scroll_state<F: FnOnce(ViewportState) + 'static>(&self, callback: F) {
         let script = "(() => { const d = document.documentElement, b = document.body; \
              const max = (b.scrollHeight || d.scrollHeight) - window.innerHeight; \
              const p = max > 0 ? Math.round((window.scrollY / max) * 100) : 0; \
              const m = document.querySelector('main') || b; \
+             const svg = document.querySelector('.mermaid svg'); \
              return { y: window.scrollY, p: Math.min(100, Math.max(0, p)), \
-                      w: m.offsetWidth }; })()";
+                      w: m.offsetWidth, vw: window.innerWidth, \
+                      dw: Math.max(d.scrollWidth, b.scrollWidth), \
+                      gw: svg ? svg.getBoundingClientRect().width : 0 }; })()";
         self.webview.evaluate_javascript(
             script,
             None,
@@ -318,12 +446,24 @@ impl View {
             None::<&gtk::gio::Cancellable>,
             move |res| match res {
                 Ok(v) => {
-                    let y = v.object_get_property("y").map_or(0.0, |n| n.to_double());
-                    let p = v.object_get_property("p").map_or(0.0, |n| n.to_double());
-                    let w = v.object_get_property("w").map_or(0.0, |n| n.to_double());
-                    callback(y, p.clamp(0.0, 100.0) as u32, w);
+                    let num = |k| v.object_get_property(k).map_or(0.0, |n| n.to_double());
+                    callback(ViewportState {
+                        scroll_y: num("y"),
+                        scroll_percent: num("p").clamp(0.0, 100.0) as u32,
+                        content_width: num("w"),
+                        viewport_width: num("vw"),
+                        doc_scroll_width: num("dw"),
+                        diagram_width: num("gw"),
+                    });
                 }
-                Err(_) => callback(0.0, 0, 0.0),
+                Err(_) => callback(ViewportState {
+                    scroll_y: 0.0,
+                    scroll_percent: 0,
+                    content_width: 0.0,
+                    viewport_width: 0.0,
+                    doc_scroll_width: 0.0,
+                    diagram_width: 0.0,
+                }),
             },
         );
     }

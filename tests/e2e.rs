@@ -87,9 +87,18 @@ struct State {
     file: String,
     scroll_y: f64,
     scroll_percent: u32,
-    /// Layout width of the content column in CSS px — invariant under
-    /// geometric zoom (the D5a no-reflow guarantee).
+    /// Layout width of the content column in CSS px. Reflows with geometric
+    /// zoom now: it tracks the CSS viewport when the window is narrower than the
+    /// column.
     content_width: f64,
+    /// CSS viewport width (`window.innerWidth`).
+    viewport_width: f64,
+    /// `document.scrollWidth`; must stay ≤ `viewport_width` (+1) — no page
+    /// horizontal scroll at any zoom.
+    doc_scroll_width: f64,
+    /// First `.mermaid svg` rendered width in CSS px (0 if none). Device size is
+    /// `diagram_width × zoom`.
+    diagram_width: f64,
     dark: bool,
     zoom: f64,
     text_zoom: f64,
@@ -108,6 +117,9 @@ impl State {
             scroll_y: field(json, "scroll_y")?.parse().ok()?,
             scroll_percent: field(json, "scroll_percent")?.parse().ok()?,
             content_width: field(json, "content_width")?.parse().ok()?,
+            viewport_width: field(json, "viewport_width")?.parse().ok()?,
+            doc_scroll_width: field(json, "doc_scroll_width")?.parse().ok()?,
+            diagram_width: field(json, "diagram_width")?.parse().ok()?,
             dark: field(json, "dark")? == "true",
             zoom: field(json, "zoom")?.parse().ok()?,
             text_zoom: field(json, "text_zoom")?.parse().ok()?,
@@ -293,6 +305,35 @@ impl Harness {
         let mut args = vec!["key", "--window", &self.window_id];
         args.extend_from_slice(keys);
         self.xdotool(args);
+    }
+
+    /// Move the pointer to window-relative `(x, y)`.
+    fn mouse_move(&self, x: i32, y: i32) {
+        self.xdotool([
+            "mousemove".into(),
+            "--window".into(),
+            self.window_id.clone(),
+            x.to_string(),
+            y.to_string(),
+        ]);
+    }
+
+    /// Synthesize a Ctrl+wheel burst at the current pointer: `up` scrolls the
+    /// wheel up (button 4 → zoom in) else down (button 5 → zoom out), `count`
+    /// ticks `delay_ms` apart. Delivered via XTEST **at the pointer** (not
+    /// `--window`, which drops synthetic button-4/5 events under bare Xvfb).
+    fn ctrl_wheel(&self, up: bool, count: u32, delay_ms: u32) {
+        let button = if up { "4" } else { "5" };
+        self.xdotool(["keydown".to_string(), "ctrl".to_string()]);
+        self.xdotool([
+            "click".to_string(),
+            "--repeat".to_string(),
+            count.to_string(),
+            "--delay".to_string(),
+            delay_ms.to_string(),
+            button.to_string(),
+        ]);
+        self.xdotool(["keyup".to_string(), "ctrl".to_string()]);
     }
 
     fn call(
@@ -520,51 +561,159 @@ fn geometric_zoom_in_and_reset() {
 }
 
 #[test]
-fn narrow_viewport_zoom_does_not_reflow() {
-    // Regression: on a viewport narrower than `page-width`, geometric zoom used
-    // to *reflow* — the column re-fit the shrunken CSS viewport, so diagrams
-    // never got visually bigger and the reading position drifted. The fix pins
-    // the layout width (CSS px) via `--zoom`, so it must not change when
-    // zooming; the content instead overflows the viewport (device px), which is
-    // exactly what makes a full-width mermaid diagram scale.
+fn narrow_viewport_zoom_reflows_without_page_overflow() {
+    // The v0.3 zoom redesign: geometric zoom *reflows* the prose into the
+    // viewport (no page horizontal scroll ever), while diagrams keep growing
+    // with zoom (their device size scales). Replaces the old reflow-free test,
+    // whose no-reflow invariant is now intentionally dead.
     let Some((_g, h)) = setup() else { return };
 
     // Shrink the window well below page-width (720) so the column is
     // viewport-constrained. No WM under Xvfb, so resize the X window directly.
     h.xdotool(["windowsize", "--sync", &h.window_id, "500", "800"]);
-    h.wait_for_state("window narrowed", SETTLE, |s| {
-        s.content_width > 0.0 && s.content_width < 600.0
-    });
     // Let the resize settle: the baseline must be the final width, not a
-    // mid-resize snapshot, or the invariance assert below compares junk.
+    // mid-resize snapshot.
     let narrow = {
         let prev = std::cell::Cell::new(-1.0_f64);
         h.wait_for_state("width stable after resize", SETTLE, move |s| {
-            let stable = (s.content_width - prev.get()).abs() < 1.0;
+            let stable = s.content_width > 0.0 && (s.content_width - prev.get()).abs() < 1.0;
+            prev.set(s.content_width);
+            stable
+        })
+    };
+    // Baseline invariants at zoom 1: the column is viewport-bound (tracks
+    // innerWidth), there is no page horizontal scroll, and a diagram exists.
+    assert!(
+        (narrow.content_width - narrow.viewport_width).abs() <= 3.0,
+        "column should track the narrow viewport: content {} vs viewport {}",
+        narrow.content_width,
+        narrow.viewport_width
+    );
+    assert!(
+        narrow.doc_scroll_width <= narrow.viewport_width + 1.0,
+        "no page h-scroll at zoom 1: scrollWidth {} vs viewport {}",
+        narrow.doc_scroll_width,
+        narrow.viewport_width
+    );
+    assert!(narrow.diagram_width > 0.0, "demo has a mermaid diagram");
+
+    // Scroll into the document, then zoom in hard (~1.5×).
+    h.execute_action("scroll down", 10);
+    h.wait_for_state("scrolled", SETTLE, |s| s.scroll_y > 0.0);
+    h.execute_action("zoom in", 5);
+    h.wait_for_state("zoom applied", SETTLE, |s| s.zoom > 1.4);
+    // Wait for the reflow to settle: the zoom level lands before the layout has
+    // finished reflowing (the `--zoom`/innerWidth change is applied by an async
+    // JS eval), so read a *stable* width, not the first mid-transition snapshot.
+    let zoomed = {
+        let prev = std::cell::Cell::new(-1.0_f64);
+        h.wait_for_state("width settled after zoom", SETTLE, move |s| {
+            let stable =
+                s.zoom > 1.4 && s.content_width > 0.0 && (s.content_width - prev.get()).abs() < 1.0;
             prev.set(s.content_width);
             stable
         })
     };
 
-    // Scroll into the document, then zoom in hard.
-    h.execute_action("scroll down", 10);
-    h.wait_for_state("scrolled", SETTLE, |s| s.scroll_y > 0.0);
-    h.execute_action("zoom in", 5);
-    // The layout width (CSS px) must come back to its zoom-1 value: reflow-free
-    // zoom. Polling (not first-snapshot) because the `--zoom` property is set
-    // by an async JS eval.
-    let zoomed = h.wait_for_state("layout width zoom-invariant (no reflow)", SETTLE, |s| {
-        s.zoom > 1.4 && (s.content_width - narrow.content_width).abs() < 2.0
-    });
-    // Device-pixel width = layout width × zoom now exceeds its zoom-1 value:
-    // the column (diagrams included) really is rendered larger, not re-fit.
+    // 1) No page horizontal scroll at zoom — the whole point of reflow.
     assert!(
-        zoomed.content_width * zoomed.zoom > narrow.content_width * 1.3,
-        "zoomed content should be rendered wider than the viewport: \
-         {} css px × {} zoom vs {} at zoom 1",
+        zoomed.doc_scroll_width <= zoomed.viewport_width + 1.0,
+        "no page h-scroll under zoom: scrollWidth {} vs viewport {}",
+        zoomed.doc_scroll_width,
+        zoomed.viewport_width
+    );
+    // 2) Column re-fit: it still tracks the (now-shrunken CSS) viewport, and is
+    //    genuinely narrower than the zoom-1 column.
+    assert!(
+        (zoomed.content_width - zoomed.viewport_width).abs() <= 3.0,
+        "column should re-fit the viewport under zoom: content {} vs viewport {}",
         zoomed.content_width,
-        zoomed.zoom,
-        narrow.content_width
+        zoomed.viewport_width
+    );
+    assert!(
+        zoomed.content_width < narrow.content_width - 1.0,
+        "column should reflow narrower under zoom: {} -> {}",
+        narrow.content_width,
+        zoomed.content_width
+    );
+    // 3) The diagram really zooms: its *device* width (CSS width × zoom) grew
+    //    ≥1.3× its zoom-1 device size even as the column shrank.
+    let dev0 = narrow.diagram_width * narrow.zoom;
+    let dev1 = zoomed.diagram_width * zoomed.zoom;
+    assert!(
+        dev1 >= dev0 * 1.3,
+        "diagram device width should grow with zoom: {dev0} -> {dev1}"
+    );
+}
+
+#[test]
+fn key_zoom_keeps_reading_position_anchored() {
+    // Geometric zoom reflows, so without anchoring the reading position would
+    // drift. Keyboard/D-Bus zoom anchors at the top of the viewport: the scroll
+    // percentage should stay in a sane band across several zoom steps.
+    let Some((_g, h)) = setup() else { return };
+
+    h.execute_action("scroll down", 14);
+    let mid = h.wait_for_state("scrolled into document", SETTLE, |s| {
+        s.scroll_percent > 8 && s.scroll_percent < 88
+    });
+
+    for _ in 0..4 {
+        h.execute_action("zoom in", 1);
+    }
+    let zoomed = h.wait_for_state("zoomed in several steps", SETTLE, |s| s.zoom > 1.3);
+    let drift = (zoomed.scroll_percent as i64 - mid.scroll_percent as i64).abs();
+    assert!(
+        drift <= 8,
+        "top-anchored zoom should hold the reading position: {}% -> {}% (drift {drift})",
+        mid.scroll_percent,
+        zoomed.scroll_percent
+    );
+}
+
+#[test]
+fn ctrl_wheel_zooms_towards_cursor_without_overflow() {
+    // Ctrl+wheel is cursor-anchored geometric zoom. Under bare Xvfb this needs a
+    // real pointer + XTEST wheel (see `ctrl_wheel`); if a machine can't deliver
+    // synthetic wheel events this will time out — acceptable, e2e already gates
+    // on tool availability and never runs in CI.
+    let Some((_g, h)) = setup() else { return };
+    assert_eq!(h.get_state().zoom, 1.0, "starts at 1.0");
+
+    h.mouse_move(200, 300);
+    h.ctrl_wheel(true, 3, 5); // three ticks in
+    let zoomed = h.wait_for_state("ctrl+wheel raises zoom", SETTLE, |s| s.zoom > 1.0);
+    // The cursor-anchored reflow must not introduce page horizontal scroll.
+    assert!(
+        zoomed.doc_scroll_width <= zoomed.viewport_width + 1.0,
+        "no page h-scroll after cursor-anchored zoom: scrollWidth {} vs viewport {}",
+        zoomed.doc_scroll_width,
+        zoomed.viewport_width
+    );
+
+    h.ctrl_wheel(false, 3, 5); // three ticks back out
+    h.wait_for_state("ctrl+wheel lowers zoom back", SETTLE, |s| {
+        (s.zoom - 1.0).abs() < 0.05
+    });
+}
+
+#[test]
+fn ctrl_wheel_burst_coalesces_without_losing_steps() {
+    // A rapid 10-tick burst must apply as one coalesced anchored zoom yet lose no
+    // step: zoom-step 0.1 × 10 ≈ +1.0, so it settles near 2.0.
+    let Some((_g, h)) = setup() else { return };
+
+    h.mouse_move(200, 300);
+    h.ctrl_wheel(true, 10, 2); // ten ticks, 2 ms apart → within one coalesce window
+    let z = h.wait_for_state("burst settles near 2.0", SETTLE, |s| s.zoom > 1.85);
+    assert!(
+        (z.zoom - 2.0).abs() < 0.2,
+        "10-tick burst should reach ~2.0 with no lost steps, got {}",
+        z.zoom
+    );
+    assert!(
+        z.doc_scroll_width <= z.viewport_width + 1.0,
+        "no page h-scroll after burst"
     );
 }
 

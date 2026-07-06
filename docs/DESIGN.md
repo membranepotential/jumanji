@@ -137,18 +137,37 @@ selection to Rust, which writes it to the configured GDK clipboard.
 Zoom has two independent axes, both count-multiplied and reset together by `=`:
 
 - **Geometric** = webkit full-page `zoom_level` — scales *everything*, diagrams
-  included (verified: `zoom-text-only` is off by default, so the px unit itself
-  scales, and an inline `max-width:<px>` on a merman SVG scales with it). Bound
-  to `+`/`-` (zathura muscle memory; config `zoom in` / `zoom out`) and
-  `Ctrl`+wheel. Geometric zoom is **reflow-free**: the shell mirrors the level
-  into a `--zoom` custom property and the stylesheet sizes the column as
-  `min(--content-width, 100% × --zoom)`, so the layout width in CSS px is
-  invariant under zoom. Consequences: the reading position never drifts when
-  zooming, and on a viewport narrower than `page-width` the content grows past
-  the window edge (pan with `h`/`l`, zathura-style) instead of re-fitting —
-  which is what makes a full-width diagram actually get bigger. `GetState`
-  exposes the layout width as `content_width` so tests can assert the
-  invariant.
+  included (`zoom-text-only` is off by default, so the px unit itself scales).
+  Bound to `+`/`-` (zathura muscle memory; config `zoom in` / `zoom out`) and
+  `Ctrl`+wheel. Geometric zoom **reflows the text** (user-decided 2026-07,
+  replacing the short-lived reflow-free design): the column re-fits the CSS
+  viewport, so the page never scrolls horizontally at any zoom level — wide
+  tables, code blocks and diagrams scroll inside their own `overflow-x` boxes
+  instead. Three consequences are engineered rather than emergent:
+  - **Diagrams still zoom.** The shell mirrors the level into a `--zoom`
+    custom property, and `.mermaid svg` pins its **CSS-px width to the zoom-1
+    value** via `min(100vw × --zoom − chrome, --content-width − chrome)`
+    (`100vw × zoom` is numerically the constant device viewport width), so the
+    diagram's device size scales linearly with zoom and the overflow scrolls
+    inside `.mermaid`. Chrome paddings are `rem`-based: `rem` resolves against
+    the root font (fixed 16 px), so the formula is invariant under text zoom.
+    Inline `max-width:<intrinsic>` from merman keeps capping small diagrams.
+  - **The reading position is anchored, not accidental.** One anchor
+    mechanism (capture `elementFromPoint` + viewport offset before the change,
+    scroll it back after) is shared by both axes, parameterised by probe
+    point: `Ctrl`+wheel anchors **at the cursor** (pointer tracked via a
+    motion controller; GTK-logical → CSS px is `v / zoom`), keyboard/D-Bus
+    zoom and text zoom anchor at the top of the viewport. Sequencing is
+    race-free: capture-JS → (completion callback) native `set_zoom_level` +
+    `--zoom` → restore-JS. `Shell.zoom` is the source of truth (the native
+    level lands async).
+  - **Wheel zoom is coalesced** (~40 ms window): a tick burst applies as one
+    anchored reflow instead of N (measured 10 → 1 applications, settle time
+    ~5.5× faster under Xvfb).
+
+  `GetState` exposes `content_width` (reflows with zoom now), plus
+  `viewport_width`, `doc_scroll_width` (the no-page-h-scroll invariant) and
+  `diagram_width` (CSS px; device size = × zoom) for tests.
 - **Text** = the `--font-size` CSS variable on `<html>` — reflows prose without
   touching layout geometry or diagram sizing; clamped to 8 px … 3× base. Bound
   to `Ctrl`+`Shift`+wheel (config `text zoom in` / `text zoom out`); no default
