@@ -140,7 +140,15 @@ Zoom has two independent axes, both count-multiplied and reset together by `=`:
   included (verified: `zoom-text-only` is off by default, so the px unit itself
   scales, and an inline `max-width:<px>` on a merman SVG scales with it). Bound
   to `+`/`-` (zathura muscle memory; config `zoom in` / `zoom out`) and
-  `Ctrl`+wheel.
+  `Ctrl`+wheel. Geometric zoom is **reflow-free**: the shell mirrors the level
+  into a `--zoom` custom property and the stylesheet sizes the column as
+  `min(--content-width, 100% × --zoom)`, so the layout width in CSS px is
+  invariant under zoom. Consequences: the reading position never drifts when
+  zooming, and on a viewport narrower than `page-width` the content grows past
+  the window edge (pan with `h`/`l`, zathura-style) instead of re-fitting —
+  which is what makes a full-width diagram actually get bigger. `GetState`
+  exposes the layout width as `content_width` so tests can assert the
+  invariant.
 - **Text** = the `--font-size` CSS variable on `<html>` — reflows prose without
   touching layout geometry or diagram sizing; clamped to 8 px … 3× base. Bound
   to `Ctrl`+`Shift`+wheel (config `text zoom in` / `text zoom out`); no default

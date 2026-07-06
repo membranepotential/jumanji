@@ -190,9 +190,14 @@ fn connect_load_finished(shell: &Rc<RefCell<Shell>>) {
         {
             let s = shell.borrow();
             s.view.set_dark(s.dark);
-            // Re-apply text zoom: the inline `--font-size` is lost on reload.
+            // Re-apply both zoom axes: the inline `--font-size`/`--zoom`
+            // custom properties are lost on reload.
             if s.text_zoom != 1.0 {
                 s.view.set_text_zoom_px(s.font_base_px * s.text_zoom);
+            }
+            let zoom = s.view.zoom_level();
+            if zoom != 1.0 {
+                s.view.set_zoom(zoom);
             }
             if let Some(y) = s.pending_restore {
                 s.view.restore_scroll(y);
@@ -338,9 +343,18 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
                     s.loaded,
                 )
             };
-            view.scroll_state(move |y, pct| {
+            view.scroll_state(move |y, pct, content_width| {
                 let json = state_json(
-                    &file, y, pct, dark, zoom, text_zoom, section, toc_len, loaded,
+                    &file,
+                    y,
+                    pct,
+                    content_width,
+                    dark,
+                    zoom,
+                    text_zoom,
+                    section,
+                    toc_len,
+                    loaded,
                 );
                 invocation.return_value(Some(&(json,).to_variant()));
             });
@@ -372,6 +386,7 @@ fn state_json(
     file: &str,
     scroll_y: f64,
     scroll_percent: u32,
+    content_width: f64,
     dark: bool,
     zoom: f64,
     text_zoom: f64,
@@ -381,6 +396,7 @@ fn state_json(
 ) -> String {
     format!(
         "{{\"file\":{file},\"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
+         \"content_width\":{content_width},\
          \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":\"normal\",\
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded}}}",
         file = json_string(file),

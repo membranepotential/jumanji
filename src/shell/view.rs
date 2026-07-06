@@ -129,9 +129,16 @@ impl View {
     }
 
     /// Geometric zoom: webkit full-page zoom (scales everything, diagrams
-    /// included, because `zoom-text-only` is off by default).
+    /// included, because `zoom-text-only` is off by default). The level is
+    /// mirrored into the `--zoom` custom property so the stylesheet can keep
+    /// the layout width constant under zoom (no reflow; see `style.css`).
+    /// Like text zoom, the property is re-applied after each load.
     pub fn set_zoom(&self, level: f64) {
-        self.webview.set_zoom_level(level.max(0.2));
+        let level = level.max(0.2);
+        self.webview.set_zoom_level(level);
+        self.run_js(&format!(
+            "document.documentElement.style.setProperty('--zoom', {level});"
+        ));
     }
 
     pub fn zoom_level(&self) -> f64 {
@@ -243,14 +250,19 @@ impl View {
         );
     }
 
-    /// Query scroll offset (px) and percentage (0..=100) in one JS round-trip,
-    /// delivering both to `callback`. Used by the D-Bus `GetState` method so a
-    /// single reply reflects a single, consistent viewport snapshot.
-    pub fn scroll_state<F: FnOnce(f64, u32) + 'static>(&self, callback: F) {
+    /// Query scroll offset (px), percentage (0..=100) and the content column's
+    /// layout width (CSS px) in one JS round-trip, delivering all three to
+    /// `callback`. Used by the D-Bus `GetState` method so a single reply
+    /// reflects a single, consistent viewport snapshot. The layout width is in
+    /// CSS px, so it must stay *constant* under geometric zoom (the no-reflow
+    /// invariant of D5a) — tests assert on exactly that.
+    pub fn scroll_state<F: FnOnce(f64, u32, f64) + 'static>(&self, callback: F) {
         let script = "(() => { const d = document.documentElement, b = document.body; \
              const max = (b.scrollHeight || d.scrollHeight) - window.innerHeight; \
              const p = max > 0 ? Math.round((window.scrollY / max) * 100) : 0; \
-             return { y: window.scrollY, p: Math.min(100, Math.max(0, p)) }; })()";
+             const m = document.querySelector('main') || b; \
+             return { y: window.scrollY, p: Math.min(100, Math.max(0, p)), \
+                      w: m.offsetWidth }; })()";
         self.webview.evaluate_javascript(
             script,
             None,
@@ -260,9 +272,10 @@ impl View {
                 Ok(v) => {
                     let y = v.object_get_property("y").map_or(0.0, |n| n.to_double());
                     let p = v.object_get_property("p").map_or(0.0, |n| n.to_double());
-                    callback(y, p.clamp(0.0, 100.0) as u32);
+                    let w = v.object_get_property("w").map_or(0.0, |n| n.to_double());
+                    callback(y, p.clamp(0.0, 100.0) as u32, w);
                 }
-                Err(_) => callback(0.0, 0),
+                Err(_) => callback(0.0, 0, 0.0),
             },
         );
     }

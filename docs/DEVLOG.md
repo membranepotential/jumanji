@@ -2,6 +2,29 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — reflow-free geometric zoom (narrow-viewport diagram bug)
+
+User-reported: mermaid diagrams didn't zoom when the window was narrower than
+`page-width` (they did on wide windows), and zooming on a narrow viewport
+drifted the reading position. One root cause: the column was sized
+`max-width: var(--content-width)`, so on a narrow window its width tracked the
+viewport — and webkit zoom *shrinks* the CSS viewport, so the column reflowed
+to re-fit and `max-width: 100%` re-fit the SVGs. Net visual change: zero.
+
+Fix (one rule): the shell mirrors `zoom_level` into a `--zoom` custom property
+(re-applied after each load, like `--font-size`), and the stylesheet sizes the
+column `width: min(var(--content-width), calc(100% * var(--zoom, 1)))`. The
+layout width in CSS px is now invariant under zoom → no reflow → position
+stays put, and content overflows the window edge instead of re-fitting
+(pan with `h`/`l`) — zathura semantics. DESIGN.md D5a updated.
+
+Testability: `GetState` now reports `content_width` (the column's layout width,
+CSS px); a new e2e test narrows the window to 500 px, zooms ×1.5, and asserts
+width invariance + real device-px growth. Asserts poll (the `--zoom` set is an
+async JS eval) and the baseline waits for two stable readings after resize.
+
+Next: M2 features, startup/scroll performance.
+
 ## 2026-07-06 — v0.1.1: config format bug — `[options]` was silently ignored
 
 Found while verifying the installed release: `default-recolor = true` had no

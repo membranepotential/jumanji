@@ -78,7 +78,12 @@ body {
 }
 
 main.markdown-body {
-  max-width: var(--content-width);
+  /* `--zoom` mirrors the webkit zoom level (set by the shell). Multiplying the
+   * viewport-relative bound by it keeps the layout width constant in CSS px
+   * across zoom changes: zooming never reflows — content instead grows past
+   * the viewport edge (pan with h/l), zathura-style — and diagrams scale even
+   * when the column is viewport-constrained (narrow windows). */
+  width: min(var(--content-width), calc(100% * var(--zoom, 1)));
   margin: 0 auto;
   padding: 3.5rem 1.5rem 6rem;
 }

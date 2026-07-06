@@ -87,6 +87,9 @@ struct State {
     file: String,
     scroll_y: f64,
     scroll_percent: u32,
+    /// Layout width of the content column in CSS px — invariant under
+    /// geometric zoom (the D5a no-reflow guarantee).
+    content_width: f64,
     dark: bool,
     zoom: f64,
     text_zoom: f64,
@@ -105,6 +108,7 @@ impl State {
             file: field_str(json, "file")?,
             scroll_y: field(json, "scroll_y")?.parse().ok()?,
             scroll_percent: field(json, "scroll_percent")?.parse().ok()?,
+            content_width: field(json, "content_width")?.parse().ok()?,
             dark: field(json, "dark")? == "true",
             zoom: field(json, "zoom")?.parse().ok()?,
             text_zoom: field(json, "text_zoom")?.parse().ok()?,
@@ -472,6 +476,55 @@ fn geometric_zoom_in_and_reset() {
     h.wait_for_state("zoom reset clears zoom", SETTLE, |s| {
         (s.zoom - 1.0).abs() < 1e-9
     });
+}
+
+#[test]
+fn narrow_viewport_zoom_does_not_reflow() {
+    // Regression: on a viewport narrower than `page-width`, geometric zoom used
+    // to *reflow* — the column re-fit the shrunken CSS viewport, so diagrams
+    // never got visually bigger and the reading position drifted. The fix pins
+    // the layout width (CSS px) via `--zoom`, so it must not change when
+    // zooming; the content instead overflows the viewport (device px), which is
+    // exactly what makes a full-width mermaid diagram scale.
+    let Some((_g, h)) = setup() else { return };
+
+    // Shrink the window well below page-width (720) so the column is
+    // viewport-constrained. No WM under Xvfb, so resize the X window directly.
+    h.xdotool(["windowsize", "--sync", &h.window_id, "500", "800"]);
+    h.wait_for_state("window narrowed", SETTLE, |s| {
+        s.content_width > 0.0 && s.content_width < 600.0
+    });
+    // Let the resize settle: the baseline must be the final width, not a
+    // mid-resize snapshot, or the invariance assert below compares junk.
+    let narrow = {
+        let prev = std::cell::Cell::new(-1.0_f64);
+        h.wait_for_state("width stable after resize", SETTLE, move |s| {
+            let stable = (s.content_width - prev.get()).abs() < 1.0;
+            prev.set(s.content_width);
+            stable
+        })
+    };
+
+    // Scroll into the document, then zoom in hard.
+    h.execute_action("scroll down", 10);
+    h.wait_for_state("scrolled", SETTLE, |s| s.scroll_y > 0.0);
+    h.execute_action("zoom in", 5);
+    // The layout width (CSS px) must come back to its zoom-1 value: reflow-free
+    // zoom. Polling (not first-snapshot) because the `--zoom` property is set
+    // by an async JS eval.
+    let zoomed = h.wait_for_state("layout width zoom-invariant (no reflow)", SETTLE, |s| {
+        s.zoom > 1.4 && (s.content_width - narrow.content_width).abs() < 2.0
+    });
+    // Device-pixel width = layout width × zoom now exceeds its zoom-1 value:
+    // the column (diagrams included) really is rendered larger, not re-fit.
+    assert!(
+        zoomed.content_width * zoomed.zoom > narrow.content_width * 1.3,
+        "zoomed content should be rendered wider than the viewport: \
+         {} css px × {} zoom vs {} at zoom 1",
+        zoomed.content_width,
+        zoomed.zoom,
+        narrow.content_width
+    );
 }
 
 #[test]
