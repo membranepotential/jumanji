@@ -1,6 +1,6 @@
 # Maintainer: membranepotential
 pkgname=jumanji
-pkgver=1.1.0
+pkgver=1.1.1
 pkgrel=1
 pkgdesc="A zathura-inspired markdown reader: minimal chrome, vim keybindings, real typography"
 arch=('x86_64')
@@ -10,7 +10,7 @@ depends=('gtk4' 'webkitgtk-6.0')
 makedepends=('cargo')
 optdepends=('xdg-utils: register jumanji as the default handler for text/markdown')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/membranepotential/jumanji/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('9600facb468ed9b7659f078dfc119828fbaf390067b162fd7d107f9707ef5b4d')
+sha256sums=('df0048f8875b51f1dc910a99057e49600eb0ac0103011c096ed7b8c89a45a307')
 
 prepare() {
     cd "$pkgname-$pkgver"
