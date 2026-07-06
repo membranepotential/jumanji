@@ -6,12 +6,13 @@
 //! offline, CSP-locked page with embedded CSS and inline SVG.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use comrak::nodes::{Ast, AstNode, LineColumn, NodeHtmlBlock, NodeValue};
 use comrak::{Arena, Options as ComrakOptions, format_html, parse_document};
 
 use super::highlight::escape_html;
-use super::{Heading, RenderedDocument, diagram, highlight, math, toc};
+use super::{Heading, RenderedDocument, diagram, fence, highlight, math, toc};
 
 /// The stylesheet is embedded at compile time; nothing is fetched at runtime.
 const BASE_CSS: &str = include_str!("assets/style.css");
@@ -39,6 +40,11 @@ pub struct Options {
     /// cascade. The shell populates this from `~/.config/jumanji/themes/*.css`
     /// (sorted by filename); the core just concatenates in the given order.
     pub extra_css: Vec<String>,
+    /// External fence renderers (DESIGN D6.2): fence language token → shell
+    /// command. A fence whose language has an entry here is replaced by the
+    /// command's stdout (run via `sh -c`, fence body on stdin). Keys are
+    /// lowercase; empty = the built-in pipeline only. See `super::fence`.
+    pub renderers: BTreeMap<String, String>,
 }
 
 impl Default for Options {
@@ -49,6 +55,7 @@ impl Default for Options {
             font_mono: String::new(),
             font_size_px: 18,
             extra_css: Vec::new(),
+            renderers: BTreeMap::new(),
         }
     }
 }
@@ -103,11 +110,15 @@ pub fn render(md: &str, opts: &Options) -> RenderedDocument {
     let comrak_opts = comrak_options();
     let root = parse_document(&arena, md, &comrak_opts);
 
-    // Order matters: mermaid first (turns mermaid fences into HTML blocks so
-    // the highlighter skips them), then highlight the remaining code fences,
-    // then wrap tables. Math touches only inline `Math` nodes (disjoint from
-    // code blocks and tables), so its order is free. None of these add or
-    // reorder headings, so the TOC's anchors still match the emitted ids.
+    // Order matters. External fence renderers run first: a fence whose language
+    // has a configured command is consumed here (turned into an HTML block), so
+    // a configured `mermaid` renderer overrides the built-in mermaid pass, and
+    // the highlighter skips it too. Built-in mermaid then handles any remaining
+    // mermaid fences, and the highlighter the rest. Tables are wrapped last.
+    // Math touches only inline `Math` nodes (disjoint from code blocks and
+    // tables), so its order is free. None of these add or reorder headings, so
+    // the TOC's anchors still match the emitted ids.
+    fence::transform_fences(root, &opts.renderers, &fence::run_command);
     diagram::transform_mermaid(root);
     highlight::highlight_code_blocks(root);
     let has_math = math::transform_math(root);
@@ -341,6 +352,80 @@ mod tests {
         assert!(html.contains("diagram-error__note"));
         assert!(html.contains("<pre class=\"code\">"));
         assert!(!html.contains("<svg"));
+    }
+
+    /// Build render options carrying the given fence renderer table.
+    fn render_with_renderers(md: &str, pairs: &[(&str, &str)]) -> String {
+        let renderers = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        render(
+            md,
+            &Options {
+                renderers,
+                ..Options::default()
+            },
+        )
+        .html
+    }
+
+    #[test]
+    fn configured_fence_is_replaced_by_command_output() {
+        // `cat` echoes the fence body; the output lands in a `.rendered-fence`
+        // scroll box, and the fence is not left as a highlighted code block.
+        let html = render_with_renderers("```d2\n<svg>hi</svg>\n```\n", &[("d2", "cat")]);
+        assert!(html.contains("<div class=\"rendered-fence\">"));
+        assert!(html.contains("<svg>hi</svg>"));
+    }
+
+    #[test]
+    fn unconfigured_fence_is_highlighted_as_usual() {
+        // Only `d2` is configured; a `rust` fence keeps the syntect path.
+        let html = render_with_renderers("```rust\nfn main() {}\n```\n", &[("d2", "cat")]);
+        assert!(html.contains("<pre class=\"code\">"));
+        // (The embedded stylesheet mentions `.rendered-fence`, so match the
+        // actual wrapper element, not the bare class name.)
+        assert!(!html.contains("<div class=\"rendered-fence\">"));
+    }
+
+    #[test]
+    fn failing_renderer_degrades_to_code_plus_note() {
+        let html = render_with_renderers("```d2\nx -> y\n```\n", &[("d2", "false")]);
+        assert!(html.contains("diagram-error__note"));
+        assert!(html.contains("d2 renderer failed"));
+        assert!(html.contains("<pre class=\"code\">"));
+        assert!(!html.contains("<div class=\"rendered-fence\">"));
+    }
+
+    #[test]
+    fn garbage_output_degrades_gracefully() {
+        // Non-UTF-8 stdout is treated as a render failure, not embedded.
+        let html = render_with_renderers("```d2\nx\n```\n", &[("d2", "printf '\\377'")]);
+        assert!(html.contains("diagram-error__note"));
+        assert!(html.contains("<pre class=\"code\">"));
+        assert!(!html.contains("<div class=\"rendered-fence\">"));
+    }
+
+    #[test]
+    fn configured_mermaid_renderer_overrides_builtin() {
+        // A configured `mermaid` renderer wins over the built-in merman path:
+        // the output is the command's stdout, not an inline `<svg>` diagram.
+        let html = render_with_renderers(
+            "```mermaid\nflowchart TD\nA --> B\n```\n",
+            &[("mermaid", "printf 'OVERRIDDEN'")],
+        );
+        assert!(html.contains("<div class=\"rendered-fence\">OVERRIDDEN</div>"));
+        assert!(!html.contains("<svg"));
+    }
+
+    #[test]
+    fn unconfigured_mermaid_keeps_builtin_path() {
+        // With no `mermaid` renderer, the built-in merman pass still runs.
+        let html =
+            render_with_renderers("```mermaid\nflowchart TD\nA --> B\n```\n", &[("d2", "cat")]);
+        assert!(html.contains("<div class=\"mermaid\""));
+        assert!(html.contains("<svg"));
     }
 
     #[test]

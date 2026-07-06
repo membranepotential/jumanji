@@ -56,6 +56,12 @@ pub struct Options {
     pub font_size_px: u32,
     /// Which clipboard a selection is copied to on select.
     pub selection_clipboard: SelectionClipboard,
+    /// External fence renderers (DESIGN D6.2): fence language token → shell
+    /// command run via `sh -c` with the fence body on stdin, producing SVG/HTML
+    /// on stdout. Keys are normalised to lowercase (matching is
+    /// case-insensitive). Not a `:set` target — it is a table, wired at render
+    /// time. Empty by default (built-in pipeline only).
+    pub renderers: BTreeMap<String, String>,
 }
 
 impl Default for Options {
@@ -70,6 +76,7 @@ impl Default for Options {
             font_mono: String::new(),
             font_size_px: 18,
             selection_clipboard: SelectionClipboard::Primary,
+            renderers: BTreeMap::new(),
         }
     }
 }
@@ -220,6 +227,14 @@ impl Config {
             font_mono: raw_opts.font_mono.unwrap_or(defaults.font_mono),
             font_size_px: raw_opts.font_size.unwrap_or(defaults.font_size_px),
             selection_clipboard,
+            // Normalise fence-language keys to lowercase so the lookup (which
+            // lowercases the fence token) is case-insensitive.
+            renderers: raw
+                .renderers
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(lang, cmd)| (lang.to_ascii_lowercase(), cmd))
+                .collect(),
         };
 
         let mut keymap = Keymap::default();
@@ -508,6 +523,9 @@ pub fn action_names() -> &'static [&'static str] {
 struct RawConfig {
     options: Option<RawOptions>,
     keys: Option<RawKeys>,
+    /// `[renderers]` table: fence language token → shell command string. A free
+    /// map (any language key is valid), so no `deny_unknown_fields` here.
+    renderers: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -761,6 +779,27 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("selection-clipboard"), "{msg}");
         assert!(msg.contains("middle"), "{msg}");
+    }
+
+    #[test]
+    fn renderers_table_parses_and_lowercases_keys() {
+        let c = Config::parse(
+            r#"
+            [renderers]
+            d2 = "d2 - -"
+            Graphviz = "dot -Tsvg"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.options.renderers.get("d2").unwrap(), "d2 - -");
+        // Key is normalised to lowercase for case-insensitive matching.
+        assert_eq!(c.options.renderers.get("graphviz").unwrap(), "dot -Tsvg");
+        assert!(!c.options.renderers.contains_key("Graphviz"));
+    }
+
+    #[test]
+    fn no_renderers_table_is_empty() {
+        assert!(Config::parse("").unwrap().options.renderers.is_empty());
     }
 
     #[test]

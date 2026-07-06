@@ -434,6 +434,19 @@ details[open] > summary {
   height: auto;
 }
 
+/* ---- External fence renderers (DESIGN D6.2) ------------------------------ */
+
+/* A fence whose language has a configured renderer is replaced by the command's
+ * stdout (arbitrary SVG or HTML) wrapped in `.rendered-fence`. Unlike `.mermaid`
+ * there is no intrinsic-width model (the output is arbitrary), so this is a plain
+ * scroll box: wide output scrolls inside its own container, never the page — the
+ * same no-page-h-scroll invariant `.mermaid`/`.table-wrap`/`.math-scroll` keep.
+ * A rendered SVG keeps its natural size and overflows into this scroller. */
+.rendered-fence {
+  margin: 1.6em 0;
+  overflow-x: auto;
+}
+
 /* ---- Math (LaTeX → MathML Core) ----------------------------------------- */
 
 /* pulldown-latex's stylesheet (with the Latin Modern fonts inlined as data:

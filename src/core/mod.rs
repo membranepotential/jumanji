@@ -12,6 +12,7 @@ pub mod pipeline;
 pub mod toc;
 
 mod diagram;
+mod fence;
 mod highlight;
 mod math;
 
