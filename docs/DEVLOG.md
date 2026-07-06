@@ -2,6 +2,34 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — M1 MVP: it renders, it scrolls, it recolors
+
+Core pipeline and GTK shell implemented (in parallel, by two agents with
+disjoint file ownership) and integrated on the first build: **46/46 tests,
+clippy `-D warnings` clean.**
+
+- `core/`: comrak (GFM + footnotes + header IDs) → AST passes (mermaid via
+  merman → inline SVG, syntect classed highlighting, table wrapping) → complete
+  HTML document with embedded CSS. TOC anchors are byte-identical to emitted
+  ids (comrak's own `Anchorizer`). Light theme InspiredGitHub, dark Base16
+  Ocean Dark under `html.dark`.
+- `shell/`: capture-phase `EventControllerKey` → pure `Matcher`
+  (counts, `gg`, `<N>G`), actions executed via webkit6 (`scrollBy` JS, zoom
+  level, FindController search, `classList.toggle('dark')` recolor), girara
+  bar (filename · pending keys · percent), notify-based live reload with
+  scroll restore.
+- Gotcha found at integration: merman's `render` cargo feature is required
+  for `merman::render` to exist (default features are empty).
+- Verified live on X11 (screenshots): typography, tables, syntect fences,
+  both mermaid diagrams, footnotes, `j`/`G`/`Ctrl-r` all behave; statusbar
+  percent honest (queries actual `scrollY`).
+- Known gaps: keys are silent no-ops until the initial load finishes
+  (sub-second); section tracking (`J`/`K`) steps the TOC list rather than
+  following the viewport; ToC mode and `:` commands are M2.
+
+**Next:** headless e2e testing (Xvfb + D-Bus state interface — doubles as the
+M3 editor-sync foundation).
+
 ## 2026-07-06 — Project inception
 
 **Research.** Three parallel research passes (full write-ups in

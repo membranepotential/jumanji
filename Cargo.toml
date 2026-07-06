@@ -8,7 +8,7 @@ anyhow = "1.0.103"
 clap = { version = "4.6.1", features = ["derive"] }
 comrak = "0.53.0"
 gtk = { version = "0.11.4", package = "gtk4", features = ["v4_14"] }
-merman = "0.7.0"
+merman = { version = "0.7.0", features = ["render"] }
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
 serde = { version = "1.0.228", features = ["derive"] }

@@ -1,0 +1,354 @@
+/* jumanji reader stylesheet.
+ *
+ * Theme is driven by CSS custom properties. The shell toggles dark mode by
+ * adding/removing the `dark` class on <html>; every colour below resolves
+ * through a variable, so the toggle needs no per-element rules. Syntect code
+ * colours and the light mermaid canvas are handled in generated/extra blocks.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  /* Overridden by a generated block using opts.page_width_px. */
+  --content-width: 720px;
+
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --fg-muted: #59636e;
+  --heading: #1f2328;
+  --accent: #0969da;
+  --border: #d1d9e0;
+  --border-strong: #b7bfc6;
+  --code-bg: #f3f4f6;
+  --quote-border: #d0d7de;
+  --table-head-bg: #f6f8fa;
+  --table-zebra: #f6f8fa;
+  --note-bg: #fff8e6;
+  --note-border: #e6b800;
+  --note-fg: #7a5b00;
+  --selection: #b3d4fc;
+}
+
+html.dark {
+  --bg: #1a1a1a;
+  --fg: #d6d6d6;
+  --fg-muted: #9aa0a6;
+  --heading: #f0f0f0;
+  --accent: #6cb6ff;
+  --border: #333333;
+  --border-strong: #454545;
+  --code-bg: #262626;
+  --quote-border: #3a3a3a;
+  --table-head-bg: #242424;
+  --table-zebra: #202020;
+  --note-bg: #2b2410;
+  --note-border: #8a6d00;
+  --note-fg: #e8c766;
+  --selection: #2c5480;
+}
+
+html {
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia,
+    "Times New Roman", serif;
+  font-size: 18px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+main.markdown-body {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 3.5rem 1.5rem 6rem;
+}
+
+/* ---- Headings ------------------------------------------------------------ */
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  color: var(--heading);
+  font-weight: 650;
+  line-height: 1.25;
+  margin: 2.2em 0 0.7em;
+}
+
+h1 {
+  font-size: 2.05em;
+  margin-top: 0;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border);
+}
+h2 {
+  font-size: 1.6em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--border);
+}
+h3 {
+  font-size: 1.3em;
+}
+h4 {
+  font-size: 1.1em;
+}
+h5 {
+  font-size: 1em;
+}
+h6 {
+  font-size: 0.9em;
+  color: var(--fg-muted);
+}
+
+/* The empty anchor comrak injects at the start of each heading. It carries the
+ * fragment id and renders nothing; keep it from disturbing layout. */
+.markdown-body .anchor {
+  text-decoration: none;
+}
+
+/* ---- Prose --------------------------------------------------------------- */
+
+p {
+  margin: 0 0 1.1em;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+strong {
+  font-weight: 680;
+}
+
+del {
+  color: var(--fg-muted);
+}
+
+hr {
+  height: 1px;
+  border: 0;
+  background: var(--border);
+  margin: 2.5em 0;
+}
+
+ul,
+ol {
+  margin: 0 0 1.1em;
+  padding-left: 1.6em;
+}
+li {
+  margin: 0.25em 0;
+}
+li > ul,
+li > ol {
+  margin: 0.25em 0;
+}
+
+blockquote {
+  margin: 1.4em 0;
+  padding: 0.4em 1.1em;
+  color: var(--fg-muted);
+  border-left: 0.28em solid var(--quote-border);
+}
+blockquote > :first-child {
+  margin-top: 0;
+}
+blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---- Inline code & code blocks ------------------------------------------ */
+
+code,
+kbd,
+samp {
+  font-family: "JetBrains Mono", "Fira Code", "SFMono-Regular", "Cascadia Code",
+    Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.86em;
+}
+
+/* Inline code only (not inside a highlighted <pre>). */
+:not(pre) > code {
+  background: var(--code-bg);
+  padding: 0.15em 0.38em;
+  border-radius: 5px;
+  white-space: break-spaces;
+}
+
+pre {
+  margin: 1.4em 0;
+  /* Low-specificity fallback so a block stays legible even if the syntect
+   * theme CSS is ever absent; the themed `.code` rule (higher specificity)
+   * normally wins and drives both background and foreground. */
+  background: var(--code-bg);
+}
+
+pre.code {
+  /* Foreground + background come from the generated syntect theme rules for
+   * `.code` (light) and `html.dark .code` (dark); this block only shapes the
+   * box. */
+  padding: 1em 1.15em;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+pre.code code {
+  display: block;
+  padding: 0;
+  background: none;
+  font-size: 0.82em;
+  white-space: pre;
+}
+
+/* ---- Tables -------------------------------------------------------------- */
+
+/* Each GFM table is wrapped (AST pass) in .table-wrap so wide tables scroll
+ * horizontally inside the reading column instead of overflowing the page. */
+.table-wrap {
+  overflow-x: auto;
+  margin: 1.5em 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.table-wrap > table {
+  margin: 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+th,
+td {
+  padding: 0.5em 0.85em;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+thead th {
+  background: var(--table-head-bg);
+  font-family: system-ui, sans-serif;
+  font-weight: 650;
+}
+tbody tr:nth-child(even) {
+  background: var(--table-zebra);
+}
+
+/* ---- Task lists ---------------------------------------------------------- */
+
+li:has(> input[type="checkbox"]) {
+  list-style: none;
+  margin-left: -1.35em;
+}
+li > input[type="checkbox"] {
+  margin: 0 0.5em 0 0;
+  vertical-align: middle;
+  width: 1em;
+  height: 1em;
+  accent-color: var(--accent);
+}
+
+/* ---- Images -------------------------------------------------------------- */
+
+img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+/* ---- Footnotes ----------------------------------------------------------- */
+
+.footnote-ref {
+  font-size: 0.8em;
+}
+sup {
+  line-height: 0;
+}
+section.footnotes {
+  margin-top: 3em;
+  padding-top: 1em;
+  border-top: 1px solid var(--border);
+  font-size: 0.9em;
+  color: var(--fg-muted);
+}
+.footnote-backref {
+  text-decoration: none;
+}
+
+/* ---- details / summary --------------------------------------------------- */
+
+details {
+  margin: 1.4em 0;
+  padding: 0.5em 1em;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code-bg);
+}
+summary {
+  cursor: pointer;
+  font-family: system-ui, sans-serif;
+  font-weight: 600;
+  color: var(--heading);
+}
+details[open] > summary {
+  margin-bottom: 0.7em;
+}
+
+/* ---- Mermaid diagrams ---------------------------------------------------- */
+
+/* merman renders light-themed diagrams; give every diagram a light canvas so
+ * it stays legible regardless of the page theme. */
+.mermaid {
+  margin: 1.6em 0;
+  padding: 1.1em;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+  text-align: center;
+}
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Graceful-degradation note shown when merman fails to render a fence. */
+.diagram-error {
+  margin: 1.6em 0;
+}
+.diagram-error__note {
+  margin: 0 0 0.6em;
+  padding: 0.55em 0.9em;
+  font-family: system-ui, sans-serif;
+  font-size: 0.9em;
+  color: var(--note-fg);
+  background: var(--note-bg);
+  border: 1px solid var(--note-border);
+  border-radius: 6px;
+}
+.diagram-error pre.code {
+  margin: 0;
+}
