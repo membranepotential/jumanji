@@ -143,6 +143,7 @@ impl View {
     pub fn new(selection_clipboard: SelectionClipboard) -> Self {
         let ucm = UserContentManager::new();
         install_selection_copy(&ucm, selection_clipboard);
+        install_drag_select_reset(&ucm);
         let hints_cb: Sink = Rc::new(RefCell::new(None));
         install_hints(&ucm, hints_cb.clone());
 
@@ -533,6 +534,48 @@ fn install_selection_copy(ucm: &UserContentManager, target: SelectionClipboard) 
             clipboard.set_text(&text);
         }
     });
+}
+
+/// Make text selection behave like zathura / a plain text area: a press inside
+/// an existing selection starts a *fresh* drag-selection instead of dragging the
+/// selected text (WebKit's default). Two capture-phase listeners, installed as a
+/// document-start user-script:
+///
+/// - `mousedown`: if the primary button presses inside the current non-collapsed
+///   selection (tested against the selection range's client rects), collapse it
+///   with `removeAllRanges()` so the native selection gesture restarts from this
+///   point rather than picking up a text drag.
+/// - `dragstart`: `preventDefault()` unconditionally — belt-and-braces so a text
+///   drag can never begin even if the mousedown hit-test misses.
+///
+/// This is shell viewport glue, not content-pipeline JS (DESIGN D3 forbids JS in
+/// the *rendering* pipeline; the shell already drives the page with JS).
+fn install_drag_select_reset(ucm: &UserContentManager) {
+    const SOURCE: &str = "(function () {\n\
+        document.addEventListener('mousedown', function (e) {\n\
+          if (e.button !== 0) return;\n\
+          const sel = window.getSelection();\n\
+          if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;\n\
+          const rects = sel.getRangeAt(0).getClientRects();\n\
+          const x = e.clientX, y = e.clientY;\n\
+          for (let i = 0; i < rects.length; i++) {\n\
+            const r = rects[i];\n\
+            if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {\n\
+              sel.removeAllRanges();\n\
+              break;\n\
+            }\n\
+          }\n\
+        }, true);\n\
+        document.addEventListener('dragstart', function (e) { e.preventDefault(); }, true);\n\
+      })();";
+    let script = UserScript::new(
+        SOURCE,
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::Start,
+        &[],
+        &[],
+    );
+    ucm.add_script(&script);
 }
 
 /// The overlay-building script for [`View::request_hints`]. Finds visible

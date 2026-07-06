@@ -2,6 +2,59 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — three user-reported bug fixes: dark-mode syntax colour, GPU layer dropouts, drag-select
+
+Three independent user reports, three small fixes.
+
+- **Dark mode: python function name unreadable (fixed).** The classed syntect
+  CSS emitted the light theme (`InspiredGithub`) *unscoped* and the dark theme
+  (`Base16OceanDark`) under `html.dark`. `InspiredGithub` ships a deeply-scoped
+  `.source.python .entity.name.function { color:#323232 }` (specificity 0,5,0)
+  that outranked the dark block's `html.dark`-nested `.entity.name.function`
+  (0,4,1), leaking near-black text onto the dark background. Fix: scope the light
+  block under `html:not(.dark)` symmetrically with `dark_css`'s `html.dark`, so
+  neither theme can apply in the other mode regardless of specificity — tokens
+  the dark theme doesn't colour fall back to the `.code` foreground
+  (`core::highlight::light_css`). Unit test extended (`light_css` starts with
+  `html:not(.dark) {`); new e2e `dark_mode_python_function_name_is_readable`
+  drives Ctrl-r and asserts the demo's `def fib` function-name colour is
+  `rgb(50, 50, 50)` in light mode (probe-target check) and *not* that near-black
+  in dark. Needed a narrow observability probe: `ViewportState`/`GetState` gain
+  `fn_color` (computed `color` of `.entity.name.function.python`), the same
+  pattern as `math_width` — `ViewportState` drops `Copy` (now holds a `String`).
+- **j/k scrolling makes elements vanish on the real GPU (mitigated, not
+  headless-reproducible).** Composited `overflow-x: auto` layers (tables, code,
+  diagrams) intermittently drop out mid-scroll on the user's Intel UHD 630 / Mesa
+  / X11 — the WebKitGTK DMABUF-renderer artifact class (WebKit bug 262607
+  family). Fix: `main` sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` *only if unset*
+  (an explicit value — even "0"/empty — wins, keeping a no-config escape hatch),
+  at the very top of `main` before any GTK/WebKit init (documented `unsafe`
+  `set_var`: single-threaded, pre-spawn, so edition-2024-sound). Xvfb has no GPU
+  path so this can't be e2e-asserted; verified on evidence + upstream precedent
+  (installed webkitgtk-6.0 2.52.4 still honours the var), user feel-tests before
+  release. Recorded in DESIGN Risks as a binding default.
+- **Drag-of-selected-text disabled; press-in-selection restarts selection.** A
+  document-start user-script (via the existing `UserContentManager`, alongside
+  copy-on-select and hints) adds two capture-phase listeners: `mousedown` inside
+  the current non-collapsed selection (hit-tested against the range's client
+  rects) calls `removeAllRanges()` so a fresh drag-selection starts from the
+  press; `dragstart` `preventDefault()`s as belt-and-braces. Zathura/plain-text-
+  area semantics. Shell viewport glue, not content-pipeline JS (D3 governs the
+  *rendering* pipeline). No e2e: a real selection drag under Xvfb is the same
+  flaky press-move-release the copy-on-select tests already decline to exercise
+  (see the note above `j_and_k_scroll`) — the pieces (script installed, listeners
+  capture-phase) are deterministic; the drag interaction is manually verified on
+  the real display.
+
+Tests: **123 unit** (count unchanged; the highlight scoping test extended to pin
+`html:not(.dark) {`) + 23 → **24 e2e** (new
+`dark_mode_python_function_name_is_readable`; the suite's tiny JSON parser
+taught to scan quoted string values — `fn_color` contains commas).
+`cargo test && clippy -D warnings && fmt` all clean. No new dependencies.
+
+Next: user feel-test on the real GPU — scrolling (DMABUF workaround) and
+selection (drag-select) are the two that can only be confirmed there.
+
 ## 2026-07-06 — LaTeX math → MathML Core (M3), no JavaScript
 
 Math is the first M3 feature to land. **What:** `$inline$` / `$$display$$` /
