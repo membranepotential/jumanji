@@ -2,6 +2,21 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — v0.1.0: `+`/`-` back to geometric zoom, anchored text zoom
+
+User feedback after trying the two-axis zoom: `+`/`-` should do geometric
+zoom (zathura muscle memory), and text zoom made the viewport jump — reflow
+moves content, so a fixed pixel offset lands somewhere else in the document.
+
+- Defaults swapped: `+`/`-` → geometric (`zoom in`/`zoom out`); text zoom is
+  `Ctrl+Shift+wheel` / config-only.
+- Text zoom now anchors the reading position: capture the element at the top
+  of the viewport (probing a few points down the content column's center,
+  skipping body/main containers), apply the font-size change, then
+  `scrollIntoView` the captured element. No-op at the very top.
+- Tagged **v0.1.0**; release build installed to `~/.local/bin/jumanji`,
+  registered as the `xdg-open` handler for `text/markdown`.
+
 ## 2026-07-06 — Feature batch: two-axis zoom, copy-on-select, fonts, dark hardening
 
 Five-feature batch. **54 core + 10 e2e = 64 tests, clippy `-D warnings` clean,

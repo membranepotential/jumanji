@@ -478,20 +478,20 @@ mod tests {
     }
 
     #[test]
-    fn plus_minus_default_to_text_zoom() {
+    fn plus_minus_default_to_geometric_zoom() {
         let km = Keymap::default();
         let mut m = Matcher::new(Mode::Normal);
         assert_eq!(
             m.feed(KeyPress::char('+'), &km),
             MatchResult::Matched {
-                action: Action::TextZoomIn,
+                action: Action::ZoomIn,
                 count: None
             }
         );
         assert_eq!(
             m.feed(KeyPress::char('-'), &km),
             MatchResult::Matched {
-                action: Action::TextZoomOut,
+                action: Action::ZoomOut,
                 count: None
             }
         );

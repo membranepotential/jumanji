@@ -139,12 +139,14 @@ Zoom has two independent axes, both count-multiplied and reset together by `=`:
 - **Geometric** = webkit full-page `zoom_level` — scales *everything*, diagrams
   included (verified: `zoom-text-only` is off by default, so the px unit itself
   scales, and an inline `max-width:<px>` on a merman SVG scales with it). Bound
-  to `Ctrl`+wheel and reachable in config as `zoom in` / `zoom out` (the zathura
-  spelling, for muscle memory). No default *key* — geometric zoom is a
-  pointer/config affordance.
+  to `+`/`-` (zathura muscle memory; config `zoom in` / `zoom out`) and
+  `Ctrl`+wheel.
 - **Text** = the `--font-size` CSS variable on `<html>` — reflows prose without
   touching layout geometry or diagram sizing; clamped to 8 px … 3× base. Bound
-  to `+`/`-` (config `text zoom in` / `text zoom out`) and `Ctrl`+`Shift`+wheel.
+  to `Ctrl`+`Shift`+wheel (config `text zoom in` / `text zoom out`); no default
+  key. Because reflow moves content, the element at the top of the viewport is
+  captured before the change and scrolled back into view after — text zoom
+  keeps the reading position anchored.
 
 The statusbar shows `{geometric}%/{text}%T` on the right whenever either axis is
 off 100%, and nothing when both are 100%. `GetState` exposes both as `zoom` and
@@ -202,7 +204,7 @@ Adapted from zathura; "page" becomes "section" (heading-delimited).
 | `d`/`u` | half-page down/up | M1 |
 | `J`/`K` | next/previous section | M1 |
 | `gg`/`G`, `<N>G` | top / bottom / section N | M1 |
-| `+`/`-` | **text** zoom in/out (× count) | M1 |
+| `+`/`-` | geometric zoom in/out (× count) | M1 |
 | `=` | reset **both** zoom axes | M1 |
 | `Ctrl`+wheel | geometric zoom in/out | M1 |
 | `Ctrl`+`Shift`+wheel | text zoom in/out | M1 |

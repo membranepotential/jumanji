@@ -142,9 +142,29 @@ impl View {
     /// custom property on `<html>`, reflowing prose without touching layout
     /// geometry or diagram sizing. Re-applied after each load (the inline style
     /// is lost when the document reloads).
+    ///
+    /// Reflow moves content, so the element at the top of the viewport is
+    /// captured before the change and scrolled back into view after — the
+    /// reading position stays anchored instead of jumping.
     pub fn set_text_zoom_px(&self, px: f64) {
         self.run_js(&format!(
-            "document.documentElement.style.setProperty('--font-size', '{px}px');"
+            "(() => {{
+                let anchor = null;
+                if (window.scrollY > 0) {{
+                    const m = document.querySelector('main') || document.body;
+                    const r = m.getBoundingClientRect();
+                    const cx = Math.max(1, Math.min(innerWidth - 1, r.left + r.width / 2));
+                    for (const py of [8, 40, 80, 140]) {{
+                        const c = document.elementFromPoint(cx, py);
+                        if (c && c !== document.body && c !== document.documentElement && c !== m) {{
+                            anchor = c;
+                            break;
+                        }}
+                    }}
+                }}
+                document.documentElement.style.setProperty('--font-size', '{px}px');
+                if (anchor) anchor.scrollIntoView({{ block: 'start' }});
+            }})();"
         ));
     }
 

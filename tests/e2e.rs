@@ -453,13 +453,13 @@ fn ctrl_r_toggles_dark() {
 
 #[test]
 fn geometric_zoom_in_and_reset() {
-    // Geometric zoom has no default key (it's Ctrl+wheel, awkward to inject), so
-    // drive it via the D-Bus `zoom in` action; `zoom reset` clears it.
+    // `+` is the geometric-zoom default (zathura muscle memory); `zoom reset`
+    // clears it via the pure D-Bus path.
     let Some((_g, h)) = setup() else { return };
     assert_eq!(h.get_state().zoom, 1.0, "starts at 1.0");
 
-    h.execute_action("zoom in", 1);
-    h.wait_for_state("zoom in raises geometric zoom", SETTLE, |s| s.zoom > 1.0);
+    h.key(&["plus"]);
+    h.wait_for_state("+ raises geometric zoom", SETTLE, |s| s.zoom > 1.0);
 
     h.execute_action("zoom reset", 1);
     h.wait_for_state("zoom reset clears zoom", SETTLE, |s| {
@@ -504,9 +504,12 @@ fn text_zoom_changes_and_reset_clears_both_axes() {
         "geometric zoom starts at 1.0"
     );
 
-    // `+` is the text-zoom action by default (geometric zoom is Ctrl+wheel only).
-    h.key(&["plus"]);
-    h.wait_for_state("+ raises text zoom", SETTLE, |s| s.text_zoom > 1.0);
+    // Text zoom has no default key (it's Ctrl+Shift+wheel / config); drive it
+    // via the D-Bus action.
+    h.execute_action("text zoom in", 1);
+    h.wait_for_state("text zoom in raises text zoom", SETTLE, |s| {
+        s.text_zoom > 1.0
+    });
 
     // Also push geometric zoom via the pure D-Bus path, then assert `=` resets
     // *both* axes to 100%.
