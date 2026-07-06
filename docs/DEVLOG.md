@@ -2,6 +2,47 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — Arch/AUR packaging
+
+Added real Arch Linux packaging so jumanji installs and upgrades like any
+other system package instead of living in `~/.local/bin`.
+
+- `resources/jumanji.desktop`: standard desktop entry (`Exec=jumanji %f`,
+  resolved via `$PATH` — not a hardcoded install path — since the system
+  package puts the binary on `$PATH`), registers as a `text/markdown` /
+  `text/x-markdown` handler.
+- `resources/config.example.toml`: every `[options]` key documented at its
+  built-in default, cross-checked against `RawOptions`' serde renames in
+  `src/core/config.rs` rather than guessed from the README, plus a couple of
+  commented `[keys.normal]` remap examples.
+- `packaging/aur/PKGBUILD` + generated `.SRCINFO`: sources the GitHub release
+  tarball for the tagged version, `cargo fetch --locked` in `prepare()`,
+  `cargo build --frozen --release` in `build()`, installs the binary, desktop
+  file, example config, LICENSE, and README.
+- **Real build hazard found and fixed**: a clean `makepkg -f` reliably failed
+  to link — `undefined symbol: onig_new` and friends from `onig_sys` (pulled
+  in by syntect). Root cause: Arch's default `CFLAGS` carries `-flto=auto`,
+  and `onig_sys` compiles bundled oniguruma C sources via the `cc` crate
+  using that `$CFLAGS`; the resulting objects are GCC-only LTO bitcode that
+  rustc's default `lld` linker can't resolve. Fixed with
+  `CFLAGS+=' -ffat-lto-objects -w'` in `build()` — same fix the official
+  `bat` package uses for the identical syntect+onig combination. A first
+  build succeeding only after a second incremental rebuild would have been
+  an easy trap (looks like a flaky race; it's actually deterministic and
+  CFLAGS-dependent) — worth remembering for any future dependency that
+  vendors C sources.
+- Verified end-to-end: `makepkg -f` in a scratch copy produces
+  `jumanji-0.1.1-1-x86_64.pkg.tar.zst` containing `/usr/bin/jumanji`
+  (dynamically linked, stripped, executable), the desktop file, example
+  config, and LICENSE. Not installed (no `pacman -U`) and not pushed to the
+  AUR — the PKGBUILD currently points at the already-tagged `v0.1.1` GitHub
+  release tarball, which predates `resources/` and `packaging/`, so
+  packaging from the public tarball won't have the desktop file/config until
+  a new tag (e.g. `v0.1.2`) is cut that includes them.
+
+Next: cut a release that includes `resources/` and `packaging/`, then
+publish to the AUR.
+
 ## 2026-07-06 — reflow-free geometric zoom (narrow-viewport diagram bug)
 
 User-reported: mermaid diagrams didn't zoom when the window was narrower than

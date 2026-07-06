@@ -1,0 +1,44 @@
+# Maintainer: membranepotential
+pkgname=jumanji
+pkgver=0.1.1
+pkgrel=1
+pkgdesc="A zathura-inspired markdown reader: minimal chrome, vim keybindings, real typography"
+arch=('x86_64')
+url="https://github.com/membranepotential/jumanji"
+license=('MIT')
+depends=('gtk4' 'webkitgtk-6.0')
+makedepends=('cargo')
+optdepends=('xdg-utils: register jumanji as the default handler for text/markdown')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/membranepotential/jumanji/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('749e4b78e689edfaa7caf8e7f17d3251b4273e8239adb124bb7c0b1f70e5e687')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    # syntect pulls in onig_sys, which compiles bundled oniguruma C sources
+    # via the `cc` crate using $CFLAGS. The distro default CFLAGS carries
+    # -flto=auto, which produces GCC-only LTO bitcode objects that rustc's
+    # default lld linker cannot resolve (undefined onig_* symbols at link
+    # time). -ffat-lto-objects keeps real machine code alongside the LTO
+    # IR so lld can link it. Same fix as the official `bat` package (also
+    # syntect+onig).
+    CFLAGS+=' -ffat-lto-objects -w'
+    cargo build --frozen --release
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$pkgname"
+    install -Dm0644 resources/jumanji.desktop "$pkgdir/usr/share/applications/jumanji.desktop"
+    install -Dm0644 resources/config.example.toml "$pkgdir/usr/share/doc/$pkgname/config.example.toml"
+    install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm0644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

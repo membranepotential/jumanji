@@ -1,0 +1,57 @@
+# Example jumanji configuration.
+#
+# Install to ~/.config/jumanji/config.toml (or $XDG_CONFIG_HOME/jumanji/config.toml).
+# Every key below is shown commented-out at its built-in default, so an empty
+# file (or one with only the options you care about) behaves identically to
+# this file fully commented out.
+#
+# The file has two top-level tables: [options] for rendering/interaction
+# settings, and [keys.<mode>] for key remaps. Unknown keys and misplaced
+# top-level options are a hard parse error (not silently ignored), so typos
+# get caught instead of swallowed.
+
+[options]
+
+# Pixels scrolled per j/k/h/l, before count multiplication (e.g. `5j`).
+# scroll-step = 60
+
+# Geometric zoom step: added to/subtracted from the webkit zoom level per
+# `zoom in`/`zoom out` step (bound to `+`/`-` by default... see note below).
+# zoom-step = 0.1
+
+# Text zoom step: fraction of the base font size added/removed per
+# `text zoom in`/`text zoom out` step. Anchors the reading position instead
+# of jumping the scroll offset.
+# text-zoom-step = 0.1
+
+# Rendered content column width, in pixels.
+# page-width = 720
+
+# Whether dark-mode recoloring is on at startup (toggle at runtime with
+# Ctrl-r / the `recolor` action).
+# default-recolor = false
+
+# Body/prose font family. Empty string means "use the stylesheet's default
+# serif stack" (currently Source Serif 4, falling back to the system serif).
+# font-body = ""
+
+# Monospace/code font family. Empty string means "use the stylesheet's
+# default monospace stack".
+# font-mono = ""
+
+# Base body font size in pixels. Also the 100% reference point for text zoom.
+# font-size = 18
+
+# Which system selection a copied text selection is written to, zathura-style:
+# "primary" (X11 PRIMARY, middle-click paste) or "clipboard" (Ctrl-V paste).
+# selection-clipboard = "primary"
+
+[keys.normal]
+# Remap examples, zathura key notation (bare chars are literal, angle
+# brackets denote specials/modifiers: <C-r>, <Tab>, <Esc>, <S-Tab>, <Space>).
+# Uncomment and edit to override the defaults; unspecified keys keep their
+# built-in bindings.
+
+# "J" = "section next"
+# "K" = "section previous"
+# "<C-r>" = "recolor"

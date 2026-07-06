@@ -85,9 +85,26 @@ page-width = 720        # px, content column width
 "K" = "section previous"
 ```
 
-## Building
+## Installation
 
 Requires GTK4 and webkitgtk-6.0 (Arch: `pacman -S gtk4 webkitgtk-6.0`).
+
+### Arch Linux / AUR
+
+Not yet published to the AUR. Until it is, build the package straight from
+this repo:
+
+```sh
+cd packaging/aur
+makepkg -si
+```
+
+This builds jumanji as a real Arch package (binary in `/usr/bin`, a desktop
+entry so it shows up as a `.md` handler, and `/usr/share/doc/jumanji/config.example.toml`
+as a starting point for `~/.config/jumanji/config.toml`) and installs it with
+pacman, so it upgrades/removes cleanly like any other package.
+
+### From source (any distro)
 
 ```sh
 cargo build --release

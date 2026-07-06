@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=jumanji
+GenericName=Markdown Reader
+Comment=A minimal, keyboard-driven markdown reader in the spirit of zathura
+Exec=jumanji %f
+Terminal=false
+Categories=Office;Viewer;
+MimeType=text/markdown;text/x-markdown;
+Icon=text-markdown
+StartupWMClass=jumanji
