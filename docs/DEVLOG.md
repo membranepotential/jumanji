@@ -2,6 +2,34 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — Cross-document jumplist: go back after following a link (D10)
+
+Following a `.md` link (or `:open`) used to reset the jumplist, so there was no
+way back to the previous file. Now the jumplist spans documents:
+
+- `core::jumplist` entries are a `Location { doc: Option<PathBuf>, scroll_y }`
+  instead of a bare scroll offset — which document, and where in it (`None` =
+  the non-returnable stdin stream). The push/back/forward algorithm is
+  unchanged; only the payload widened. Core stays pure (`PathBuf` is std).
+- `open_file` now records the departure `Location` on the jumplist before
+  loading the new file; the load mechanics split into `load_document`, which
+  jump-navigation reuses (no jumplist bookkeeping of its own) and which no
+  longer resets the jumplist. `Ctrl-o` scrolls in place for a same-document
+  target, else reopens the file at the recorded offset. Marks stay
+  per-document.
+- `Backspace` is a second default binding for `jump backward` (remappable) — the
+  natural "go back" key. Rejected a separate document back-stack: one
+  document-aware jumplist serves both keys (vim's jumplist already carries a
+  buffer per entry).
+
+Verification: new jumplist unit test (`crosses_documents_carrying_the_source_file`),
+keymap default asserts Backspace → JumpBackward, and a headless e2e
+(`back_and_forward_cross_documents_after_following_a_link`) drives follow-link →
+`Backspace` → `Ctrl-i` across two files (run 8× to confirm it isn't flaky — the
+e2e asserts *which document* each step lands on; a location's scroll offset is
+covered by the unit test, since the live back-capture is inherently async).
+Full suite + clippy `-D warnings` + fmt green. **Next:** nothing pending.
+
 ## 2026-07-06 — v1.0.0: Milestone 3 complete
 
 All M3 items are built and the backlog of user-reported issues is fixed, so

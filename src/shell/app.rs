@@ -24,7 +24,7 @@ use crate::core::command::{self, Command, Completions};
 use crate::core::config::{self, Config, Options, SetEffect};
 use crate::core::editor::EditorCommand;
 use crate::core::history::{FileState, History};
-use crate::core::jumplist::Jumplist;
+use crate::core::jumplist::{Jumplist, Location};
 use crate::core::keymap::{Key, KeyPress, Keymap, MatchResult, Matcher};
 use crate::core::marks::{Marks, Position};
 use crate::core::pipeline::{self, Options as RenderOptions};
@@ -1107,7 +1107,8 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
                     view.scroll_position(move |cur| {
                         {
                             let mut s = sh.borrow_mut();
-                            s.jumplist.push(cur);
+                            let loc = current_location(&s, cur);
+                            s.jumplist.push(loc);
                             s.zoom = p.zoom;
                             s.view.set_zoom(p.zoom);
                             s.view.restore_scroll(p.scroll_y);
@@ -1123,17 +1124,19 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             let sh = shell.clone();
             let view = shell.borrow().view.clone();
             view.scroll_position(move |cur| {
-                let target = sh.borrow_mut().jumplist.back(cur);
-                if let Some(y) = target {
-                    sh.borrow().view.restore_scroll(y);
+                let current = current_location(&sh.borrow(), cur);
+                let target = sh.borrow_mut().jumplist.back(current);
+                if let Some(loc) = target {
+                    navigate_to_location(&sh, loc);
                 }
                 refresh_status(&sh);
             });
         }
         Action::JumpForward => {
             let target = s.jumplist.forward();
-            if let Some(y) = target {
-                s.view.restore_scroll(y);
+            drop(s);
+            if let Some(loc) = target {
+                navigate_to_location(shell, loc);
             }
         }
         Action::TocNext => s.toc_view.move_selection(count_i as i32),
@@ -1475,8 +1478,10 @@ fn open_uri(shell: &Rc<RefCell<Shell>>, uri: &str) {
     }
 }
 
-/// Open `path` in this window: persist the current position, reset per-document
-/// state, re-point the watcher, restore any saved state, and render.
+/// Open `path` in this window in response to a link follow or `:open`. Records
+/// the current position on the jumplist first — so `Ctrl-o` / `Backspace`
+/// returns here — unless we're leaving a non-returnable stdin stream. The new
+/// file resumes at its saved scroll position (or the top, if unseen).
 fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf) {
     if !path.exists() {
         shell
@@ -1485,6 +1490,30 @@ fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf) {
             .set_message(&format!("no such file: {}", path.display()));
         return;
     }
+    {
+        let mut s = shell.borrow_mut();
+        // Record the departure so the jumplist can return here. A stdin stream
+        // has no reopenable identity, so leaving one records nothing.
+        if !s.is_stdin() {
+            let loc = current_location(&s, s.last_scroll);
+            s.jumplist.push(loc);
+        }
+    }
+    let restore = shell
+        .borrow()
+        .history
+        .get(&path)
+        .map(|st| st.scroll_y)
+        .unwrap_or(0.0);
+    load_document(shell, path, restore);
+}
+
+/// Load `path` into this window at `restore_scroll`: persist the *outgoing*
+/// file's position, reset per-document state, re-point the watcher, restore the
+/// new file's saved zoom, and render. The jumplist is deliberately **not**
+/// reset — it spans documents, so `Ctrl-o` can walk back into the previous
+/// file. Callers own all jumplist bookkeeping.
+fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, restore_scroll: f64) {
     {
         let mut s = shell.borrow_mut();
         // Opening a file ends any stdin stream and starts a normal file document
@@ -1506,26 +1535,26 @@ fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf) {
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
         s.filename = name.clone();
         s.bar.set_filename(&name);
-        // Per-document navigation state resets on a document switch.
-        s.jumplist = Jumplist::new();
+        // Per-document navigation state resets on a document switch; the
+        // jumplist persists (it spans documents — see the fn doc).
         s.marks = Marks::new();
         s.section = 0;
         s.loaded = false;
-        // Restore saved state for the new file, or start fresh.
+        // Restore the new file's saved zoom (or defaults); the caller decides
+        // the scroll position.
         match s.history.get(&path) {
             Some(st) => {
                 s.text_zoom = st.text_zoom;
                 s.zoom = st.zoom;
                 s.view.set_zoom(st.zoom);
-                s.pending_restore = Some(st.scroll_y);
             }
             None => {
                 s.text_zoom = 1.0;
                 s.zoom = 1.0;
                 s.view.set_zoom(1.0);
-                s.pending_restore = Some(0.0);
             }
         }
+        s.pending_restore = Some(restore_scroll);
     }
     restart_watch(shell, &path);
     do_render_and_load(shell);
@@ -1732,6 +1761,48 @@ fn expand_tilde(s: &str) -> PathBuf {
 // Jumplist, history, themes
 // ---------------------------------------------------------------------------
 
+/// The current reading position as a jumplist [`Location`]: the live document
+/// (a file, or `None` for the stdin stream) at scroll offset `scroll_y`.
+fn current_location(s: &Shell, scroll_y: f64) -> Location {
+    Location {
+        doc: if s.is_stdin() {
+            None
+        } else {
+            Some(s.file.clone())
+        },
+        scroll_y,
+    }
+}
+
+/// Restore a jumplist [`Location`]: scroll in place when it names the current
+/// document, otherwise open its file at the recorded offset. A `None` document
+/// is the stdin stream we've since replaced — unreturnable.
+fn navigate_to_location(shell: &Rc<RefCell<Shell>>, loc: Location) {
+    let same_doc = {
+        let s = shell.borrow();
+        match (&loc.doc, s.is_stdin()) {
+            (Some(p), false) => *p == s.file,
+            (None, true) => true,
+            _ => false,
+        }
+    };
+    if same_doc {
+        shell.borrow().view.restore_scroll(loc.scroll_y);
+        return;
+    }
+    match loc.doc {
+        Some(path) if path.exists() => load_document(shell, path, loc.scroll_y),
+        Some(path) => shell
+            .borrow()
+            .bar
+            .set_message(&format!("no such file: {}", path.display())),
+        None => shell
+            .borrow()
+            .bar
+            .set_message("cannot return to piped input"),
+    }
+}
+
 /// Record the current (async-queried) scroll position on the jumplist, then run
 /// `after` — the actual jump — in the query's callback.
 fn jump_to(shell: &Rc<RefCell<Shell>>, after: impl FnOnce(&mut Shell) + 'static) {
@@ -1740,7 +1811,8 @@ fn jump_to(shell: &Rc<RefCell<Shell>>, after: impl FnOnce(&mut Shell) + 'static)
     view.scroll_position(move |cur| {
         {
             let mut s = sh.borrow_mut();
-            s.jumplist.push(cur);
+            let loc = current_location(&s, cur);
+            s.jumplist.push(loc);
             after(&mut s);
         }
         refresh_status(&sh);

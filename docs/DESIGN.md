@@ -408,6 +408,35 @@ machinery wholesale rather than inventing a parallel path.
   source shown as a code span (inline) or a small error box (display) with a
   note — never a crash, never a blank page. Mirrors `diagram.rs`.
 
+### D10: Cross-document jumplist navigation (post-1.0)
+
+Following a `.md` link swaps the document in place (D3's single window; `:open`
+does the same). Originally the jumplist (`Ctrl-o`/`Ctrl-i`, D4/M2) was reset on
+every document switch, so there was no way back to the previous file — only a
+per-file saved scroll position in `history.toml`. This closes that gap.
+
+- **A jumplist entry is a `Location`, not a scroll offset.** `core::jumplist`
+  now stores `{ doc: Option<PathBuf>, scroll_y: f64 }`: which document, and
+  where in it. `doc == None` is the live stdin stream (no reopenable identity;
+  the shell treats a `None` target as "cannot return"). The core stays pure —
+  `PathBuf` is std, and the offset remains opaque to it. The push/back/forward
+  algorithm is unchanged; only the payload widened.
+- **The list spans documents; it is no longer reset on a switch.** Opening a
+  file (link or `:open`) records the departure `Location` on the jumplist first
+  (via `open_file`), then loads the new document as the live position. `Ctrl-o`
+  walks back — scrolling in place when the target names the current document,
+  else reopening its file at the recorded offset (`load_document`, split out of
+  the old `open_file` so jump navigation reuses the load path without its own
+  jumplist bookkeeping). Quickmarks/marks stay **per-document** (still reset on
+  switch); only the jumplist crosses.
+- **`Backspace` is a second default binding for jumplist-back** — the
+  discoverable "go back" key after following a link — aliasing the `jump
+  backward` action, so it is remappable via `[keys.normal]` like any binding.
+- Rejected — a *separate* document back-stack for `Backspace` distinct from the
+  scroll jumplist: two overlapping histories is accidental complexity (Tar Pit).
+  One document-aware jumplist serves both keys; vim's jumplist already carries a
+  buffer per entry, so this is the idiomatic shape.
+
 ## Non-goals
 
 - Editing. Ever. Pair with an editor instead (D7).
@@ -452,7 +481,7 @@ Adapted from zathura; "page" becomes "section" (heading-delimited).
 | `Tab` | TOC mode (`j`/`k`/`l`/`h`/`Enter`, zathura tree keys) | M2 |
 | `f`/`F` | follow link / show target (hint overlay) | M2 |
 | `m<x>`, `'<x>` | set / jump to quickmark | M2 |
-| `Ctrl-o`/`Ctrl-i` | jumplist back/forward | M2 |
+| `Ctrl-o`/`Ctrl-i`, `Backspace` | jumplist back/forward (spans documents) | M2 |
 | `:` | command line (open, set, exec; tab completion) | M2 |
 
 ## Component boundaries

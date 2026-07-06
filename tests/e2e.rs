@@ -1306,6 +1306,57 @@ fn hint_follow_scrolls_to_fragment() {
 }
 
 #[test]
+fn back_and_forward_cross_documents_after_following_a_link() {
+    // Two files: a.md has a single link to b.md. Following it opens b.md; the
+    // document-spanning jumplist must let us walk back into a.md (`Backspace`)
+    // at the position we left it, then forward again (`Ctrl-i`) into b.md. The
+    // scroll offset a location carries is covered by the jumplist unit tests;
+    // here we assert the shell wiring — which document each step lands on, and
+    // that the departure position (a.md's top) is restored.
+    let Some(_g) = setup_guard() else { return };
+
+    let dir = std::env::temp_dir().join(format!("jumanji-e2e-back-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    // Enough filler that b.md scrolls well past the fold.
+    let filler: String = (1..=80)
+        .map(|i| format!("Filler paragraph {i} padding the document past the fold.\n\n"))
+        .collect();
+    let a = dir.join("a.md");
+    let b = dir.join("b.md");
+    std::fs::write(&a, format!("# Doc A\n\n[open b](b.md)\n\n{filler}")).expect("write a.md");
+    std::fs::write(&b, format!("# Doc B\n\n{filler}## Bottom of B\n")).expect("write b.md");
+
+    let h = Harness::launch_file(a.clone());
+    assert!(h.get_state().file.ends_with("a.md"), "starts on a.md");
+
+    // Follow the single visible link (hint label `a`) → opens b.md at its top.
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    h.wait_for_state("link opens b.md", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("b.md")
+    });
+
+    // Scroll down inside b.md so the live position we walk back from is real.
+    h.execute_action("scroll down", 12);
+    h.wait_for_state("scrolled within b.md", SETTLE, |s| s.scroll_y > 10.0);
+
+    // `Backspace` walks the jumplist back into a.md at the departure (the top).
+    h.key(&["BackSpace"]);
+    h.wait_for_state("Backspace returns to a.md at the top", SETTLE, |s| {
+        s.file.ends_with("a.md") && s.scroll_y == 0.0
+    });
+
+    // `Ctrl-i` walks forward again into b.md.
+    h.key(&["ctrl+i"]);
+    h.wait_for_state("Ctrl-i returns forward to b.md", SETTLE, |s| {
+        s.file.ends_with("b.md")
+    });
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn history_persists_scroll_across_relaunch() {
     let Some(_g) = setup_guard() else { return };
 

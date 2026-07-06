@@ -218,6 +218,14 @@ impl Default for Keymap {
         km.bind_char_arg(n, c('\''), CharArgKind::QuickmarkJump);
         km.bind(n, ctrl('o'), JumpBackward);
         km.bind(n, ctrl('i'), JumpForward);
+        // `Backspace` is a second, discoverable alias for jumplist-back — the
+        // natural "go back" key after following a link into another document.
+        // Rebindable via `[keys.normal]` (`jump backward`) like any binding.
+        km.bind(
+            n,
+            KeySequence::single(KeyPress::new(Key::Backspace, false, false)),
+            JumpBackward,
+        );
         km.bind(
             n,
             KeySequence::single(KeyPress::new(Key::Escape, false, false)),
@@ -679,6 +687,15 @@ mod tests {
             m.feed(KeyPress::new(Key::Char('i'), true, false), &km),
             MatchResult::Matched {
                 action: Action::JumpForward,
+                count: None
+            }
+        );
+        // Backspace is a second default alias for jumplist-back ("go back" after
+        // following a link into another document).
+        assert_eq!(
+            m.feed(KeyPress::new(Key::Backspace, false, false), &km),
+            MatchResult::Matched {
+                action: Action::JumpBackward,
                 count: None
             }
         );

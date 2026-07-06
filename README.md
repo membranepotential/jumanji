@@ -63,7 +63,7 @@ webview sees a keypress, so the vim layer is absolute. See
 | `Tab` | table of contents (`j`/`k` move, `l`/`h` expand/collapse, `Enter` jump) |
 | `f` / `F` | follow link via hints / show link target |
 | `m<x>` / `'<x>` | set / jump to quickmark `x` |
-| `Ctrl-o` / `Ctrl-i` | jumplist back / forward |
+| `Ctrl-o` / `Ctrl-i`, `Backspace` | jumplist back / forward — spans documents, so `Ctrl-o` / `Backspace` returns to the previous file after following a link |
 | `Ctrl-r` | recolor (dark mode) |
 | `r` | reload file |
 | `:` | command line (`open`, `set`, any action; `Tab` completes) |
