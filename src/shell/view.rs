@@ -136,6 +136,9 @@ const SELECTION_HANDLER: &str = "selection";
 /// The script-message handler the link-hint overlay posts its `[{label,href}]`
 /// list to.
 const HINTS_HANDLER: &str = "hints";
+/// The script-message handler the reverse-editor-sync click posts the source
+/// line to (DESIGN D7).
+const EDITOR_SYNC_HANDLER: &str = "editorsync";
 
 #[derive(Clone)]
 pub struct View {
@@ -148,6 +151,9 @@ pub struct View {
     /// Called with a resolved target URI when the webview tries to navigate
     /// (a link click); the shell decides whether to scroll, open, or delegate.
     navigate_cb: Sink,
+    /// Called with the source line (as a string) of a Ctrl+clicked element, so
+    /// the shell can spawn the editor (reverse sync, DESIGN D7).
+    editor_sync_cb: Sink,
 }
 
 impl View {
@@ -157,6 +163,8 @@ impl View {
         install_drag_select_reset(&ucm);
         let hints_cb: Sink = Rc::new(RefCell::new(None));
         install_hints(&ucm, hints_cb.clone());
+        let editor_sync_cb: Sink = Rc::new(RefCell::new(None));
+        install_editor_sync(&ucm, editor_sync_cb.clone());
 
         let webview = WebView::builder().user_content_manager(&ucm).build();
         webview.set_vexpand(true);
@@ -190,6 +198,7 @@ impl View {
             dark: Rc::new(Cell::new(false)),
             hints_cb,
             navigate_cb,
+            editor_sync_cb,
         }
     }
 
@@ -206,6 +215,28 @@ impl View {
     /// argument is the resolved absolute target URI.
     pub fn set_navigate_handler(&self, f: impl Fn(String) + 'static) {
         *self.navigate_cb.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Install the shell's handler for a reverse-editor-sync Ctrl+click. The
+    /// argument is the clicked element's source line, as a decimal string.
+    pub fn set_editor_sync_handler(&self, f: impl Fn(String) + 'static) {
+        *self.editor_sync_cb.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Forward editor sync (DESIGN D7): scroll to the element whose source line
+    /// is the greatest at-or-before `line`. `data-sourcepos` (comrak's, plus the
+    /// pipeline's injected ones) opens with `startLine:…`, so `parseInt` reads
+    /// the start line directly; document order makes those lines non-decreasing,
+    /// so the last match ≤ `line` is the nearest block at-or-above the target.
+    pub fn goto_source_line(&self, line: u32) {
+        self.run_js(&format!(
+            "(t => {{ let best = null; \
+               for (const el of document.querySelectorAll('[data-sourcepos]')) {{ \
+                 const l = parseInt(el.getAttribute('data-sourcepos'), 10); \
+                 if (!Number.isNaN(l) && l <= t) best = el; }} \
+               if (best) best.scrollIntoView({{behavior: 'instant', block: 'start'}}); \
+               else window.scrollTo(0, 0); }})({line});"
+        ));
     }
 
     /// Load a rendered document. `base` is the source file; its URI becomes the
@@ -646,6 +677,53 @@ fn install_hints(ucm: &UserContentManager, sink: Sink) {
         let json = value.to_str();
         if let Some(cb) = sink.borrow().as_ref() {
             cb(json.to_string());
+        }
+    });
+}
+
+/// Wire reverse editor sync (DESIGN D7): a capture-phase click listener that, on
+/// a Ctrl + primary-button click, walks up from the target to the nearest
+/// `[data-sourcepos]` ancestor and posts its source line back to Rust. It acts
+/// *only* on Ctrl+click (a plain click is untouched, so link routing and text
+/// selection are unaffected), and swallows the event so a Ctrl+click on a link
+/// syncs to the editor instead of following the link.
+fn install_editor_sync(ucm: &UserContentManager, sink: Sink) {
+    ucm.register_script_message_handler(EDITOR_SYNC_HANDLER, None);
+
+    const SOURCE: &str = "(function () {\n\
+        document.addEventListener('click', function (e) {\n\
+          if (e.button !== 0 || !e.ctrlKey) return;\n\
+          let el = e.target;\n\
+          while (el && el.nodeType === 1) {\n\
+            if (el.hasAttribute('data-sourcepos')) {\n\
+              const line = parseInt(el.getAttribute('data-sourcepos'), 10);\n\
+              if (!Number.isNaN(line) && line > 0) {\n\
+                e.preventDefault();\n\
+                e.stopPropagation();\n\
+                window.webkit.messageHandlers.editorsync.postMessage(String(line));\n\
+              }\n\
+              return;\n\
+            }\n\
+            el = el.parentElement;\n\
+          }\n\
+        }, true);\n\
+      })();";
+    let script = UserScript::new(
+        SOURCE,
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::Start,
+        &[],
+        &[],
+    );
+    ucm.add_script(&script);
+
+    ucm.connect_script_message_received(Some(EDITOR_SYNC_HANDLER), move |_, value| {
+        let line = value.to_str();
+        if line.is_empty() {
+            return;
+        }
+        if let Some(cb) = sink.borrow().as_ref() {
+            cb(line.to_string());
         }
     });
 }

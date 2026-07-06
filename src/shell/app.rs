@@ -21,6 +21,7 @@ use webkit6::prelude::*;
 
 use crate::core::command::{self, Command, Completions};
 use crate::core::config::{self, Config, Options, SetEffect};
+use crate::core::editor::EditorCommand;
 use crate::core::history::{FileState, History};
 use crate::core::jumplist::Jumplist;
 use crate::core::keymap::{Key, KeyPress, Keymap, MatchResult, Matcher};
@@ -82,6 +83,12 @@ struct Shell {
     /// options and step fields are re-synced from.
     options: Options,
     render_opts: RenderOptions,
+    /// Reverse editor-sync template (DESIGN D7): spawned on Ctrl+click with
+    /// `%l`/`%f` substituted. Config-only (copied from options at construction).
+    editor_command: EditorCommand,
+    /// A `--forward <line>` requested on the command line, applied once the
+    /// initial load finishes (DESIGN D7 forward sync on a fresh launch).
+    pending_forward: Option<u32>,
     /// XDG config base (`…/.config`); themes live under `<it>/jumanji/themes`.
     config_dir: Option<PathBuf>,
     /// Data dir (`…/.local/share/jumanji`); holds `history.toml`.
@@ -147,22 +154,29 @@ struct Shell {
     _dbus: Option<gtk::gio::OwnerId>,
 }
 
-/// Launch the application for `file` with the resolved `config`.
-pub fn run(file: PathBuf, config: Config) -> glib::ExitCode {
+/// Launch the application for `file` with the resolved `config`. `forward` is an
+/// optional `--forward <line>` to jump to once the initial load finishes.
+pub fn run(file: PathBuf, config: Config, forward: Option<u32>) -> glib::ExitCode {
     let app = Application::builder().application_id(APP_ID).build();
 
     let keymap = Rc::new(config.keymap);
     let options = config.options;
 
     app.connect_activate(move |app| {
-        build_ui(app, file.clone(), options.clone(), keymap.clone());
+        build_ui(app, file.clone(), options.clone(), keymap.clone(), forward);
     });
 
     // We parse args ourselves (see `main`); don't let GTK interpret argv.
     app.run_with_args::<&str>(&[])
 }
 
-fn build_ui(app: &Application, file: PathBuf, options: Options, keymap: Rc<Keymap>) {
+fn build_ui(
+    app: &Application,
+    file: PathBuf,
+    options: Options,
+    keymap: Rc<Keymap>,
+    forward: Option<u32>,
+) {
     let view = View::new(options.selection_clipboard);
     let toc_view = TocView::new();
     let bar = Bar::new();
@@ -212,6 +226,8 @@ fn build_ui(app: &Application, file: PathBuf, options: Options, keymap: Rc<Keyma
             // the renderers) for free.
             renderers: options.renderers.clone(),
         },
+        editor_command: options.editor_command.clone(),
+        pending_forward: forward,
         config_dir: config_dir.clone(),
         data_dir,
         scroll_step: options.scroll_step_px as i64,
@@ -288,6 +304,10 @@ fn install_view_handlers(shell: &Rc<RefCell<Shell>>) {
         let shell = shell.clone();
         view.set_navigate_handler(move |uri| open_uri(&shell, &uri));
     }
+    {
+        let shell = shell.clone();
+        view.set_editor_sync_handler(move |line| on_editor_sync(&shell, &line));
+    }
 }
 
 /// Read the file, render it, and load the HTML. When `preserve_scroll`, capture
@@ -352,10 +372,16 @@ fn connect_load_finished(shell: &Rc<RefCell<Shell>>) {
                 s.view.restore_scroll(y);
             }
         }
-        {
+        let forward = {
             let mut s = shell.borrow_mut();
             s.pending_restore = None;
             s.loaded = true;
+            // A `--forward <line>` overrides the restored scroll: the editor
+            // explicitly pointed the reader at this line, so jump there once.
+            s.pending_forward.take()
+        };
+        if let Some(line) = forward {
+            goto_source_line(&shell, line);
         }
         refresh_status(&shell);
     });
@@ -685,11 +711,73 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
         }) as dbus::ExecuteAction
     };
 
+    let goto_line = {
+        let shell = shell.clone();
+        Rc::new(move |line: u32| goto_source_line(&shell, line)) as dbus::GotoLine
+    };
+
     let owner = dbus::serve(dbus::Automation {
         get_state,
         execute_action,
+        goto_line,
     });
     shell.borrow_mut()._dbus = owner;
+}
+
+/// Forward editor sync (DESIGN D7): scroll to the element nearest at-or-before
+/// source `line`, recording the departure position on the jumplist first (like
+/// every other jump). A no-op until the document has loaded.
+fn goto_source_line(shell: &Rc<RefCell<Shell>>, line: u32) {
+    if !shell.borrow().loaded {
+        return;
+    }
+    jump_to(shell, move |s| s.view.goto_source_line(line));
+}
+
+/// Reverse editor sync (DESIGN D7): a Ctrl+click posted `line` (as a string) for
+/// the clicked element. Substitute it and the current file into `editor-command`
+/// and spawn the editor detached — never blocking the UI. Any failure (bad line,
+/// no program, spawn error) is a statusbar notice, never a crash.
+fn on_editor_sync(shell: &Rc<RefCell<Shell>>, line: &str) {
+    let Ok(line) = line.trim().parse::<u32>() else {
+        return;
+    };
+    let (command, file, bar) = {
+        let s = shell.borrow();
+        (s.editor_command.clone(), s.file.clone(), s.bar.clone())
+    };
+    // Substitute `%l`/`%f`, then expand a leading `$VAR` per token (so the
+    // default `$EDITOR` resolves from the environment at spawn time).
+    let argv: Vec<String> = command
+        .to_argv(line, &file)
+        .into_iter()
+        .map(|tok| expand_env_token(&tok))
+        .collect();
+
+    match argv.split_first() {
+        Some((program, _)) if !program.is_empty() => {
+            let owned: Vec<std::ffi::OsString> =
+                argv.iter().map(std::ffi::OsString::from).collect();
+            let refs: Vec<&std::ffi::OsStr> = owned.iter().map(AsRef::as_ref).collect();
+            // gio::Subprocess reaps the child via the main loop and never blocks
+            // us; we drop the handle (fire-and-forget), matching zathura.
+            match gio::Subprocess::newv(&refs, gio::SubprocessFlags::NONE) {
+                Ok(_) => bar.set_message(&format!("editor: {program} at line {line}")),
+                Err(e) => bar.set_message(&format!("editor-command failed: {e}")),
+            }
+        }
+        _ => bar.set_message("editor-command has no program (set $EDITOR or editor-command)"),
+    }
+}
+
+/// Expand a whole-token environment reference (`$EDITOR` → its value); any other
+/// token is returned unchanged. An unset variable yields an empty string, which
+/// the caller treats as "no program".
+fn expand_env_token(token: &str) -> String {
+    match token.strip_prefix('$') {
+        Some(name) => std::env::var(name).unwrap_or_default(),
+        None => token.to_string(),
+    }
 }
 
 /// Serialize the reader state as the compact JSON object `GetState` returns.

@@ -15,6 +15,13 @@ use crate::core::config::{self, Config};
 struct Cli {
     /// The markdown file to open.
     file: PathBuf,
+
+    /// Forward editor sync: jump to the rendered element nearest at-or-before
+    /// this 1-based source line. If an instance already has the file open, the
+    /// jump is forwarded to it over D-Bus and this process exits without opening
+    /// a window (like zathura's `--synctex-forward`).
+    #[arg(long, value_name = "LINE")]
+    forward: Option<u32>,
 }
 
 fn main() -> ExitCode {
@@ -54,6 +61,16 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Forward editor sync (DESIGN D7): if `--forward <line>` is given and an
+    // instance already has this file open, hand it the jump over D-Bus and exit
+    // without opening a second window (zathura's `--synctex-forward` behaviour).
+    // Otherwise fall through and open normally, jumping once the load finishes.
+    if let Some(line) = cli.forward
+        && shell::dbus::forward_to_running_instance(&file, line)
+    {
+        return ExitCode::SUCCESS;
+    }
+
     // Malformed config is surfaced but non-fatal: the reader must still open.
     let config = match Config::load(config::xdg_config_dir().as_deref()) {
         Ok(cfg) => cfg,
@@ -63,7 +80,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let exit = shell::app::run(file, config);
+    let exit = shell::app::run(file, config, cli.forward);
     if exit == glib::ExitCode::SUCCESS {
         ExitCode::SUCCESS
     } else {

@@ -14,6 +14,7 @@
 //! `GetState` is answered asynchronously — the reply is completed from a WebKit
 //! JS callback (live scroll offset), so the main loop is never blocked.
 
+use std::path::Path;
 use std::rc::Rc;
 
 use gtk::gio;
@@ -37,6 +38,9 @@ const INTROSPECTION_XML: &str = r#"<node>
       <arg type="s" name="action" direction="in"/>
       <arg type="u" name="count" direction="in"/>
     </method>
+    <method name="GotoLine">
+      <arg type="u" name="line" direction="in"/>
+    </method>
   </interface>
 </node>"#;
 
@@ -48,11 +52,16 @@ pub type GetState = Rc<dyn Fn(gio::DBusMethodInvocation)>;
 /// Runs an action string `count` times; `Err(msg)` becomes a D-Bus error reply.
 pub type ExecuteAction = Rc<dyn Fn(&str, u32) -> Result<(), String>>;
 
+/// Forward editor sync (DESIGN D7): scroll the reader to the element nearest
+/// at-or-before source `line`.
+pub type GotoLine = Rc<dyn Fn(u32)>;
+
 /// The behaviour the D-Bus object exposes, injected by the shell so this module
 /// never sees the `Shell` type.
 pub struct Automation {
     pub get_state: GetState,
     pub execute_action: ExecuteAction,
+    pub goto_line: GotoLine,
 }
 
 /// Acquire the per-instance name and export the object. Returns the owner id
@@ -130,9 +139,123 @@ fn dispatch(
                 "ExecuteAction expects (s action, u count)",
             ),
         },
+        "GotoLine" => match params.get::<(u32,)>() {
+            Some((line,)) => {
+                (automation.goto_line)(line);
+                invocation.return_value(Some(&().to_variant()));
+            }
+            None => invocation.return_dbus_error(ERR_INVALID_ARGS, "GotoLine expects (u line)"),
+        },
         other => invocation.return_dbus_error(
             "org.freedesktop.DBus.Error.UnknownMethod",
             &format!("no such method: {other}"),
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Client side: forward search to an already-running instance
+// ---------------------------------------------------------------------------
+
+/// Try to hand a `--forward <line>` to a jumanji instance that already has
+/// `file` open (DESIGN D7): enumerate the session bus for well-known names under
+/// the interface prefix, ask each for its `GetState` `file`, and — on the first
+/// match — call `GotoLine(line)` on it. Returns `true` iff a matching instance
+/// was found and driven, in which case the caller should exit without opening a
+/// window (zathura's `--synctex-forward` behaviour).
+///
+/// Everything is best-effort and synchronous: no session bus, no listing, or no
+/// match all yield `false`, and the caller opens a fresh window instead.
+pub fn forward_to_running_instance(file: &Path, line: u32) -> bool {
+    let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
+        return false;
+    };
+
+    let Some(names) = list_names(&conn) else {
+        return false;
+    };
+    let prefix = format!("{INTERFACE}.PID-");
+    for name in names.iter().filter(|n| n.starts_with(&prefix)) {
+        match instance_file(&conn, name) {
+            Some(open) if same_file(&open, file) => {
+                let _ = conn.call_sync(
+                    Some(name),
+                    OBJECT_PATH,
+                    INTERFACE,
+                    "GotoLine",
+                    Some(&(line,).to_variant()),
+                    None,
+                    gio::DBusCallFlags::NONE,
+                    CALL_TIMEOUT_MS,
+                    gio::Cancellable::NONE,
+                );
+                return true;
+            }
+            _ => continue,
+        }
+    }
+    false
+}
+
+/// Synchronous D-Bus call budget for the forward-search discovery (ms).
+const CALL_TIMEOUT_MS: i32 = 3000;
+
+/// List every well-known name currently owned on the bus.
+fn list_names(conn: &gio::DBusConnection) -> Option<Vec<String>> {
+    let reply = conn
+        .call_sync(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "ListNames",
+            None,
+            None,
+            gio::DBusCallFlags::NONE,
+            CALL_TIMEOUT_MS,
+            gio::Cancellable::NONE,
+        )
+        .ok()?;
+    reply.get::<(Vec<String>,)>().map(|(names,)| names)
+}
+
+/// Ask the instance owning `name` for the file it currently has open, via
+/// `GetState` (reused rather than adding a bespoke `GetFile`, per DESIGN D7).
+fn instance_file(conn: &gio::DBusConnection, name: &str) -> Option<String> {
+    let reply = conn
+        .call_sync(
+            Some(name),
+            OBJECT_PATH,
+            INTERFACE,
+            "GetState",
+            None,
+            None,
+            gio::DBusCallFlags::NONE,
+            CALL_TIMEOUT_MS,
+            gio::Cancellable::NONE,
+        )
+        .ok()?;
+    let (json,) = reply.get::<(String,)>()?;
+    json_file_field(&json)
+}
+
+/// Extract the `"file":"…"` value from the flat `GetState` JSON. The reader
+/// emits paths with no embedded quotes, so a scan to the closing quote suffices
+/// (mirrors the e2e harness's tiny parser).
+fn json_file_field(json: &str) -> Option<String> {
+    let start = json.find("\"file\":\"")? + "\"file\":\"".len();
+    let rest = &json[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// True if `open` (a running instance's path) and `target` refer to the same
+/// document. Both are absolute (the reader stores `std::path::absolute` paths),
+/// so compare canonically, falling back to a literal comparison if either path
+/// cannot be canonicalized.
+fn same_file(open: &str, target: &Path) -> bool {
+    let open = Path::new(open);
+    match (open.canonicalize(), target.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => open == target,
     }
 }
