@@ -273,18 +273,15 @@ impl View {
         );
     }
 
-    /// Geometric zoom without anchoring: set webkit full-page zoom and mirror
-    /// the level into the `--zoom` custom property (which the stylesheet reads
-    /// to keep each diagram's device size scaling linearly with zoom; see
-    /// `style.css`). Used where the position is restored by other means — the
-    /// post-load re-apply (`--zoom` is lost on reload) and quickmark/history
-    /// restores, which set the scroll offset explicitly.
+    /// Geometric zoom without anchoring: set webkit full-page native zoom. The
+    /// native `zoom_level` is a property of the WebView and survives a document
+    /// reload, so this is used where the reading position is restored by other
+    /// means — quickmark/history restores, which set the scroll offset
+    /// explicitly. Diagrams scale with zoom by construction: WebKit multiplies
+    /// their pinned CSS width (`--dw`) into device px (see `style.css`).
     pub fn set_zoom(&self, level: f64) {
         let level = level.max(0.2);
         self.webview.set_zoom_level(level);
-        self.run_js(&format!(
-            "document.documentElement.style.setProperty('--zoom', {level});"
-        ));
     }
 
     /// Geometric zoom anchored at `anchor`. Because zoom now reflows the page,
@@ -292,8 +289,8 @@ impl View {
     ///
     /// `set_zoom_level` is a native call and cannot be issued from JS, so the
     /// sequence is race-free by construction: capture the anchor (async JS), and
-    /// only in its completion callback set the native zoom + `--zoom` and restore
-    /// the position (a second JS eval). The two evals share `window.__jmnj_anchor`
+    /// only in its completion callback set the native zoom and restore the
+    /// position (a second JS eval). The two evals share `window.__jmnj_anchor`
     /// and can never interleave for one call, since the second is scheduled from
     /// the first's callback.
     pub fn zoom_to(&self, level: f64, anchor: ZoomAnchor) {
@@ -307,11 +304,8 @@ impl View {
             None::<&gtk::gio::Cancellable>,
             move |_res| {
                 webview.set_zoom_level(level);
-                let restore = format!(
-                    "document.documentElement.style.setProperty('--zoom', {level});{RESTORE_ANCHOR_JS}"
-                );
                 webview.evaluate_javascript(
-                    &restore,
+                    RESTORE_ANCHOR_JS,
                     None,
                     None,
                     None::<&gtk::gio::Cancellable>,
@@ -335,8 +329,7 @@ impl View {
             move |_res| {
                 webview.set_zoom_level(1.0);
                 let restore = format!(
-                    "document.documentElement.style.setProperty('--zoom', 1);\
-                     document.documentElement.style.setProperty('--font-size', '{font_base_px}px');\
+                    "document.documentElement.style.setProperty('--font-size', '{font_base_px}px');\
                      {RESTORE_ANCHOR_JS}"
                 );
                 webview.evaluate_javascript(

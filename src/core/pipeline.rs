@@ -306,7 +306,8 @@ mod tests {
     #[test]
     fn mermaid_fence_becomes_inline_svg() {
         let html = render_str("```mermaid\nflowchart TD\nA[Start] --> B[Done]\n```\n");
-        assert!(html.contains("<div class=\"mermaid\">"));
+        // The wrapper carries the intrinsic width on `--dw` (intrinsic-size model).
+        assert!(html.contains("<div class=\"mermaid\" style=\"--dw:"));
         assert!(html.contains("<svg"));
         // The literal fence text must not survive as a plain code block.
         assert!(!html.contains("flowchart TD\nA[Start]"));

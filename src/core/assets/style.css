@@ -16,17 +16,10 @@
   /* Overridden by a generated block using opts.page_width_px. */
   --content-width: 720px;
 
-  /* Horizontal chrome constants, deliberately in `rem`. `rem` resolves against
-   * the root (<html>) font size, which is the browser default 16px and never
-   * changes — text zoom only rewrites the *body* `--font-size`, so these stay
-   * invariant under both zoom axes. They are used both as real padding below
-   * and, summed into `--diagram-chrome`, by the diagram-width formula. */
+  /* Horizontal padding constants. `--main-pad-x` is the reading column's side
+   * padding; `--mermaid-pad` is the diagram box's inner padding. */
   --main-pad-x: 1.5rem;
   --mermaid-pad: 1.25rem;
-  /* Total horizontal space between the viewport/column edge and a diagram's
-   * svg element: both main paddings + both .mermaid paddings + both 1px borders. Must
-   * match the real box geometry exactly or the pinned diagram width drifts. */
-  --diagram-chrome: calc(2 * var(--main-pad-x) + 2 * var(--mermaid-pad) + 2px);
 
   --bg: #ffffff;
   --fg: #1f2328;
@@ -419,8 +412,6 @@ details[open] > summary {
  * it stays legible regardless of the page theme. */
 .mermaid {
   margin: 1.6em 0;
-  /* `rem` (not `em`) so the padding — and thus `--diagram-chrome` — stays fixed
-   * under text zoom; the diagram-width formula depends on this being exact. */
   padding: var(--mermaid-pad);
   background: #ffffff;
   border: 1px solid var(--border);
@@ -429,21 +420,17 @@ details[open] > summary {
   text-align: center;
 }
 .mermaid svg {
-  /* Pin the diagram's CSS width to its zoom-1 value so its *device* size scales
-   * linearly with geometric zoom (device px = CSS px × zoom); any excess scrolls
-   * inside .mermaid (overflow-x: auto), never the page. `100vw * --zoom` is
-   * numerically the device viewport width in CSS px — 100vw = deviceWidth / zoom,
-   * so the product is the constant device width regardless of zoom — from which
-   * we subtract the chrome to the svg edge. We cap at the reading column so a
-   * full-width diagram never exceeds `--content-width`. merman emits the svg with
-   * an inline `max-width:<intrinsic>px`; that inline style still caps small
-   * diagrams (effective width = min(this width, intrinsic)), so no stylesheet
-   * `max-width` is needed — and a `max-width: 100%` here would wrongly clamp the
-   * device growth and defeat the zoom. */
-  width: min(
-    calc(100vw * var(--zoom, 1) - var(--diagram-chrome)),
-    calc(var(--content-width) - var(--diagram-chrome))
-  );
+  /* Render every diagram at its intrinsic (natural) size. The pipeline pins the
+   * diagram's intrinsic pixel width onto `--dw` (parsed from merman's inline
+   * `max-width:<N>px`); the CSS width is that constant, so under WebKit's native
+   * geometric zoom — which multiplies CSS px → device px — the device size is
+   * simply `intrinsic × zoom`, with no custom-property mirroring needed. A
+   * diagram wider than the reading column overflows and scrolls *inside*
+   * `.mermaid` (overflow-x: auto), never the page. Text zoom rewrites the body
+   * `--font-size` only, so it leaves diagrams untouched by construction. When
+   * the intrinsic width can't be parsed the pipeline omits `--dw` and this falls
+   * back to the svg's own `auto` width. */
+  width: var(--dw, auto);
   height: auto;
 }
 

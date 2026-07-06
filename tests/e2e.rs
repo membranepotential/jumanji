@@ -596,6 +596,18 @@ fn narrow_viewport_zoom_reflows_without_page_overflow() {
         narrow.viewport_width
     );
     assert!(narrow.diagram_width > 0.0, "demo has a mermaid diagram");
+    // New user-visible behaviour (intrinsic-size model): at zoom 1 a big diagram
+    // renders at its *natural* width, which exceeds the narrow viewport — the
+    // overflow scrolls inside the `.mermaid` box (overflow-x: auto), never the
+    // page (doc_scroll_width ≤ viewport, asserted just above). The first demo
+    // diagram is ~1200 px intrinsic, well past the 500 px window.
+    assert!(
+        narrow.diagram_width > narrow.viewport_width,
+        "at zoom 1 the wide diagram should exceed the narrow viewport (intrinsic \
+         size, overflow inside its box): diagram {} vs viewport {}",
+        narrow.diagram_width,
+        narrow.viewport_width
+    );
 
     // Scroll into the document, then zoom in hard (~1.5×).
     h.execute_action("scroll down", 10);
@@ -603,8 +615,8 @@ fn narrow_viewport_zoom_reflows_without_page_overflow() {
     h.execute_action("zoom in", 5);
     h.wait_for_state("zoom applied", SETTLE, |s| s.zoom > 1.4);
     // Wait for the reflow to settle: the zoom level lands before the layout has
-    // finished reflowing (the `--zoom`/innerWidth change is applied by an async
-    // JS eval), so read a *stable* width, not the first mid-transition snapshot.
+    // finished reflowing (the native zoom + anchor restore run in an async JS
+    // callback), so read a *stable* width, not the first mid-transition snapshot.
     let zoomed = {
         let prev = std::cell::Cell::new(-1.0_f64);
         h.wait_for_state("width settled after zoom", SETTLE, move |s| {
@@ -819,10 +831,34 @@ fn live_reload_grows_toc_and_preserves_dark() {
     let start = h.get_state();
     let toc0 = start.toc_len;
 
-    // Turn on dark mode, then append a new heading to trigger a real reload.
+    // Turn on dark mode for the persistence check.
     h.execute_action("recolor", 1);
     h.wait_for_state("dark enabled", SETTLE, |s| s.dark);
 
+    // Verify the *native* geometric zoom survives a reload — the open question
+    // behind dropping the `--zoom`/set_zoom re-apply from the load-finished
+    // handler. Shrink the window and zoom in: the CSS viewport width
+    // (innerWidth = deviceWidth / zoom) collapses well below the device 500 px.
+    // If native zoom did NOT survive the reload it would snap back toward 500.
+    h.xdotool(["windowsize", "--sync", &h.window_id, "500", "800"]);
+    h.execute_action("zoom in", 5); // +0.5 → ~1.5×
+    let zoomed = {
+        let prev = std::cell::Cell::new(-1.0_f64);
+        h.wait_for_state("viewport collapses under zoom", SETTLE, move |s| {
+            let stable = s.zoom > 1.4
+                && s.viewport_width > 0.0
+                && (s.viewport_width - prev.get()).abs() < 1.0;
+            prev.set(s.viewport_width);
+            stable
+        })
+    };
+    assert!(
+        zoomed.viewport_width < 450.0,
+        "zoomed CSS viewport should collapse below the device width: {}",
+        zoomed.viewport_width
+    );
+
+    // Append a new heading to trigger a real reload.
     {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new()
@@ -836,6 +872,15 @@ fn live_reload_grows_toc_and_preserves_dark() {
         s.toc_len > toc0
     });
     assert!(reloaded.dark, "dark mode must persist across a live reload");
+    // The native zoom survived: the CSS viewport is still collapsed (not snapped
+    // back to ~500), so no load-finished re-apply is needed.
+    assert!(
+        reloaded.viewport_width < 450.0,
+        "native geometric zoom must survive the reload (CSS viewport stays \
+         collapsed): {} (pre-reload {})",
+        reloaded.viewport_width,
+        zoomed.viewport_width
+    );
 
     drop(h);
     let _ = std::fs::remove_dir_all(&dir);

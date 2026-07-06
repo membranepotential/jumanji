@@ -32,10 +32,34 @@ enum Rendered {
 fn render(source: &str, diagram_id: &str) -> Rendered {
     let renderer = HeadlessRenderer::new().with_diagram_id(diagram_id);
     match renderer.render_svg_sync(source) {
-        Ok(Some(svg)) => Rendered::Svg(format!("<div class=\"mermaid\">{svg}</div>")),
+        Ok(Some(svg)) => Rendered::Svg(wrap_svg(&svg)),
         Ok(None) => Rendered::Failed("no mermaid diagram detected in fence".to_string()),
         Err(err) => Rendered::Failed(err.to_string()),
     }
+}
+
+/// Wrap a merman SVG in its `.mermaid` display container, pinning the diagram's
+/// intrinsic (natural) width onto the `--dw` custom property so the stylesheet
+/// can render it at natural size (overflowing into its own scroll box) rather
+/// than shrinking it to fit the column. The intrinsic px width is recoverable
+/// from the SVG root's inline `max-width:<N>px` that merman emits (and parses
+/// back itself, `merman::render::raster::parse_svg_max_width_px`). If the width
+/// can't be parsed, degrade gracefully to a plain wrapper with no `--dw`.
+fn wrap_svg(svg: &str) -> String {
+    match parse_svg_intrinsic_width_px(svg) {
+        Some(px) => format!("<div class=\"mermaid\" style=\"--dw:{px}px\">{svg}</div>"),
+        None => format!("<div class=\"mermaid\">{svg}</div>"),
+    }
+}
+
+/// Parse the intrinsic width (px) out of the SVG root's inline
+/// `max-width:<N>px` declaration. Mirrors merman's own parser: find the
+/// property, take the numeric run before `px`, parse it as a float.
+fn parse_svg_intrinsic_width_px(svg: &str) -> Option<f32> {
+    let start = svg.find("max-width:")? + "max-width:".len();
+    let rest = svg[start..].trim_start();
+    let px_end = rest.find("px")?;
+    rest[..px_end].trim().parse::<f32>().ok()
 }
 
 /// Graceful degradation: an error note above the original fence, rendered as a
@@ -94,14 +118,46 @@ mod tests {
     }
 
     #[test]
-    fn valid_flowchart_renders_inline_svg() {
+    fn valid_flowchart_renders_inline_svg_with_intrinsic_width() {
         match render("flowchart TD\nA[Start] --> B[Done]", "test-ok") {
             Rendered::Svg(html) => {
-                assert!(html.starts_with("<div class=\"mermaid\">"));
+                // Real merman output carries an inline `max-width:<N>px`, so the
+                // wrapper must pin it onto `--dw` for the intrinsic-size model.
+                assert!(
+                    html.starts_with("<div class=\"mermaid\" style=\"--dw:"),
+                    "wrapper should carry a --dw intrinsic width: {html:.80}"
+                );
+                assert!(html.contains("px\">"));
                 assert!(html.contains("<svg"));
             }
             Rendered::Failed(reason) => panic!("expected SVG, got failure: {reason}"),
         }
+    }
+
+    #[test]
+    fn parses_intrinsic_width_from_inline_style() {
+        let svg = "<svg width=\"100%\" style=\"max-width: 512.5px; background: #fff;\">x</svg>";
+        assert_eq!(parse_svg_intrinsic_width_px(svg), Some(512.5));
+    }
+
+    #[test]
+    fn wrap_svg_pins_dw_when_width_present() {
+        let svg = "<svg style=\"max-width: 480px;\"></svg>";
+        assert_eq!(
+            wrap_svg(svg),
+            "<div class=\"mermaid\" style=\"--dw:480px\"><svg style=\"max-width: 480px;\"></svg></div>"
+        );
+    }
+
+    #[test]
+    fn wrap_svg_degrades_to_plain_wrapper_without_width() {
+        // No parseable `max-width:<N>px` → plain wrapper, no style attribute.
+        let svg = "<svg viewBox=\"0 0 10 10\"></svg>";
+        assert_eq!(
+            wrap_svg(svg),
+            "<div class=\"mermaid\"><svg viewBox=\"0 0 10 10\"></svg></div>"
+        );
+        assert_eq!(parse_svg_intrinsic_width_px(svg), None);
     }
 
     #[test]

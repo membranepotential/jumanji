@@ -336,14 +336,13 @@ fn connect_load_finished(shell: &Rc<RefCell<Shell>>) {
         {
             let s = shell.borrow();
             s.view.set_dark(s.dark);
-            // Re-apply both zoom axes: the inline `--font-size`/`--zoom`
-            // custom properties are lost on reload. No anchoring here — the
-            // scroll offset is restored explicitly below.
+            // Re-apply text zoom: the inline `--font-size` custom property is
+            // lost on reload. Geometric zoom needs no re-apply — the native
+            // `zoom_level` is a WebView property that survives a document reload
+            // (verified by the live-reload e2e). No anchoring here — the scroll
+            // offset is restored explicitly below.
             if s.text_zoom != 1.0 {
                 s.view.set_text_zoom_px(s.font_base_px * s.text_zoom);
-            }
-            if s.zoom != 1.0 {
-                s.view.set_zoom(s.zoom);
             }
             if let Some(y) = s.pending_restore {
                 s.view.restore_scroll(y);
