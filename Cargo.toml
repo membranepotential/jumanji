@@ -11,6 +11,7 @@ gtk = { version = "0.11.4", package = "gtk4", features = ["v4_14"] }
 merman = { version = "0.7.0", features = ["render"] }
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
+pulldown-latex = "0.7.1"
 serde = { version = "1.0.228", features = ["derive"] }
 syntect = "5.3.0"
 thiserror = "2.0.18"

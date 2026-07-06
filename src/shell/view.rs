@@ -61,6 +61,9 @@ pub struct ViewportState {
     /// Rendered width of the first `.mermaid svg` (0 if none). CSS px, so its
     /// device size is `diagram_width × zoom`.
     pub diagram_width: f64,
+    /// Rendered width of the first `<math>` element (0 if none). CSS px. Lets
+    /// e2e assert MathML actually laid out with nonzero geometry.
+    pub math_width: f64,
 }
 
 /// JS that captures the anchor element into `window.__jmnj_anchor` (element +
@@ -428,10 +431,12 @@ impl View {
              const p = max > 0 ? Math.round((window.scrollY / max) * 100) : 0; \
              const m = document.querySelector('main') || b; \
              const svg = document.querySelector('.mermaid svg'); \
+             const math = document.querySelector('math'); \
              return { y: window.scrollY, p: Math.min(100, Math.max(0, p)), \
                       w: m.offsetWidth, vw: window.innerWidth, \
                       dw: Math.max(d.scrollWidth, b.scrollWidth), \
-                      gw: svg ? svg.getBoundingClientRect().width : 0 }; })()";
+                      gw: svg ? svg.getBoundingClientRect().width : 0, \
+                      mw: math ? math.getBoundingClientRect().width : 0 }; })()";
         self.webview.evaluate_javascript(
             script,
             None,
@@ -447,6 +452,7 @@ impl View {
                         viewport_width: num("vw"),
                         doc_scroll_width: num("dw"),
                         diagram_width: num("gw"),
+                        math_width: num("mw"),
                     });
                 }
                 Err(_) => callback(ViewportState {
@@ -456,6 +462,7 @@ impl View {
                     viewport_width: 0.0,
                     doc_scroll_width: 0.0,
                     diagram_width: 0.0,
+                    math_width: 0.0,
                 }),
             },
         );

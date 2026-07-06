@@ -1,0 +1,20 @@
+Fonts vendored for MathML rendering
+===================================
+
+These WOFF2 files are the Latin Modern math and text fonts shipped with the
+`font/` directory of pulldown-latex 0.7.1 (github.com/carloskiki/pulldown-latex).
+
+  latinmodern-math.woff2     Latin Modern Math
+  lmroman12-regular.woff2    Latin Modern Roman 12 (regular)
+  lmroman12-bold.woff2       Latin Modern Roman 12 (bold)
+  lmroman12-italic.woff2     Latin Modern Roman 12 (italic)
+
+The Latin Modern fonts are produced by GUST e-foundry and distributed under the
+GUST Font License (GFL), an LPPL-based free-software licence that permits use,
+redistribution, and modification.
+
+  GUST Font License: http://www.gust.org.pl/projects/e-foundry/licenses
+  Latin Modern:      http://www.gust.org.pl/projects/e-foundry/latin-modern
+
+jumanji redistributes these fonts unmodified, embedded as base64 `data:` URIs in
+the generated math stylesheet (see `src/core/math.rs`). No network fetch occurs.

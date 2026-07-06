@@ -13,6 +13,7 @@ pub mod toc;
 
 mod diagram;
 mod highlight;
+mod math;
 
 /// A heading in the document, used for the TOC and section navigation.
 #[derive(Debug, Clone, PartialEq, Eq)]

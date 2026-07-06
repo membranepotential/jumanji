@@ -99,6 +99,9 @@ struct State {
     /// First `.mermaid svg` rendered width in CSS px (0 if none). Device size is
     /// `diagram_width × zoom`.
     diagram_width: f64,
+    /// First `<math>` rendered width in CSS px (0 if none). Nonzero proves the
+    /// MathML actually laid out.
+    math_width: f64,
     dark: bool,
     zoom: f64,
     text_zoom: f64,
@@ -120,6 +123,7 @@ impl State {
             viewport_width: field(json, "viewport_width")?.parse().ok()?,
             doc_scroll_width: field(json, "doc_scroll_width")?.parse().ok()?,
             diagram_width: field(json, "diagram_width")?.parse().ok()?,
+            math_width: field(json, "math_width")?.parse().ok()?,
             dark: field(json, "dark")? == "true",
             zoom: field(json, "zoom")?.parse().ok()?,
             text_zoom: field(json, "text_zoom")?.parse().ok()?,
@@ -542,6 +546,20 @@ fn ctrl_r_toggles_dark() {
 
     h.key(&["ctrl+r"]);
     h.wait_for_state("Ctrl-r disables dark", SETTLE, |s| !s.dark);
+}
+
+#[test]
+fn math_renders_as_mathml_with_width() {
+    // The demo's Math section has inline and display LaTeX. This asserts WebKit
+    // actually laid out a `<math>` element (nonzero width) — i.e. the MathML the
+    // pipeline emits renders natively, no JavaScript involved.
+    let Some((_g, h)) = setup() else { return };
+    let s = h.get_state();
+    assert!(
+        s.math_width > 0.0,
+        "expected a rendered <math> element with nonzero width, got {}",
+        s.math_width
+    );
 }
 
 #[test]

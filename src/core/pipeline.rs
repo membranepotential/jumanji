@@ -11,15 +11,17 @@ use comrak::nodes::{Ast, AstNode, LineColumn, NodeHtmlBlock, NodeValue};
 use comrak::{Arena, Options as ComrakOptions, format_html, parse_document};
 
 use super::highlight::escape_html;
-use super::{Heading, RenderedDocument, diagram, highlight, toc};
+use super::{Heading, RenderedDocument, diagram, highlight, math, toc};
 
 /// The stylesheet is embedded at compile time; nothing is fetched at runtime.
 const BASE_CSS: &str = include_str!("assets/style.css");
 
 /// Content Security Policy for the rendered page. Network is fully locked out;
-/// only inline styles/SVG and local (`file:`/`data:`) images are permitted —
-/// see `docs/DESIGN.md` D3.
-const CSP: &str = "default-src 'none'; img-src file: data:; style-src 'unsafe-inline'";
+/// only inline styles/SVG, local (`file:`/`data:`) images, and the base64
+/// `data:` math fonts are permitted — see `docs/DESIGN.md` D3/D8. `font-src
+/// data:` is harmless when a document has no math (nothing references a font).
+const CSP: &str =
+    "default-src 'none'; img-src file: data:; style-src 'unsafe-inline'; font-src data:";
 
 /// Rendering options, constructed by the shell from [`super::config`].
 #[derive(Debug, Clone)]
@@ -103,10 +105,12 @@ pub fn render(md: &str, opts: &Options) -> RenderedDocument {
 
     // Order matters: mermaid first (turns mermaid fences into HTML blocks so
     // the highlighter skips them), then highlight the remaining code fences,
-    // then wrap tables. None of these add or reorder headings, so the TOC's
-    // anchors still match the ids the formatter emits.
+    // then wrap tables. Math touches only inline `Math` nodes (disjoint from
+    // code blocks and tables), so its order is free. None of these add or
+    // reorder headings, so the TOC's anchors still match the emitted ids.
     diagram::transform_mermaid(root);
     highlight::highlight_code_blocks(root);
+    let has_math = math::transform_math(root);
     wrap_tables(&arena, root);
 
     let toc = toc::extract(root);
@@ -115,7 +119,7 @@ pub fn render(md: &str, opts: &Options) -> RenderedDocument {
     format_html(root, &comrak_opts, &mut body)
         .expect("formatting a comrak AST into a String cannot fail");
 
-    let html = assemble(&body, &toc, opts);
+    let html = assemble(&body, &toc, opts, has_math);
     RenderedDocument { html, toc }
 }
 
@@ -129,6 +133,11 @@ fn comrak_options<'a>() -> ComrakOptions<'a> {
     o.extension.autolink = true;
     o.extension.tasklist = true;
     o.extension.footnotes = true;
+    // LaTeX math: `$inline$` / `$$display$$` (dollar math) and `` $`code`$ ``
+    // (code math) become inline `NodeValue::Math` nodes; `core::math` renders
+    // them to MathML. GitHub's dollar rules apply (see `math.rs` tests).
+    o.extension.math_dollars = true;
+    o.extension.math_code = true;
     // GitHub-style alerts (`> [!NOTE]` …) → `<div class="markdown-alert
     // markdown-alert-note">…`. Styled in assets/style.css.
     o.extension.alerts = true;
@@ -165,12 +174,23 @@ fn html_block<'a>(arena: &'a Arena<'a>, html: &str) -> &'a AstNode<'a> {
     arena.alloc(AstNode::new(RefCell::new(ast)))
 }
 
-/// Wrap the rendered body in a complete, self-contained HTML document.
-fn assemble(body: &str, toc: &[Heading], opts: &Options) -> String {
+/// Wrap the rendered body in a complete, self-contained HTML document. The math
+/// stylesheet (pulldown-latex's CSS + base64 `data:` fonts) is included only
+/// when `has_math`, so math-free documents carry none of its ~0.7 MB weight.
+fn assemble(body: &str, toc: &[Heading], opts: &Options, has_math: bool) -> String {
     let title = toc
         .first()
         .map(|h| escape_html(&h.text))
         .unwrap_or_else(|| "jumanji".to_string());
+
+    // The math stylesheet lives in its own `<style>` block: it opens with an
+    // `@namespace m` rule (scoped to that sheet) and only loads fonts when the
+    // document actually references them.
+    let math_css = if has_math {
+        format!("<style>{}</style>\n", math::math_css())
+    } else {
+        String::new()
+    };
 
     // User themes come last so their rules win the cascade over the built-in
     // and generated styles. Each source keeps its own `<style>` block, so one
@@ -193,6 +213,7 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options) -> String {
          <style>{root_vars}</style>\n\
          <style>{light}</style>\n\
          <style>{dark}</style>\n\
+         {math_css}\
          {user_css}\
          </head>\n\
          <body id=\"top\">\n\
@@ -207,6 +228,7 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options) -> String {
         root_vars = root_vars_css(opts),
         light = highlight::light_css(),
         dark = highlight::dark_css(),
+        math_css = math_css,
         user_css = user_css,
         body = body,
     )
@@ -319,6 +341,61 @@ mod tests {
         assert!(html.contains("diagram-error__note"));
         assert!(html.contains("<pre class=\"code\">"));
         assert!(!html.contains("<svg"));
+    }
+
+    #[test]
+    fn inline_math_renders_mathml_and_pulls_in_math_css() {
+        let html = render_str("The identity $e^{i\\pi} + 1 = 0$ is famous.\n");
+        assert!(html.contains("<math"));
+        assert!(html.contains("display=\"inline\""));
+        // The math stylesheet (with base64 fonts) is included when math is present.
+        assert!(html.contains("data:font/woff2;base64,"));
+        // font-src is permitted so the data: fonts load under the CSP.
+        assert!(html.contains("font-src data:"));
+    }
+
+    #[test]
+    fn display_math_renders_block_mathml() {
+        let html = render_str("$$\\sum_{n=1}^{\\infty} \\frac{1}{n^2} = \\frac{\\pi^2}{6}$$\n");
+        assert!(html.contains("<math"));
+        assert!(html.contains("display=\"block\""));
+    }
+
+    #[test]
+    fn math_css_absent_when_document_has_no_math() {
+        // A math-free document must not carry the ~0.7 MB math stylesheet/fonts,
+        // and keeps exactly the four built-in <style> blocks.
+        let html = render_str("# No math here\n\nJust prose.\n");
+        assert!(!html.contains("data:font/woff2"));
+        assert_eq!(html.matches("<style>").count(), 4);
+    }
+
+    #[test]
+    fn broken_display_math_degrades_with_note_no_panic() {
+        // Unbalanced environment panics inside pulldown-latex; the pipeline must
+        // still produce a page, degrading to the source + an error note.
+        let html = render_str("$$\\begin{pmatrix} a & b$$\n");
+        assert!(html.contains("math-error"));
+        assert!(html.contains("invalid LaTeX math"));
+        // No real MathML element (the stylesheet comment mentions `<math` too).
+        assert!(!html.contains("<math display="));
+    }
+
+    #[test]
+    fn dollars_in_prose_are_not_math() {
+        // comrak follows GitHub's dollar-math rules: a `$` opening a span must not
+        // be followed by whitespace, and (crucially here) a closing `$` must not
+        // be immediately followed by a digit. So "costs $5 and $10" is plain
+        // prose, not a `$5 and $`-delimited math span. Encoded as documentation.
+        let html = render_str("The book costs $5 and the pen costs $10.\n");
+        // Match the real MathML opening tag (`<math display=…`), not the bare
+        // `<math` substring — the embedded stylesheet mentions it in a comment.
+        assert!(
+            !html.contains("<math display="),
+            "prose dollars must not become math"
+        );
+        assert!(html.contains("$5"));
+        assert!(html.contains("$10"));
     }
 
     #[test]

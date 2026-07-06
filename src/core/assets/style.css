@@ -434,6 +434,71 @@ details[open] > summary {
   height: auto;
 }
 
+/* ---- Math (LaTeX → MathML Core) ----------------------------------------- */
+
+/* pulldown-latex's stylesheet (with the Latin Modern fonts inlined as data:
+ * URIs) is injected as its own style block by the pipeline only when the
+ * document contains math. MathML inherits `color`, so equations recolor with
+ * the page for free; this block only handles page-level layout concerns the
+ * vendored sheet leaves open. */
+math {
+  /* Belt-and-suspenders: MathML already inherits the text colour, but pin it so
+   * a future stylesheet change can't leave equations a mismatched colour after
+   * Ctrl-r recolor. */
+  color: var(--fg);
+}
+/* Display math (`$$…$$`) is wrapped by the pipeline in a `.math-scroll` block so
+ * a wide equation scrolls inside its own box instead of pushing the page
+ * horizontally — the same no-page-h-scroll invariant `.table-wrap` and
+ * `.mermaid` honour. The inner math element keeps its natural width and
+ * overflows into this scroller. */
+.math-scroll {
+  display: block;
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin: 1.3em 0;
+  padding-bottom: 0.2em;
+}
+
+/* Graceful degradation for invalid LaTeX (mirrors `.diagram-error`). Inline
+ * math degrades to a `.math-error` code span; display math to a block box
+ * carrying a small note above the source. Both stay inline-level so they remain
+ * valid inside the enclosing paragraph. */
+.math-error {
+  font-family: var(
+    --font-mono,
+    "JetBrains Mono",
+    "Fira Code",
+    "SFMono-Regular",
+    Consolas,
+    "Liberation Mono",
+    monospace
+  );
+  font-size: 0.86em;
+  color: var(--note-fg);
+  background: var(--note-bg);
+  border: 1px solid var(--note-border);
+  border-radius: 5px;
+  padding: 0.1em 0.35em;
+}
+.math-error--block {
+  display: block;
+  margin: 1.3em 0;
+  padding: 0.55em 0.9em;
+}
+.math-error--block > code {
+  display: block;
+  margin-top: 0.4em;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+.math-error__note {
+  font-family: system-ui, sans-serif;
+  font-size: 0.95em;
+  font-weight: 600;
+}
+
 /* Graceful-degradation note shown when merman fails to render a fence. */
 .diagram-error {
   margin: 1.6em 0;

@@ -91,6 +91,41 @@ degrades to plain, escaped text:
 this fence has no known grammar; it degrades to plain, escaped text < > &
 ```
 
+## Math
+
+LaTeX math renders to native MathML (pulldown-latex → MathML Core, no
+JavaScript). Inline math sits in the text: the mass–energy equivalence
+$E = mc^2$, Euler's identity $e^{i\pi} + 1 = 0$, and a fraction like
+$\tfrac{p}{q}$ all flow with the prose. Dollar signs in ordinary writing —
+this pen costs $5 and that one $10 — stay plain text, not math.
+
+Display math is centred on its own line:
+
+$$
+\sum_{n=1}^{\infty} \frac{1}{n^2} = \frac{\pi^2}{6}
+$$
+
+A matrix and an aligned derivation:
+
+$$
+A = \begin{pmatrix} a & b \\ c & d \end{pmatrix},
+\qquad \det(A) = ad - bc
+$$
+
+$$
+\begin{aligned}
+  \nabla \cdot \mathbf{E} &= \frac{\rho}{\varepsilon_0} \\
+  \nabla \times \mathbf{B} &= \mu_0 \mathbf{J} + \mu_0 \varepsilon_0 \frac{\partial \mathbf{E}}{\partial t}
+\end{aligned}
+$$
+
+Invalid LaTeX degrades gracefully — the source is shown with an error note
+instead of crashing or blanking the page:
+
+$$
+\begin{pmatrix} a & b \\ c & d
+$$
+
 ## Mermaid diagrams
 
 All rendered to SVG at load time by [merman](https://github.com/Latias94/merman),
