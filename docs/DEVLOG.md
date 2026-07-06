@@ -2,6 +2,37 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — v1.0.0: Milestone 3 complete
+
+All M3 items are built and the backlog of user-reported issues is fixed, so
+this is 1.0:
+
+- **LaTeX math** (D8): comrak `$`/`$$` → pulldown-latex → native MathML Core,
+  no JS; fonts embedded as `data:` URIs under unshadowable family names after
+  the mathjax2 system-font collision broke layout constants (see the
+  font-shadowing entry below).
+- **External fence renderers** (D6.2): `[renderers]` maps a fence language to
+  a command (`dot = "dot -Tsvg"`), body on stdin, stdout replaces the fence;
+  5 s timeout, 4 MiB cap, failures degrade to highlighted code + note.
+- **Editor sync** (D7): `--forward <line>` + D-Bus `GotoLine` (running-instance
+  handoff included) forward; Ctrl+click → `editor-command` (`$EDITOR +%l %f`)
+  reverse, via comrak `data-sourcepos`.
+- **stdin streaming** (D9): `tool | jumanji` / `jumanji -`, progressive
+  re-render through the live-reload path, scroll preserved.
+- **Fixes:** dark-mode syntax CSS scoping (`html:not(.dark)`), WebKit DMABUF
+  renderer off by default (scroll layer dropouts; override by presetting the
+  env var), press-inside-selection starts a new selection (no text drag), TOC
+  selection single-sourced (mouse click + Enter jumps to the clicked row).
+
+Verification: 166 unit + 35 e2e (headless Xvfb), clippy `-D warnings`, fmt —
+all green. Release ritual: bump, tag `v1.0.0`, push, point PKGBUILD at the
+tag tarball.
+
+Awaiting user feel-test on the live GPU (headless can't show them): scroll
+layer dropouts actually gone with the DMABUF default, drag-select feel.
+
+Next: user feedback on 1.0; AUR publishing remains explicitly deferred.
+
 ## 2026-07-06 — stdin streaming (M3, DESIGN D9 — the last M3 item)
 
 **What:** `some-tool | jumanji` (and `jumanji -`) reads markdown from stdin and
