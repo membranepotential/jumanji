@@ -102,6 +102,10 @@ struct State {
     /// First `<math>` rendered width in CSS px (0 if none). Nonzero proves the
     /// MathML actually laid out.
     math_width: f64,
+    /// Computed `color` of the first python function-name span, as a CSS
+    /// `rgb(...)` string ("" if the document has no python). In dark mode it must
+    /// not be `InspiredGithub`'s near-black light colour (`rgb(50, 50, 50)`).
+    fn_color: String,
     dark: bool,
     zoom: f64,
     text_zoom: f64,
@@ -124,6 +128,7 @@ impl State {
             doc_scroll_width: field(json, "doc_scroll_width")?.parse().ok()?,
             diagram_width: field(json, "diagram_width")?.parse().ok()?,
             math_width: field(json, "math_width")?.parse().ok()?,
+            fn_color: field_str(json, "fn_color")?,
             dark: field(json, "dark")? == "true",
             zoom: field(json, "zoom")?.parse().ok()?,
             text_zoom: field(json, "text_zoom")?.parse().ok()?,
@@ -144,11 +149,15 @@ fn field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     Some(rest[..end].trim())
 }
 
-/// Same, for a string value: strips the surrounding quotes.
+/// Same, for a string value: scans to the closing quote, so values containing
+/// commas (e.g. `fn_color` = `"rgb(50, 50, 50)"`) parse correctly. The emitted
+/// strings contain no escaped quotes, so no escape handling is needed.
 fn field_str(json: &str, key: &str) -> Option<String> {
-    let raw = field(json, key)?;
-    let inner = raw.strip_prefix('"')?.strip_suffix('"')?;
-    Some(inner.to_string())
+    let pat = format!("\"{key}\":\"");
+    let start = json.find(&pat)? + pat.len();
+    let rest = &json[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -546,6 +555,41 @@ fn ctrl_r_toggles_dark() {
 
     h.key(&["ctrl+r"]);
     h.wait_for_state("Ctrl-r disables dark", SETTLE, |s| !s.dark);
+}
+
+#[test]
+fn dark_mode_python_function_name_is_readable() {
+    // Regression for the dark-mode syntax-CSS bug: `InspiredGithub`'s
+    // deeply-scoped `.source.python .entity.name.function { color:#323232 }`
+    // (rgb(50,50,50), near-black) used to outrank the `html.dark`-nested dark
+    // rule and leak onto the dark background, making a python function name
+    // unreadable. With the light block now scoped under `html:not(.dark)`, it
+    // cannot apply in dark mode at all. The demo has a `def fib(...)` python
+    // fence; assert its function-name colour is not the light near-black once
+    // dark mode is on.
+    let Some((_g, h)) = setup() else { return };
+
+    // Sanity: in light mode the demo's python function name *is* the light
+    // near-black — proves the probe targets the right span.
+    let light = h.get_state();
+    assert_eq!(
+        light.fn_color, "rgb(50, 50, 50)",
+        "light-mode python function name should be InspiredGithub near-black \
+         (probe target check); got {:?}",
+        light.fn_color
+    );
+
+    h.key(&["ctrl+r"]);
+    let dark = h.wait_for_state("Ctrl-r enables dark", SETTLE, |s| s.dark);
+    assert_ne!(
+        dark.fn_color, "rgb(50, 50, 50)",
+        "in dark mode the python function name must not be the light theme's \
+         near-black (rgb(50, 50, 50)) — it would be unreadable on #1a1a1a"
+    );
+    assert!(
+        !dark.fn_color.is_empty(),
+        "expected a computed colour for the python function-name span"
+    );
 }
 
 #[test]

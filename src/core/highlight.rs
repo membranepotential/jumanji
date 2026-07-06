@@ -1,7 +1,9 @@
 //! Syntax highlighting via syntect, emitting *classed* HTML (not inline
 //! styles) so a single highlighted document can be recoloured for light and
 //! dark themes by swapping CSS. Two CSS blocks are generated once and embedded
-//! in the page head by [`super::pipeline`].
+//! in the page head by [`super::pipeline`]. Both are mode-scoped symmetrically
+//! — light under `html:not(.dark)`, dark under `html.dark` — so neither theme's
+//! rules can apply in the other mode regardless of selector specificity.
 
 use std::sync::OnceLock;
 
@@ -66,10 +68,20 @@ fn plain_block(code: &str) -> String {
     )
 }
 
-/// CSS for the light syntax theme (unscoped: applies by default).
+/// CSS for the light syntax theme, scoped under `html:not(.dark)` (via CSS
+/// nesting) exactly parallel to [`dark_css`]'s `html.dark` wrapper, so it only
+/// applies in light mode.
+///
+/// The symmetry is load-bearing, not cosmetic: `InspiredGithub` ships
+/// deeply-scoped selectors such as `.source.python .entity.name.function`
+/// (specificity 0,5,0). Emitted unscoped, those *outranked* the dark block's
+/// `html.dark`-nested rules (0,4,1) and leaked near-black text (e.g. a python
+/// function name) onto the dark background. Scoping the light block means it
+/// cannot match at all in dark mode; tokens the dark theme leaves uncoloured
+/// fall back to the `.code` foreground instead.
 pub fn light_css() -> &'static str {
     static CSS: OnceLock<String> = OnceLock::new();
-    CSS.get_or_init(|| theme_css(LIGHT_THEME))
+    CSS.get_or_init(|| format!("html:not(.dark) {{\n{}\n}}\n", theme_css(LIGHT_THEME)))
 }
 
 /// CSS for the dark syntax theme, scoped under `html.dark` (via CSS nesting)
@@ -145,6 +157,9 @@ mod tests {
 
     #[test]
     fn theme_css_blocks_are_nonempty_and_scoped() {
+        // Both blocks are mode-scoped symmetrically so neither can win the
+        // cascade in the other mode (the dark-mode near-black-text bug).
+        assert!(light_css().starts_with("html:not(.dark) {"));
         assert!(light_css().contains(".code"));
         assert!(dark_css().starts_with("html.dark {"));
         assert!(dark_css().contains(".code"));

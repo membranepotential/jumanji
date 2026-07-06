@@ -45,7 +45,7 @@ pub enum ZoomAnchor {
 
 /// A single, consistent viewport snapshot read by `GetState` and the statusbar.
 /// All widths are CSS px.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ViewportState {
     pub scroll_y: f64,
     /// Scroll progress 0..=100.
@@ -64,6 +64,12 @@ pub struct ViewportState {
     /// Rendered width of the first `<math>` element (0 if none). CSS px. Lets
     /// e2e assert MathML actually laid out with nonzero geometry.
     pub math_width: f64,
+    /// Computed `color` of the first python function-name span
+    /// (`.entity.name.function.python`), as a CSS `rgb(...)` string ("" if the
+    /// document has no python code). Lets e2e assert the dark-mode syntax-CSS
+    /// scoping fix: this must not be near-black (`rgb(50, 50, 50)`, i.e.
+    /// `InspiredGithub`'s light colour) once dark mode is on.
+    pub fn_color: String,
 }
 
 /// JS that captures the anchor element into `window.__jmnj_anchor` (element +
@@ -432,11 +438,13 @@ impl View {
              const m = document.querySelector('main') || b; \
              const svg = document.querySelector('.mermaid svg'); \
              const math = document.querySelector('math'); \
+             const fn = document.querySelector('.entity.name.function.python'); \
              return { y: window.scrollY, p: Math.min(100, Math.max(0, p)), \
                       w: m.offsetWidth, vw: window.innerWidth, \
                       dw: Math.max(d.scrollWidth, b.scrollWidth), \
                       gw: svg ? svg.getBoundingClientRect().width : 0, \
-                      mw: math ? math.getBoundingClientRect().width : 0 }; })()";
+                      mw: math ? math.getBoundingClientRect().width : 0, \
+                      fc: fn ? getComputedStyle(fn).color : '' }; })()";
         self.webview.evaluate_javascript(
             script,
             None,
@@ -445,6 +453,10 @@ impl View {
             move |res| match res {
                 Ok(v) => {
                     let num = |k| v.object_get_property(k).map_or(0.0, |n| n.to_double());
+                    let fn_color = v
+                        .object_get_property("fc")
+                        .map(|s| s.to_str().to_string())
+                        .unwrap_or_default();
                     callback(ViewportState {
                         scroll_y: num("y"),
                         scroll_percent: num("p").clamp(0.0, 100.0) as u32,
@@ -453,6 +465,7 @@ impl View {
                         doc_scroll_width: num("dw"),
                         diagram_width: num("gw"),
                         math_width: num("mw"),
+                        fn_color,
                     });
                 }
                 Err(_) => callback(ViewportState {
@@ -463,6 +476,7 @@ impl View {
                     doc_scroll_width: 0.0,
                     diagram_width: 0.0,
                     math_width: 0.0,
+                    fn_color: String::new(),
                 }),
             },
         );

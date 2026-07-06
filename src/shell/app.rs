@@ -691,7 +691,8 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
 /// Serialize the reader state as the compact JSON object `GetState` returns.
 /// The viewport widths (`viewport_width`, `doc_scroll_width`, `diagram_width`,
 /// `math_width`) let e2e tests assert the reflow invariants and that MathML laid
-/// out with nonzero geometry; the rest are unchanged.
+/// out with nonzero geometry; `fn_color` lets e2e assert the dark-mode
+/// syntax-highlight scoping fix; the rest are unchanged.
 #[allow(clippy::too_many_arguments)]
 fn state_json(
     file: &str,
@@ -708,7 +709,7 @@ fn state_json(
         "{{\"file\":{file},\"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
          \"content_width\":{content_width},\"viewport_width\":{viewport_width},\
          \"doc_scroll_width\":{doc_scroll_width},\"diagram_width\":{diagram_width},\
-         \"math_width\":{math_width},\
+         \"math_width\":{math_width},\"fn_color\":{fn_color},\
          \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded}}}",
         file = json_string(file),
@@ -719,6 +720,7 @@ fn state_json(
         doc_scroll_width = vs.doc_scroll_width,
         diagram_width = vs.diagram_width,
         math_width = vs.math_width,
+        fn_color = json_string(&vs.fn_color),
         mode = json_string(mode),
     )
 }
