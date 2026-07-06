@@ -665,7 +665,10 @@ fn key_zoom_keeps_reading_position_anchored() {
     // percentage should stay in a sane band across several zoom steps.
     let Some((_g, h)) = setup() else { return };
 
-    h.execute_action("scroll down", 14);
+    // The showcase renders every diagram at full intrinsic height, so it is very
+    // tall; scroll well in to land comfortably mid-document (not near an edge,
+    // where the top anchor has nothing to hold).
+    h.execute_action("scroll down", 55);
     let mid = h.wait_for_state("scrolled into document", SETTLE, |s| {
         s.scroll_percent > 8 && s.scroll_percent < 88
     });
