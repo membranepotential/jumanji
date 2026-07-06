@@ -10,7 +10,7 @@ depends=('gtk4' 'webkitgtk-6.0')
 makedepends=('cargo')
 optdepends=('xdg-utils: register jumanji as the default handler for text/markdown')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/membranepotential/jumanji/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('749e4b78e689edfaa7caf8e7f17d3251b4273e8239adb124bb7c0b1f70e5e687')
+sha256sums=('6bce29b65cdb9734a58f6ed1ecd9dff4930c306d37b559b8767694946bcc6a89')
 
 prepare() {
     cd "$pkgname-$pkgver"
