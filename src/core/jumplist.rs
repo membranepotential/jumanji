@@ -7,11 +7,6 @@
 //! a jump and discards any forward history; [`back`](Jumplist::back) walks
 //! toward older entries, saving the live position on the first step so
 //! [`forward`](Jumplist::forward) can return to it.
-//!
-// Wired into `Ctrl-o`/`Ctrl-i` by the parallel M2 shell-integration work; the
-// pure list and its tests land first, hence the allow.
-#![allow(dead_code)]
-
 /// Maximum retained entries (vim's default `'jumplist'` size).
 const CAPACITY: usize = 100;
 

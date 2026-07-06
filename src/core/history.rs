@@ -8,12 +8,6 @@
 //! Entries are stored as an ordered array of tables so LRU order round-trips
 //! through TOML (a map would lose ordering). Capacity is bounded to keep the
 //! file from growing without limit.
-//!
-// Read/written at `~/.local/share/jumanji/history.toml` by the parallel M2
-// shell-integration work; the pure store and its tests land first, hence the
-// allow.
-#![allow(dead_code)]
-
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};

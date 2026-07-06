@@ -4,11 +4,6 @@
 //! into a typed [`Command`]; [`complete`] powers tab completion. Side effects
 //! — opening files, applying `:set`, running actions — belong to the shell,
 //! which matches on the returned [`Command`].
-//!
-// Consumed by the shell's `:`-command handling (parallel M2 shell-integration
-// work); the pure API and its tests land first, hence the allow.
-#![allow(dead_code)]
-
 use super::Action;
 use super::config::{self, action_names, option_keys};
 

@@ -3,11 +3,6 @@
 //! Pure and GTK-free. Positions are opaque to the core; the shell captures and
 //! restores them. Quickmarks are volatile (not persisted); window-state
 //! persistence lives in [`super::history`].
-//!
-// Wired into `m`/`'` by the parallel M2 shell-integration work; the pure
-// register set and its tests land first, hence the allow.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 /// A saved reading position: vertical scroll plus the geometric zoom level it

@@ -93,7 +93,6 @@ struct State {
     dark: bool,
     zoom: f64,
     text_zoom: f64,
-    #[allow(dead_code)]
     mode: String,
     section: usize,
     toc_len: usize,
@@ -164,8 +163,19 @@ impl Harness {
     }
 
     /// As [`launch`](Self::launch), but against an arbitrary document — used by
-    /// the live-reload test, which mutates a throwaway copy.
+    /// the live-reload test, which mutates a throwaway copy. Fresh private XDG
+    /// dirs are allocated per launch.
     fn launch_file(file: PathBuf) -> Self {
+        let id = next_display();
+        let config_home = std::env::temp_dir().join(format!("jumanji-e2e-xdg-{id}"));
+        let data_home = std::env::temp_dir().join(format!("jumanji-e2e-data-{id}"));
+        Self::launch_in(file, config_home, data_home)
+    }
+
+    /// Launch on `file` with explicit private `config_home`/`data_home` dirs. The
+    /// data home holds `history.toml`, so a relaunch on the same data home
+    /// exercises window-state persistence.
+    fn launch_in(file: PathBuf, config_home: PathBuf, data_home: PathBuf) -> Self {
         let display = next_display();
         let display_arg = format!(":{display}");
 
@@ -183,16 +193,18 @@ impl Harness {
 
         let (dbus, dbus_addr) = spawn_private_bus();
 
-        // Isolate the app from the developer's real ~/.config/jumanji: an empty
-        // private XDG_CONFIG_HOME means every test runs on default options.
-        let config_home = std::env::temp_dir().join(format!("jumanji-e2e-xdg-{display}"));
+        // Isolate the app from the developer's real ~/.config and ~/.local/share:
+        // a private XDG_CONFIG_HOME means default options; a private
+        // XDG_DATA_HOME means the history file never touches the real one.
         let _ = fs::create_dir_all(&config_home);
+        let _ = fs::create_dir_all(&data_home);
 
         let app = Command::new(env!("CARGO_BIN_EXE_jumanji"))
             .arg(&file)
             .env("DISPLAY", &display_arg)
             .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
             .env("XDG_CONFIG_HOME", &config_home)
+            .env("XDG_DATA_HOME", &data_home)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -232,6 +244,25 @@ impl Harness {
         h.xdotool(["windowfocus", "--sync", &h.window_id]);
 
         h
+    }
+
+    /// Type a UTF-8 string into the focused widget (the input bar), for driving
+    /// the `:` command line.
+    fn type_text(&self, text: &str) {
+        self.xdotool(["type", "--window", &self.window_id, text]);
+    }
+
+    /// Send `q` and wait for the app to exit cleanly, so the window-close
+    /// handler flushes `history.toml` (a SIGKILL via Drop would skip it).
+    fn clean_quit(&mut self) {
+        self.key(&["q"]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if matches!(self.app.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Run `xdotool` against this harness's display.
@@ -385,6 +416,16 @@ fn setup_file(file: PathBuf) -> Option<(std::sync::MutexGuard<'static, ()>, Harn
         return None;
     }
     Some((guard, Harness::launch_file(file)))
+}
+
+/// Acquire the serialization lock without launching, for tests that manage their
+/// own harness lifecycle (e.g. relaunch across a clean quit). `None` ⇒ skip.
+fn setup_guard() -> Option<std::sync::MutexGuard<'static, ()>> {
+    let guard = test_lock().lock().unwrap_or_else(|e| e.into_inner());
+    if should_skip() {
+        return None;
+    }
+    Some(guard)
 }
 
 // ---------------------------------------------------------------------------
@@ -648,5 +689,152 @@ fn live_reload_grows_toc_and_preserves_dark() {
     assert!(reloaded.dark, "dark mode must persist across a live reload");
 
     drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tab_enters_and_leaves_toc_mode() {
+    let Some((_g, h)) = setup() else { return };
+    assert_eq!(h.get_state().mode, "normal", "starts in normal mode");
+
+    h.key(&["Tab"]);
+    h.wait_for_state("Tab enters TOC mode", SETTLE, |s| s.mode == "toc");
+
+    h.key(&["Tab"]);
+    h.wait_for_state("Tab leaves TOC mode", SETTLE, |s| s.mode == "normal");
+}
+
+#[test]
+fn toc_select_jumps_and_returns_to_normal() {
+    let Some((_g, h)) = setup() else { return };
+    assert_eq!(h.get_state().scroll_y, 0.0, "starts at top");
+
+    h.key(&["Tab"]);
+    h.wait_for_state("TOC mode", SETTLE, |s| s.mode == "toc");
+
+    // Move the selection down to a heading below the fold, then select it.
+    h.key(&["j"]);
+    h.key(&["j"]);
+    h.key(&["Return"]);
+    h.wait_for_state("TOC select jumps and exits", SETTLE, |s| {
+        s.mode == "normal" && s.scroll_y > 1.0
+    });
+}
+
+#[test]
+fn command_set_recolor_enables_dark() {
+    let Some((_g, h)) = setup() else { return };
+    assert!(!h.get_state().dark, "starts light");
+
+    // `:` opens the command line; type the set command and submit.
+    h.key(&["colon"]);
+    h.wait_for_state("command line open", SETTLE, |s| s.mode == "command");
+    h.type_text("set default-recolor true");
+    h.key(&["Return"]);
+
+    h.wait_for_state("`:set default-recolor true` turns dark on", SETTLE, |s| {
+        s.dark && s.mode == "normal"
+    });
+}
+
+#[test]
+fn quickmark_set_and_jump_round_trip() {
+    let Some((_g, h)) = setup() else { return };
+
+    // Scroll to a position, mark it, jump to the top, then jump back to the mark.
+    h.execute_action("scroll down", 8);
+    let marked = h
+        .wait_for_state("scrolled to mark position", SETTLE, |s| s.scroll_y > 0.0)
+        .scroll_y;
+
+    // `mark set a` / `mark jump a` via D-Bus for a deterministic register.
+    h.execute_action("mark set a", 1);
+    h.execute_action("goto top", 1);
+    h.wait_for_state("back at top", SETTLE, |s| s.scroll_y == 0.0);
+
+    h.execute_action("mark jump a", 1);
+    h.wait_for_state("mark jump restores position", SETTLE, |s| {
+        (s.scroll_y - marked).abs() < 5.0
+    });
+}
+
+#[test]
+fn ctrl_o_returns_after_g_jump() {
+    let Some((_g, h)) = setup() else { return };
+    assert_eq!(h.get_state().scroll_y, 0.0, "starts at top");
+
+    h.key(&["shift+g"]);
+    h.wait_for_state("G jumps to bottom", SETTLE, |s| s.scroll_percent == 100);
+
+    // The jumplist recorded the pre-jump position (top); Ctrl-o returns to it.
+    h.key(&["ctrl+o"]);
+    h.wait_for_state("Ctrl-o returns to the pre-G position", SETTLE, |s| {
+        s.scroll_y == 0.0
+    });
+}
+
+#[test]
+fn hint_follow_scrolls_to_fragment() {
+    // A fixture with exactly one internal link → the hint label is a single `a`,
+    // so `f` then `a` deterministically follows it and scrolls to the anchor.
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = Path::new(manifest).join("demo").join("links.md");
+    let Some((_g, h)) = setup_file(fixture) else {
+        return;
+    };
+    assert_eq!(h.get_state().scroll_y, 0.0, "starts at top");
+
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+
+    h.key(&["a"]);
+    h.wait_for_state("fragment link scrolls to target", SETTLE, |s| {
+        s.mode == "normal" && s.scroll_y > 1.0
+    });
+}
+
+#[test]
+fn history_persists_scroll_across_relaunch() {
+    let Some(_g) = setup_guard() else { return };
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest).join("demo").join("demo.md");
+    let dir = std::env::temp_dir().join(format!("jumanji-e2e-hist-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let doc = dir.join("doc.md");
+    std::fs::copy(&src, &doc).expect("copy demo");
+    let config_home = dir.join("cfg");
+    let data_home = dir.join("data");
+
+    // First run: scroll, then quit cleanly so history.toml is flushed.
+    let marked = {
+        let mut h = Harness::launch_in(doc.clone(), config_home.clone(), data_home.clone());
+        h.execute_action("scroll down", 12);
+        let y = h
+            .wait_for_state("scrolled before quit", SETTLE, |s| s.scroll_y > 10.0)
+            .scroll_y;
+        h.clean_quit();
+        drop(h);
+        y
+    };
+
+    // A history file must now exist under the private data home.
+    assert!(
+        data_home.join("jumanji").join("history.toml").exists(),
+        "history.toml written on clean quit"
+    );
+
+    // Relaunch on the same file + data home: the scroll offset is restored.
+    {
+        let h = Harness::launch_in(doc, config_home, data_home);
+        let restored =
+            h.wait_for_state("scroll restored on relaunch", SETTLE, |s| s.scroll_y > 1.0);
+        assert!(
+            (restored.scroll_y - marked).abs() < 5.0,
+            "restored scroll {} should match saved {marked}",
+            restored.scroll_y
+        );
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 }

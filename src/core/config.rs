@@ -75,9 +75,6 @@ impl Default for Options {
 }
 
 /// What the shell must do after a successful runtime `:set`.
-// Consumed by the parallel M2 shell-integration work (`:set` handling); the
-// pure API and its tests land first, hence the allow.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetEffect {
     /// Re-run the render pipeline (the option feeds generated CSS/HTML).
@@ -92,7 +89,6 @@ impl Options {
     /// Apply a runtime `:set key value`. Returns the [`SetEffect`] the shell
     /// must honour, or `Err(msg)` for an unknown key, an unparseable value, or
     /// an option that cannot change at runtime.
-    #[allow(dead_code)] // wired into `:set` by the parallel shell-integration work
     pub fn set(&mut self, key: &str, value: &str) -> Result<SetEffect, String> {
         let value = value.trim();
         match key.trim() {
@@ -142,7 +138,6 @@ impl Options {
 
 /// Parse a scalar option value with a typed error message. Reuses each type's
 /// own `FromStr`, the same coercion serde performs on the TOML scalar.
-#[allow(dead_code)] // used by `Options::set` (not yet wired into the shell)
 fn parse_scalar<T>(value: &str, key: &str) -> Result<T, String>
 where
     T: std::str::FromStr,
@@ -155,7 +150,6 @@ where
 
 /// Strip a single matched pair of surrounding double quotes, so both
 /// `:set font-body Inter` and `:set font-body "Fira Code"` behave.
-#[allow(dead_code)] // used by `Options::set` (not yet wired into the shell)
 fn unquote(value: &str) -> &str {
     value
         .strip_prefix('"')
@@ -451,7 +445,6 @@ fn parse_binding(s: &str) -> Result<ParsedBinding, String> {
 }
 
 /// The canonical option keys (`:set <key>` completion; also the TOML spelling).
-#[allow(dead_code)] // consumed by command-line completion (shell-integration work)
 pub fn option_keys() -> &'static [&'static str] {
     &[
         "scroll-step",
@@ -468,7 +461,6 @@ pub fn option_keys() -> &'static [&'static str] {
 
 /// The canonical action strings, one per action, for command-line completion
 /// (`:` exec names). Char-argument quickmarks are offered by their bare prefix.
-#[allow(dead_code)] // consumed by command-line completion (shell-integration work)
 pub fn action_names() -> &'static [&'static str] {
     &[
         "scroll down",

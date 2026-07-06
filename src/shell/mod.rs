@@ -5,5 +5,6 @@
 pub mod app;
 mod bar;
 mod dbus;
+mod toc;
 mod view;
 mod watch;

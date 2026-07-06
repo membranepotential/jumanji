@@ -1,38 +1,91 @@
 //! The GTK4 application: window, capture-phase key dispatch, and the mapping
 //! from [`Action`]s to `webkit6` calls. As thin as the design allows — the
-//! keymap, config, and render pipeline all live in `core`.
+//! keymap, config, command parsing, jumplist, marks, and history all live in
+//! `core`; this layer is the imperative glue.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk::gdk::{Key as GdkKey, ModifierType};
+use gtk::gio;
 use gtk::glib;
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{
     Application, ApplicationWindow, Box as GtkBox, EventControllerKey, EventControllerScroll,
-    EventControllerScrollFlags, Orientation, PropagationPhase,
+    EventControllerScrollFlags, Orientation, PropagationPhase, Stack,
 };
 use webkit6::LoadEvent;
 use webkit6::prelude::*;
 
-use crate::core::config::{self, Config};
+use crate::core::command::{self, Command, Completions};
+use crate::core::config::{self, Config, Options, SetEffect};
+use crate::core::history::{FileState, History};
+use crate::core::jumplist::Jumplist;
 use crate::core::keymap::{Key, KeyPress, Keymap, MatchResult, Matcher};
+use crate::core::marks::{Marks, Position};
 use crate::core::pipeline::{self, Options as RenderOptions};
 use crate::core::{Action, Direction, Heading, Mode};
 
-use super::bar::Bar;
+use super::bar::{Bar, Prompt};
 use super::dbus;
+use super::toc::TocView;
 use super::view::View;
 use super::watch::{FileEvent, Watch};
 
 const APP_ID: &str = "org.membranepotential.jumanji";
 
+/// Which link-hint action is pending (mirrors `f` vs `F`).
+#[derive(Debug, Clone, Copy)]
+enum HintKind {
+    /// `f` — follow the chosen link (route it through [`open_uri`]).
+    Follow,
+    /// `F` — only report the chosen link's target in the statusbar.
+    Show,
+}
+
+/// One labelled link in the hint overlay.
+#[derive(Debug, Clone)]
+struct HintLink {
+    label: String,
+    href: String,
+}
+
+/// Shell-local interaction state that sits *outside* the keymap modes: the
+/// link-hint overlay intercepts keys directly (not via a `Mode`), the way the
+/// input bar does. Everything else is `None`.
+enum Input {
+    None,
+    /// The hint overlay is active. `links` is filled asynchronously when the
+    /// overlay JS posts its label→href map back.
+    Hint {
+        kind: HintKind,
+        typed: String,
+        links: Vec<HintLink>,
+    },
+}
+
+/// An in-progress tab-completion cycle for the `:` command line.
+struct Completion {
+    candidates: Vec<String>,
+    index: usize,
+}
+
 /// Mutable shell state shared across GTK callbacks.
 struct Shell {
     file: PathBuf,
+    /// The document's basename, restored to the statusbar's left field after a
+    /// transient message or mode label clears it.
+    filename: String,
+    /// Live options, mutated by `:set`; the source of truth the derived render
+    /// options and step fields are re-synced from.
+    options: Options,
     render_opts: RenderOptions,
+    /// XDG config base (`…/.config`); themes live under `<it>/jumanji/themes`.
+    config_dir: Option<PathBuf>,
+    /// Data dir (`…/.local/share/jumanji`); holds `history.toml`.
+    data_dir: Option<PathBuf>,
     scroll_step: i64,
     /// Geometric zoom step (added to the webkit `zoom_level` per step).
     zoom_step: f64,
@@ -43,7 +96,13 @@ struct Shell {
     /// Current text-zoom factor (1.0 = 100%); geometric zoom lives in the webview.
     text_zoom: f64,
     matcher: Matcher,
+    /// Mirror of the matcher's mode (the matcher does not expose a getter);
+    /// kept in lockstep by every `set_mode` call so `GetState` can report it.
+    mode: Mode,
     view: View,
+    toc_view: TocView,
+    /// Stack holding the content (`"content"`) and TOC (`"toc"`) pages.
+    stack: Stack,
     bar: Bar,
     window: ApplicationWindow,
     toc: Vec<Heading>,
@@ -53,9 +112,23 @@ struct Shell {
     /// are no-ops before this; the D-Bus `loaded` flag lets clients (tests,
     /// editor integrations) wait for a driveable window.
     loaded: bool,
-    /// Scroll offset to restore once the next load finishes (reload only).
+    /// Scroll offset to restore once the next load finishes.
     pending_restore: Option<f64>,
+    /// Last observed scroll offset, refreshed on every status update. Read
+    /// synchronously on window-close to flush history without an async query.
+    last_scroll: f64,
+    /// Link-hint / other shell-local interaction state.
+    input: Input,
+    /// Pending `:`-completion cycle, if any.
+    completion: Option<Completion>,
+    /// Jumplist for `Ctrl-o` / `Ctrl-i` (per document; reset on `:open`).
+    jumplist: Jumplist,
+    /// Quickmark registers `m<x>` / `'<x>` (per document; reset on `:open`).
+    marks: Marks,
+    /// Per-file window-state, loaded at startup and flushed on close/switch.
+    history: History,
     _watch: Option<Watch>,
+    _theme_watch: Option<Watch>,
     /// Keeps the per-instance D-Bus name owned for the process lifetime.
     _dbus: Option<gtk::gio::OwnerId>,
 }
@@ -75,17 +148,20 @@ pub fn run(file: PathBuf, config: Config) -> glib::ExitCode {
     app.run_with_args::<&str>(&[])
 }
 
-fn build_ui(
-    app: &Application,
-    file: PathBuf,
-    options: crate::core::config::Options,
-    keymap: Rc<Keymap>,
-) {
+fn build_ui(app: &Application, file: PathBuf, options: Options, keymap: Rc<Keymap>) {
     let view = View::new(options.selection_clipboard);
+    let toc_view = TocView::new();
     let bar = Bar::new();
 
+    let stack = Stack::new();
+    stack.set_vexpand(true);
+    stack.set_hexpand(true);
+    stack.add_named(view.widget(), Some("content"));
+    stack.add_named(toc_view.widget(), Some("toc"));
+    stack.set_visible_child_name("content");
+
     let layout = GtkBox::new(Orientation::Vertical, 0);
-    layout.append(view.widget());
+    layout.append(&stack);
     layout.append(bar.widget());
 
     let window = ApplicationWindow::builder()
@@ -102,24 +178,34 @@ fn build_ui(
         .unwrap_or_else(|| file.to_string_lossy().into_owned());
     bar.set_filename(&filename);
 
+    let config_dir = config::xdg_config_dir();
+    let data_dir = xdg_data_dir();
+    let history = load_history(&data_dir);
+
     let shell = Rc::new(RefCell::new(Shell {
-        file,
+        file: file.clone(),
+        filename,
+        options: options.clone(),
         render_opts: RenderOptions {
             page_width_px: options.page_width_px,
             font_body: options.font_body.clone(),
             font_mono: options.font_mono.clone(),
             font_size_px: options.font_size_px,
-            // Populated by the shell from ~/.config/jumanji/themes/*.css (M2
-            // shell-integration work); empty keeps the built-in styling.
+            // Populated per-render from `<config>/jumanji/themes/*.css`.
             extra_css: Vec::new(),
         },
+        config_dir: config_dir.clone(),
+        data_dir,
         scroll_step: options.scroll_step_px as i64,
         zoom_step: options.zoom_step,
         text_zoom_step: options.text_zoom_step,
         font_base_px: options.font_size_px as f64,
         text_zoom: 1.0,
         matcher: Matcher::new(Mode::Normal),
+        mode: Mode::Normal,
         view: view.clone(),
+        toc_view,
+        stack,
         bar: bar.clone(),
         window: window.clone(),
         toc: Vec::new(),
@@ -127,22 +213,57 @@ fn build_ui(
         dark: options.default_recolor,
         loaded: false,
         pending_restore: None,
+        last_scroll: 0.0,
+        input: Input::None,
+        completion: None,
+        jumplist: Jumplist::new(),
+        marks: Marks::new(),
+        history,
         _watch: None,
+        _theme_watch: None,
         _dbus: None,
     }));
 
+    // Restore any saved window-state for this file so the first painted frame is
+    // already at the right place. Scroll is deferred to load-finished. Read the
+    // value out before taking the mutable borrow (avoid a reentrant borrow).
+    let saved = shell.borrow().history.get(&file);
+    if let Some(st) = saved {
+        let mut s = shell.borrow_mut();
+        s.text_zoom = st.text_zoom;
+        s.view.set_zoom(st.zoom);
+        s.pending_restore = Some(st.scroll_y);
+    }
+
+    install_view_handlers(&shell);
     connect_load_finished(&shell);
     connect_keys(&shell, keymap);
     connect_scroll(&shell);
-    connect_search_entry(&shell);
+    connect_input_entry(&shell);
+    connect_close(&shell);
     start_watch(&shell);
+    start_theme_watch(&shell);
     serve_dbus(&shell);
 
     window.present();
     view.widget().grab_focus();
 
     // Initial render + load.
-    render_and_load(&shell, false);
+    do_render_and_load(&shell);
+}
+
+/// Wire the view's shell-supplied callbacks: link-hint posts and navigation
+/// routing (link clicks).
+fn install_view_handlers(shell: &Rc<RefCell<Shell>>) {
+    let view = shell.borrow().view.clone();
+    {
+        let shell = shell.clone();
+        view.set_hints_handler(move |json| on_hints_posted(&shell, &json));
+    }
+    {
+        let shell = shell.clone();
+        view.set_navigate_handler(move |uri| open_uri(&shell, &uri));
+    }
 }
 
 /// Read the file, render it, and load the HTML. When `preserve_scroll`, capture
@@ -162,6 +283,8 @@ fn render_and_load(shell: &Rc<RefCell<Shell>>, preserve_scroll: bool) {
 
 fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
     let mut s = shell.borrow_mut();
+    // User CSS themes are reloaded on every render so edits hot-swap in.
+    s.render_opts.extra_css = load_themes(&s.config_dir);
     let path = s.file.clone();
     match std::fs::read_to_string(&path) {
         Ok(md) => {
@@ -182,7 +305,7 @@ fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
 }
 
 /// On load completion, apply recolor state, restore any pending scroll offset,
-/// and refresh the percentage indicator.
+/// re-apply both zoom axes, and refresh the percentage indicator.
 fn connect_load_finished(shell: &Rc<RefCell<Shell>>) {
     let webview = shell.borrow().view.widget().clone();
     let shell = shell.clone();
@@ -222,20 +345,43 @@ fn connect_keys(shell: &Rc<RefCell<Shell>>, keymap: Rc<Keymap>) {
 
     let shell = shell.clone();
     controller.connect_key_pressed(move |_, keyval, _keycode, mods| {
-        // While the input bar is open, let the entry consume typing; only
-        // intercept Esc to cancel it.
-        if shell.borrow().bar.is_input_visible() {
+        // 1) Link-hint interaction intercepts every key, matcher-free.
+        let in_hint = matches!(shell.borrow().input, Input::Hint { .. });
+        if in_hint {
             if keyval == GdkKey::Escape {
-                execute(&shell, Action::Abort, 1);
+                cancel_hints(&shell);
+            } else if let Some(kp) = to_keypress(keyval, mods) {
+                on_hint_key(&shell, kp);
+            }
+            return glib::Propagation::Stop;
+        }
+
+        // 2) Universal abort (zathura: Esc always returns to normal).
+        if keyval == GdkKey::Escape {
+            execute(&shell, Action::Abort, 1);
+            refresh_status(&shell);
+            return glib::Propagation::Stop;
+        }
+
+        // 3) While the input bar is open, let the entry type; Tab completes a
+        //    `:` command line, and any edit invalidates a pending cycle.
+        let input_visible = shell.borrow().bar.is_input_visible();
+        if input_visible {
+            if keyval == GdkKey::Tab || keyval == GdkKey::ISO_Left_Tab {
+                let is_cmd = shell.borrow().bar.prompt() == Some(Prompt::Command);
+                if is_cmd {
+                    do_completion(&shell);
+                }
                 return glib::Propagation::Stop;
             }
+            shell.borrow_mut().completion = None;
             return glib::Propagation::Proceed;
         }
 
+        // 4) Normal / TOC dispatch through the matcher.
         let Some(kp) = to_keypress(keyval, mods) else {
             return glib::Propagation::Proceed;
         };
-
         let result = shell.borrow_mut().matcher.feed(kp, &keymap);
         let propagation = match result {
             MatchResult::Matched { action, count } => {
@@ -253,9 +399,7 @@ fn connect_keys(shell: &Rc<RefCell<Shell>>, keymap: Rc<Keymap>) {
 }
 
 /// Bind Ctrl+wheel → geometric zoom and Ctrl+Shift+wheel → text zoom on the
-/// webview (capture phase, so we intercept before WebKit's own scroll handling).
-/// A plain wheel with no Ctrl is passed through untouched, so normal scrolling
-/// still works. Wheel-up (`dy < 0`) zooms in, wheel-down zooms out.
+/// window (capture phase, so we intercept before WebKit's own scroll handling).
 fn connect_scroll(shell: &Rc<RefCell<Shell>>) {
     let controller = EventControllerScroll::new(EventControllerScrollFlags::BOTH_AXES);
     controller.set_propagation_phase(PropagationPhase::Capture);
@@ -282,29 +426,69 @@ fn connect_scroll(shell: &Rc<RefCell<Shell>>) {
     window.add_controller(controller);
 }
 
-fn connect_search_entry(shell: &Rc<RefCell<Shell>>) {
+/// Wire the input bar's `Enter`: run a search or a `:` command depending on the
+/// active prompt kind.
+fn connect_input_entry(shell: &Rc<RefCell<Shell>>) {
     let entry = shell.borrow().bar.entry().clone();
     let shell = shell.clone();
     entry.connect_activate(move |_| {
+        let prompt = shell.borrow().bar.prompt();
         let query = shell.borrow().bar.input_query();
-        {
-            let s = shell.borrow();
-            if query.is_empty() {
-                s.view.find_clear();
-            } else {
-                s.view.find(&query);
+        match prompt {
+            Some(Prompt::Search) => {
+                {
+                    let s = shell.borrow();
+                    s.bar.close_input();
+                    s.view.widget().grab_focus();
+                }
+                shell.borrow_mut().completion = None;
+                if query.is_empty() {
+                    shell.borrow().view.find_clear();
+                    refresh_status(&shell);
+                } else {
+                    // A search is a jump: record the pre-search position first.
+                    jump_to(&shell, move |s| s.view.find(&query));
+                }
             }
-            s.bar.close_input();
-            s.view.widget().grab_focus();
+            Some(Prompt::Command) => {
+                {
+                    let s = shell.borrow();
+                    s.bar.close_input();
+                    s.view.widget().grab_focus();
+                }
+                shell.borrow_mut().completion = None;
+                run_command(&shell, &query);
+                refresh_status(&shell);
+            }
+            None => {}
         }
-        refresh_status(&shell);
+    });
+}
+
+/// Flush per-file window-state to `history.toml` synchronously on window close,
+/// so `q` reliably persists position even though scroll queries are async.
+fn connect_close(shell: &Rc<RefCell<Shell>>) {
+    let window = shell.borrow().window.clone();
+    let shell = shell.clone();
+    window.connect_close_request(move |_| {
+        let mut s = shell.borrow_mut();
+        record_current_state(&mut s);
+        if let Some(dir) = s.data_dir.clone() {
+            let _ = write_history(&dir, &s.history);
+        }
+        glib::Propagation::Proceed
     });
 }
 
 fn start_watch(shell: &Rc<RefCell<Shell>>) {
     let path = shell.borrow().file.clone();
+    restart_watch(shell, &path);
+}
+
+/// (Re)point the document watcher at `path`, replacing any existing one.
+fn restart_watch(shell: &Rc<RefCell<Shell>>, path: &Path) {
     let handler_shell = shell.clone();
-    let watch = Watch::start(&path, move |event| match event {
+    let watch = Watch::start(path, move |event| match event {
         FileEvent::Changed => render_and_load(&handler_shell, true),
         FileEvent::Removed => {
             handler_shell
@@ -313,27 +497,38 @@ fn start_watch(shell: &Rc<RefCell<Shell>>) {
                 .set_message("file removed — showing last render");
         }
     });
+    let mut s = shell.borrow_mut();
     match watch {
-        Ok(w) => shell.borrow_mut()._watch = Some(w),
-        Err(err) => shell
-            .borrow()
-            .bar
-            .set_message(&format!("live reload disabled: {err}")),
+        Ok(w) => s._watch = Some(w),
+        Err(err) => s.bar.set_message(&format!("live reload disabled: {err}")),
+    }
+}
+
+/// Watch `<config>/jumanji/themes` (if it exists) so user-CSS edits hot-swap.
+fn start_theme_watch(shell: &Rc<RefCell<Shell>>) {
+    let Some(dir) = shell
+        .borrow()
+        .config_dir
+        .as_ref()
+        .map(|c| c.join("jumanji").join("themes"))
+    else {
+        return;
+    };
+    if !dir.exists() {
+        return; // No themes dir yet: empty, no error, no watcher.
+    }
+    let handler_shell = shell.clone();
+    if let Ok(w) = Watch::start_dir(&dir, move |_| render_and_load(&handler_shell, true)) {
+        shell.borrow_mut()._theme_watch = Some(w);
     }
 }
 
 /// Register the per-instance D-Bus automation surface (DESIGN.md D7 foundation).
-/// `GetState` snapshots shell state plus a live (async) scroll query;
-/// `ExecuteAction` parses an action string and runs it through the same
-/// [`execute`] path the keyboard uses. Failure to own the name is non-fatal.
 fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
     let get_state = {
         let shell = shell.clone();
         Rc::new(move |invocation: gtk::gio::DBusMethodInvocation| {
-            // Snapshot the synchronous state under a short borrow, then query
-            // the live scroll offset async and complete the reply in its
-            // callback — never blocking the main loop.
-            let (view, file, dark, zoom, text_zoom, section, toc_len, loaded) = {
+            let (view, file, dark, zoom, text_zoom, section, toc_len, loaded, mode) = {
                 let s = shell.borrow();
                 (
                     s.view.clone(),
@@ -344,6 +539,7 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
                     s.section,
                     s.toc.len(),
                     s.loaded,
+                    mode_str(&s).to_string(),
                 )
             };
             view.scroll_state(move |y, pct, content_width| {
@@ -358,6 +554,7 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
                     section,
                     toc_len,
                     loaded,
+                    &mode,
                 );
                 invocation.return_value(Some(&(json,).to_variant()));
             });
@@ -382,8 +579,6 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
 }
 
 /// Serialize the reader state as the compact JSON object `GetState` returns.
-/// `mode` is fixed to `"normal"` in M1 (the only user-reachable mode; TOC mode
-/// arrives in M2).
 #[allow(clippy::too_many_arguments)]
 fn state_json(
     file: &str,
@@ -396,14 +591,33 @@ fn state_json(
     section: usize,
     toc_len: usize,
     loaded: bool,
+    mode: &str,
 ) -> String {
     format!(
         "{{\"file\":{file},\"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
          \"content_width\":{content_width},\
-         \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":\"normal\",\
+         \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded}}}",
         file = json_string(file),
+        mode = json_string(mode),
     )
+}
+
+/// The reported mode: `hint` (overlay active) > `command`/`search` (input bar) >
+/// the keymap mode (`toc`/`normal`).
+fn mode_str(s: &Shell) -> &'static str {
+    if matches!(s.input, Input::Hint { .. }) {
+        return "hint";
+    }
+    match s.bar.prompt() {
+        Some(Prompt::Command) => return "command",
+        Some(Prompt::Search) => return "search",
+        None => {}
+    }
+    match s.mode {
+        Mode::Toc => "toc",
+        Mode::Normal => "normal",
+    }
 }
 
 /// Encode `s` as a JSON string literal (double-quoted, minimally escaped).
@@ -432,8 +646,8 @@ fn clamp_text_zoom(factor: f64, base_px: f64) -> f64 {
     factor.clamp(min, 3.0)
 }
 
-/// The right-hand zoom indicator: `{geometric}%/{text}%T` (e.g. `150%/120%T`)
-/// when *either* axis differs from 100%, empty when both are exactly 100%.
+/// The right-hand zoom indicator: `{geometric}%/{text}%T` when either axis
+/// differs from 100%, empty when both are exactly 100%.
 fn zoom_indicator(geometric: f64, text: f64) -> String {
     let g = (geometric * 100.0).round() as i64;
     let t = (text * 100.0).round() as i64;
@@ -463,22 +677,33 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             let down = matches!(dir, Direction::Down);
             s.view.scroll_half_page(down, count);
         }
+        // gg / G / <N>G are real jumps → record the departure position first.
         Action::GotoTop => {
-            s.section = 0;
-            s.view.scroll_to_top();
+            drop(s);
+            jump_to(shell, |s| {
+                s.section = 0;
+                s.view.scroll_to_top();
+            });
         }
         Action::GotoBottom => {
-            s.section = s.toc.len().saturating_sub(1);
-            s.view.scroll_to_bottom();
+            drop(s);
+            jump_to(shell, |s| {
+                s.section = s.toc.len().saturating_sub(1);
+                s.view.scroll_to_bottom();
+            });
         }
         Action::GotoSection(n) => {
-            if !s.toc.is_empty() {
-                let idx = ((n as usize).saturating_sub(1)).min(s.toc.len() - 1);
-                s.section = idx;
-                let anchor = s.toc[idx].anchor.clone();
-                s.view.scroll_to_anchor(&anchor);
-            }
+            drop(s);
+            jump_to(shell, move |s| {
+                if !s.toc.is_empty() {
+                    let idx = ((n as usize).saturating_sub(1)).min(s.toc.len() - 1);
+                    s.section = idx;
+                    let anchor = s.toc[idx].anchor.clone();
+                    s.view.scroll_to_anchor(&anchor);
+                }
+            });
         }
+        // Section next/prev are *not* jumps (zathura parity).
         Action::SectionNext => {
             if !s.toc.is_empty() {
                 s.section = (s.section + 1).min(s.toc.len() - 1);
@@ -516,51 +741,125 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             s.view.set_text_zoom_px(s.font_base_px * s.text_zoom);
         }
         Action::ZoomReset => {
-            // Reset both axes to 100%.
             s.view.set_zoom(1.0);
             s.text_zoom = 1.0;
             s.view.set_text_zoom_px(s.font_base_px);
         }
-        Action::SearchStart => {
-            s.bar.open_input("/");
-        }
+        Action::SearchStart => s.bar.open_input(Prompt::Search),
         Action::SearchNext => s.view.find_next(),
         Action::SearchPrevious => s.view.find_previous(),
         Action::Recolor => {
             s.dark = !s.dark;
-            s.view.set_dark(s.dark);
+            let dark = s.dark;
+            s.view.set_dark(dark);
+            s.toc_view.set_dark(dark);
         }
         Action::Reload => {
             drop(s);
             render_and_load(shell, true);
         }
-        Action::ToggleToc => s.bar.set_message("table of contents: not implemented (M2)"),
-        Action::CommandLine => s.bar.set_message("command line: not implemented (M2)"),
-        Action::FollowLink => s.bar.set_message("follow link: not implemented (M2)"),
-        Action::ShowLinkTarget => s.bar.set_message("show link target: not implemented (M2)"),
-        Action::QuickmarkSet(_) => s.bar.set_message("set quickmark: not implemented (M2)"),
-        Action::QuickmarkJump(_) => s.bar.set_message("jump to quickmark: not implemented (M2)"),
-        Action::JumpBackward => s.bar.set_message("jumplist back: not implemented (M2)"),
-        Action::JumpForward => s.bar.set_message("jumplist forward: not implemented (M2)"),
-        Action::TocNext
-        | Action::TocPrevious
-        | Action::TocExpand
-        | Action::TocCollapse
-        | Action::TocSelect => s.bar.set_message("toc navigation: not implemented (M2)"),
+        Action::ToggleToc => {
+            drop(s);
+            toggle_toc(shell);
+        }
+        Action::CommandLine => s.bar.open_input(Prompt::Command),
+        Action::FollowLink => {
+            drop(s);
+            start_hints(shell, HintKind::Follow);
+        }
+        Action::ShowLinkTarget => {
+            drop(s);
+            start_hints(shell, HintKind::Show);
+        }
+        Action::QuickmarkSet(c) => {
+            let view = s.view.clone();
+            let zoom = s.view.zoom_level();
+            drop(s);
+            let sh = shell.clone();
+            view.scroll_position(move |y| {
+                let mut s = sh.borrow_mut();
+                s.marks.set(c, Position { scroll_y: y, zoom });
+                s.bar.set_message(&format!("mark {c} set"));
+            });
+        }
+        Action::QuickmarkJump(c) => {
+            let pos = s.marks.get(c);
+            drop(s);
+            match pos {
+                Some(p) => {
+                    let sh = shell.clone();
+                    let view = shell.borrow().view.clone();
+                    view.scroll_position(move |cur| {
+                        {
+                            let mut s = sh.borrow_mut();
+                            s.jumplist.push(cur);
+                            s.view.set_zoom(p.zoom);
+                            s.view.restore_scroll(p.scroll_y);
+                        }
+                        refresh_status(&sh);
+                    });
+                }
+                None => shell.borrow().bar.set_message(&format!("no mark {c}")),
+            }
+        }
+        Action::JumpBackward => {
+            drop(s);
+            let sh = shell.clone();
+            let view = shell.borrow().view.clone();
+            view.scroll_position(move |cur| {
+                let target = sh.borrow_mut().jumplist.back(cur);
+                if let Some(y) = target {
+                    sh.borrow().view.restore_scroll(y);
+                }
+                refresh_status(&sh);
+            });
+        }
+        Action::JumpForward => {
+            let target = s.jumplist.forward();
+            if let Some(y) = target {
+                s.view.restore_scroll(y);
+            }
+        }
+        Action::TocNext => s.toc_view.move_selection(count_i as i32),
+        Action::TocPrevious => s.toc_view.move_selection(-(count_i as i32)),
+        Action::TocExpand => s.toc_view.expand_selected(),
+        Action::TocCollapse => s.toc_view.collapse_selected(),
+        Action::TocSelect => {
+            drop(s);
+            toc_select(shell);
+        }
         Action::Abort => {
             s.matcher.set_mode(Mode::Normal);
+            s.mode = Mode::Normal;
+            if s.stack.visible_child_name().as_deref() == Some("toc") {
+                leave_toc(&mut s);
+            }
+            if matches!(s.input, Input::Hint { .. }) {
+                s.view.clear_hints();
+                s.input = Input::None;
+                s.bar.set_filename(&s.filename);
+            }
             if s.bar.is_input_visible() {
                 s.bar.close_input();
                 s.view.find_clear();
                 s.view.widget().grab_focus();
             }
+            s.completion = None;
         }
-        Action::Quit => s.window.close(),
+        Action::Quit => {
+            // `close()` synchronously emits close-request, whose handler
+            // re-borrows the shell to flush history — so release our borrow first.
+            let window = s.window.clone();
+            drop(s);
+            window.close();
+        }
     }
 }
 
-/// Refresh the right-hand status: scroll percentage plus the pending-key echo.
+/// Refresh the right-hand status (scroll %, pending key echo, zoom) and cache
+/// the live scroll offset for the synchronous close-time history flush.
 fn refresh_status(shell: &Rc<RefCell<Shell>>) {
+    let sh = shell.clone();
     let (view, bar, pending, zoom) = {
         let s = shell.borrow();
         (
@@ -570,7 +869,613 @@ fn refresh_status(shell: &Rc<RefCell<Shell>>) {
             zoom_indicator(s.view.zoom_level(), s.text_zoom),
         )
     };
-    view.scroll_percent(move |pct| bar.set_status_right(pct, &pending, &zoom));
+    view.scroll_state(move |y, pct, _w| {
+        sh.borrow_mut().last_scroll = y;
+        bar.set_status_right(pct, &pending, &zoom);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// TOC mode
+// ---------------------------------------------------------------------------
+
+/// Toggle between the content page and the TOC page (zathura `Tab`).
+fn toggle_toc(shell: &Rc<RefCell<Shell>>) {
+    {
+        let mut s = shell.borrow_mut();
+        if s.mode == Mode::Toc {
+            leave_toc(&mut s);
+        } else {
+            if s.toc.is_empty() {
+                s.bar.set_message("no headings");
+                return;
+            }
+            let (toc, section, dark) = (s.toc.clone(), s.section, s.dark);
+            s.toc_view.rebuild(&toc, section, dark);
+            s.mode = Mode::Toc;
+            s.matcher.set_mode(Mode::Toc);
+            s.stack.set_visible_child_name("toc");
+            s.bar.set_message("Index");
+        }
+    }
+    refresh_status(shell);
+}
+
+/// Return to the content page and Normal mode.
+fn leave_toc(s: &mut Shell) {
+    s.mode = Mode::Normal;
+    s.matcher.set_mode(Mode::Normal);
+    s.stack.set_visible_child_name("content");
+    s.bar.set_filename(&s.filename);
+    s.view.widget().grab_focus();
+}
+
+/// Jump to the selected TOC entry's anchor and return to Normal mode (records a
+/// jumplist entry, zathura index-select behaviour).
+fn toc_select(shell: &Rc<RefCell<Shell>>) {
+    let target = {
+        let mut s = shell.borrow_mut();
+        match s.toc_view.selected() {
+            Some(sel) => {
+                leave_toc(&mut s);
+                Some(sel)
+            }
+            None => None,
+        }
+    };
+    if let Some((anchor, heading_index)) = target {
+        jump_to(shell, move |s| {
+            s.section = heading_index;
+            s.view.scroll_to_anchor(&anchor);
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Link hints (`f` / `F`)
+// ---------------------------------------------------------------------------
+
+/// Enter the link-hint interaction: draw the overlay and start collecting keys.
+fn start_hints(shell: &Rc<RefCell<Shell>>, kind: HintKind) {
+    let mut s = shell.borrow_mut();
+    if s.mode != Mode::Normal {
+        return;
+    }
+    s.input = Input::Hint {
+        kind,
+        typed: String::new(),
+        links: Vec::new(),
+    };
+    s.bar.set_message(hint_prompt(kind));
+    s.view.request_hints();
+}
+
+fn hint_prompt(kind: HintKind) -> &'static str {
+    match kind {
+        HintKind::Follow => "follow link:",
+        HintKind::Show => "show target:",
+    }
+}
+
+/// The overlay JS posted its label→href list (tab-separated, one per line).
+fn on_hints_posted(shell: &Rc<RefCell<Shell>>, msg: &str) {
+    let links = parse_hints(msg);
+    {
+        let mut s = shell.borrow_mut();
+        match &mut s.input {
+            Input::Hint { links: l, .. } => *l = links,
+            _ => return,
+        }
+    }
+    if shell.borrow().input_links_empty() {
+        // Nothing to hint at: report and drop back to normal.
+        {
+            let s = shell.borrow();
+            s.view.clear_hints();
+            s.bar.set_message("no links in view");
+        }
+        shell.borrow_mut().input = Input::None;
+        return;
+    }
+    match hint_resolve(shell) {
+        Some(action) => hint_act(shell, action),
+        None => update_hint_status(shell),
+    }
+}
+
+/// Handle one keypress while the hint overlay is active.
+fn on_hint_key(shell: &Rc<RefCell<Shell>>, kp: KeyPress) {
+    match kp.key {
+        Key::Backspace => {
+            {
+                let mut s = shell.borrow_mut();
+                if let Input::Hint { typed, .. } = &mut s.input {
+                    typed.pop();
+                }
+            }
+            // Re-filter; a shorter prefix never triggers an exact match.
+            let _ = hint_resolve(shell);
+            update_hint_status(shell);
+        }
+        Key::Char(c) => {
+            let accepted = {
+                let mut s = shell.borrow_mut();
+                match &mut s.input {
+                    Input::Hint { typed, links, .. } => {
+                        if links.is_empty() {
+                            // Links not posted yet: buffer optimistically.
+                            typed.push(c);
+                            true
+                        } else {
+                            let tentative = format!("{typed}{c}");
+                            if links.iter().any(|l| l.label.starts_with(&tentative)) {
+                                *typed = tentative;
+                                true
+                            } else {
+                                false // dead end: ignore the keystroke.
+                            }
+                        }
+                    }
+                    _ => false,
+                }
+            };
+            if accepted {
+                match hint_resolve(shell) {
+                    Some(action) => hint_act(shell, action),
+                    None => update_hint_status(shell),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// What a completed hint resolves to.
+enum HintAction {
+    Follow(String),
+    Show(String),
+}
+
+/// If the typed prefix exactly matches a label, consume the overlay and return
+/// the resolved action; otherwise narrow the visible hints and return `None`.
+fn hint_resolve(shell: &Rc<RefCell<Shell>>) -> Option<HintAction> {
+    let mut s = shell.borrow_mut();
+    let Input::Hint { kind, typed, links } = &s.input else {
+        return None;
+    };
+    let kind = *kind;
+    let typed = typed.clone();
+    if let Some(link) = links.iter().find(|l| l.label == typed) {
+        let href = link.href.clone();
+        s.input = Input::None;
+        s.view.clear_hints();
+        s.bar.set_filename(&s.filename);
+        return Some(match kind {
+            HintKind::Follow => HintAction::Follow(href),
+            HintKind::Show => HintAction::Show(href),
+        });
+    }
+    s.view.filter_hints(&typed);
+    None
+}
+
+fn hint_act(shell: &Rc<RefCell<Shell>>, action: HintAction) {
+    match action {
+        HintAction::Follow(href) => open_uri(shell, &href),
+        HintAction::Show(href) => shell.borrow().bar.set_message(&format!("→ {href}")),
+    }
+}
+
+fn update_hint_status(shell: &Rc<RefCell<Shell>>) {
+    let s = shell.borrow();
+    if let Input::Hint { kind, typed, .. } = &s.input {
+        let prompt = hint_prompt(*kind);
+        s.bar.set_message(&format!("{prompt} {typed}"));
+    }
+}
+
+fn cancel_hints(shell: &Rc<RefCell<Shell>>) {
+    let mut s = shell.borrow_mut();
+    s.view.clear_hints();
+    s.input = Input::None;
+    s.bar.set_filename(&s.filename);
+}
+
+/// Parse the overlay's `label\thref` lines into typed [`HintLink`]s.
+fn parse_hints(msg: &str) -> Vec<HintLink> {
+    msg.lines()
+        .filter_map(|line| {
+            line.split_once('\t').map(|(label, href)| HintLink {
+                label: label.to_string(),
+                href: href.to_string(),
+            })
+        })
+        .collect()
+}
+
+impl Shell {
+    fn input_links_empty(&self) -> bool {
+        match &self.input {
+            Input::Hint { links, .. } => links.is_empty(),
+            _ => true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Link routing and `:open`
+// ---------------------------------------------------------------------------
+
+/// Route a resolved target URI (from a link click or a hint follow):
+/// same-document fragment → scroll; local `.md`/`.markdown` → open in-window;
+/// anything else → hand to the system (never navigate the webview).
+fn open_uri(shell: &Rc<RefCell<Shell>>, uri: &str) {
+    let current = gio::File::for_path(&shell.borrow().file).uri().to_string();
+    let (base, frag) = match uri.split_once('#') {
+        Some((b, f)) => (b.to_string(), Some(f.to_string())),
+        None => (uri.to_string(), None),
+    };
+
+    // Same-document fragment: scroll to the anchor (recording a jump). We drive
+    // the scroll ourselves rather than letting WebKit navigate.
+    if let Some(frag) = frag
+        && (base.is_empty() || base == current)
+    {
+        jump_to(shell, move |s| s.view.scroll_to_anchor(&frag));
+        return;
+    }
+
+    // Local markdown file → open it in this window.
+    if let Some(path) = file_uri_to_path(&base) {
+        let is_md = path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+            .unwrap_or(false);
+        if is_md {
+            open_file(shell, path);
+            return;
+        }
+    }
+
+    // Everything else (http/https, other local files) → the system default.
+    match gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>) {
+        Ok(()) => shell
+            .borrow()
+            .bar
+            .set_message(&format!("opened externally: {uri}")),
+        Err(e) => shell
+            .borrow()
+            .bar
+            .set_message(&format!("cannot open {uri}: {e}")),
+    }
+}
+
+/// Open `path` in this window: persist the current position, reset per-document
+/// state, re-point the watcher, restore any saved state, and render.
+fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf) {
+    if !path.exists() {
+        shell
+            .borrow()
+            .bar
+            .set_message(&format!("no such file: {}", path.display()));
+        return;
+    }
+    {
+        let mut s = shell.borrow_mut();
+        record_current_state(&mut s);
+        if s.mode == Mode::Toc {
+            leave_toc(&mut s);
+        }
+        s.file = path.clone();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        s.filename = name.clone();
+        s.bar.set_filename(&name);
+        // Per-document navigation state resets on a document switch.
+        s.jumplist = Jumplist::new();
+        s.marks = Marks::new();
+        s.section = 0;
+        s.loaded = false;
+        // Restore saved state for the new file, or start fresh.
+        match s.history.get(&path) {
+            Some(st) => {
+                s.text_zoom = st.text_zoom;
+                s.view.set_zoom(st.zoom);
+                s.pending_restore = Some(st.scroll_y);
+            }
+            None => {
+                s.text_zoom = 1.0;
+                s.view.set_zoom(1.0);
+                s.pending_restore = Some(0.0);
+            }
+        }
+    }
+    restart_watch(shell, &path);
+    do_render_and_load(shell);
+    refresh_status(shell);
+}
+
+/// Convert a `file://` URI to a filesystem path; `None` for other schemes.
+fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    if !uri.starts_with("file://") {
+        return None;
+    }
+    gio::File::for_uri(uri).path()
+}
+
+// ---------------------------------------------------------------------------
+// `:` command line
+// ---------------------------------------------------------------------------
+
+fn run_command(shell: &Rc<RefCell<Shell>>, query: &str) {
+    match command::parse(query) {
+        Ok(Command::Open(raw)) => {
+            let current = shell.borrow().file.clone();
+            let resolved = resolve_open_path(&current, &raw);
+            open_file(shell, resolved);
+        }
+        Ok(Command::Set(key, value)) => apply_set(shell, &key, &value),
+        Ok(Command::Exec(action)) => execute(shell, action, 1),
+        Ok(Command::Quit) => {
+            // Release the borrow before `close()` (its handler re-borrows).
+            let window = shell.borrow().window.clone();
+            window.close();
+        }
+        Err(e) => shell.borrow().bar.set_message(&e),
+    }
+}
+
+/// Apply a `:set key value` and honour the resulting [`SetEffect`].
+fn apply_set(shell: &Rc<RefCell<Shell>>, key: &str, value: &str) {
+    let effect = shell.borrow_mut().options.set(key, value);
+    match effect {
+        Err(e) => shell.borrow().bar.set_message(&e),
+        Ok(SetEffect::Rerender) => {
+            {
+                let mut s = shell.borrow_mut();
+                let o = s.options.clone();
+                s.render_opts.page_width_px = o.page_width_px;
+                s.render_opts.font_body = o.font_body.clone();
+                s.render_opts.font_mono = o.font_mono.clone();
+                s.render_opts.font_size_px = o.font_size_px;
+                s.font_base_px = o.font_size_px as f64;
+            }
+            render_and_load(shell, true);
+        }
+        Ok(SetEffect::Recolor) => {
+            let mut s = shell.borrow_mut();
+            s.dark = s.options.default_recolor;
+            let dark = s.dark;
+            s.view.set_dark(dark);
+            s.toc_view.set_dark(dark);
+        }
+        Ok(SetEffect::None) => {
+            let mut s = shell.borrow_mut();
+            s.scroll_step = s.options.scroll_step_px as i64;
+            s.zoom_step = s.options.zoom_step;
+            s.text_zoom_step = s.options.text_zoom_step;
+        }
+    }
+}
+
+/// Tab-complete the `:` command line, cycling on repeated presses.
+fn do_completion(shell: &Rc<RefCell<Shell>>) {
+    let mut s = shell.borrow_mut();
+    if s.bar.prompt() != Some(Prompt::Command) {
+        return;
+    }
+    let current = s.bar.input_query();
+
+    // Cycle when the shown text is the current candidate and there are more.
+    if let Some(comp) = s.completion.as_mut() {
+        let showing_current = comp
+            .candidates
+            .get(comp.index)
+            .map(|c| c == &current)
+            .unwrap_or(false);
+        if showing_current && comp.candidates.len() > 1 {
+            comp.index = (comp.index + 1) % comp.candidates.len();
+            let next = comp.candidates[comp.index].clone();
+            let status = completion_status(comp);
+            s.bar.set_input_query(&next);
+            s.bar.set_message(&status);
+            return;
+        }
+    }
+
+    // Fresh completion from the current input.
+    let file = s.file.clone();
+    let candidates = compute_completion(&file, &current);
+    if candidates.is_empty() {
+        s.completion = None;
+        return;
+    }
+    let first = candidates[0].clone();
+    s.bar.set_input_query(&first);
+    let comp = Completion {
+        candidates,
+        index: 0,
+    };
+    let status = completion_status(&comp);
+    s.bar.set_message(&status);
+    s.completion = Some(comp);
+}
+
+/// A compact completion echo: `[i/n] cand  cand  …`.
+fn completion_status(comp: &Completion) -> String {
+    let shown: Vec<&str> = comp.candidates.iter().map(String::as_str).take(8).collect();
+    format!(
+        "[{}/{}] {}",
+        comp.index + 1,
+        comp.candidates.len(),
+        shown.join("  ")
+    )
+}
+
+/// Full completion candidate lines (without the leading `:`).
+fn compute_completion(current_file: &Path, input: &str) -> Vec<String> {
+    match command::complete(input) {
+        Completions::Candidates(v) => v,
+        Completions::Path { prefix } => {
+            let dir = current_file.parent().unwrap_or(Path::new("."));
+            complete_path(dir, &prefix)
+                .into_iter()
+                .map(|p| format!("open {p}"))
+                .collect()
+        }
+    }
+}
+
+/// Filesystem completion for a `:open` path prefix, relative to `current_dir`.
+/// Candidates keep the typed directory prefix; directories get a trailing `/`.
+fn complete_path(current_dir: &Path, prefix: &str) -> Vec<String> {
+    let (typed_dir, partial) = match prefix.rfind('/') {
+        Some(i) => (&prefix[..=i], &prefix[i + 1..]),
+        None => ("", prefix),
+    };
+    let expanded = expand_tilde(typed_dir);
+    let listing_dir = if expanded.as_os_str().is_empty() {
+        current_dir.to_path_buf()
+    } else if expanded.is_absolute() {
+        expanded
+    } else {
+        current_dir.join(expanded)
+    };
+
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&listing_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(partial) {
+                continue;
+            }
+            // Skip dotfiles unless the user has started typing one.
+            if name.starts_with('.') && !partial.starts_with('.') {
+                continue;
+            }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let mut cand = format!("{typed_dir}{name}");
+            if is_dir {
+                cand.push('/');
+            }
+            out.push(cand);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Resolve a `:open` argument: expand `~`, and take relatives against the
+/// current file's directory.
+fn resolve_open_path(current_file: &Path, raw: &str) -> PathBuf {
+    let p = expand_tilde(raw.trim());
+    if p.is_absolute() {
+        p
+    } else {
+        current_file.parent().map(|d| d.join(&p)).unwrap_or(p)
+    }
+}
+
+/// Expand a leading `~` / `~/` against `$HOME`.
+fn expand_tilde(s: &str) -> PathBuf {
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    if s == "~"
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home);
+    }
+    PathBuf::from(s)
+}
+
+// ---------------------------------------------------------------------------
+// Jumplist, history, themes
+// ---------------------------------------------------------------------------
+
+/// Record the current (async-queried) scroll position on the jumplist, then run
+/// `after` — the actual jump — in the query's callback.
+fn jump_to(shell: &Rc<RefCell<Shell>>, after: impl FnOnce(&mut Shell) + 'static) {
+    let sh = shell.clone();
+    let view = shell.borrow().view.clone();
+    view.scroll_position(move |cur| {
+        {
+            let mut s = sh.borrow_mut();
+            s.jumplist.push(cur);
+            after(&mut s);
+        }
+        refresh_status(&sh);
+    });
+}
+
+/// Fold the current position into the in-memory history (not yet written).
+fn record_current_state(s: &mut Shell) {
+    let state = FileState {
+        scroll_y: s.last_scroll,
+        zoom: s.view.zoom_level(),
+        text_zoom: s.text_zoom,
+    };
+    let file = s.file.clone();
+    s.history.record(&file, state);
+}
+
+/// `$XDG_DATA_HOME/jumanji` (or `$HOME/.local/share/jumanji`).
+fn xdg_data_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_DATA_HOME")
+        && !dir.is_empty()
+    {
+        return Some(PathBuf::from(dir).join("jumanji"));
+    }
+    std::env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("jumanji")
+    })
+}
+
+fn load_history(dir: &Option<PathBuf>) -> History {
+    let Some(dir) = dir else {
+        return History::default();
+    };
+    match std::fs::read_to_string(dir.join("history.toml")) {
+        Ok(text) => History::load(&text),
+        Err(_) => History::default(),
+    }
+}
+
+fn write_history(dir: &Path, history: &History) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join("history.toml"), history.to_toml())
+}
+
+/// Load `<config>/jumanji/themes/*.css`, sorted by filename. Missing dir → empty.
+fn load_themes(config_dir: &Option<PathBuf>) -> Vec<String> {
+    let Some(cd) = config_dir else {
+        return Vec::new();
+    };
+    let dir = cd.join("jumanji").join("themes");
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .map(|e| e.eq_ignore_ascii_case("css"))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    files.sort();
+    files
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect()
 }
 
 /// Convert a GDK keyval + modifiers into the core [`KeyPress`] abstraction.

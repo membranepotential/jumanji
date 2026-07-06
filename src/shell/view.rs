@@ -6,7 +6,7 @@
 //! JavaScript snippets. Content itself is rendered 100% in Rust (see
 //! `core::pipeline`); JS here only drives the viewport.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -14,12 +14,17 @@ use gtk::gdk::RGBA;
 use gtk::prelude::*;
 use webkit6::prelude::*;
 use webkit6::{
-    FindController, FindOptions, UserContentInjectedFrames, UserContentManager, UserScript,
-    UserScriptInjectionTime, WebView,
+    FindController, FindOptions, NavigationPolicyDecision, NavigationType, PolicyDecisionType,
+    UserContentInjectedFrames, UserContentManager, UserScript, UserScriptInjectionTime, WebView,
 };
 
 use crate::core::RenderedDocument;
 use crate::core::config::SelectionClipboard;
+
+/// A shell-supplied sink, installed after construction. Both link hints and
+/// navigation routing hand a single string back to the shell (a JSON hint list
+/// and a resolved target URI, respectively).
+type Sink = Rc<RefCell<Option<Box<dyn Fn(String)>>>>;
 
 /// Native WebView background painted behind the document, matched to the theme
 /// so unpainted regions never flash a mismatched colour (light `#ffffff`,
@@ -29,6 +34,9 @@ const BG_DARK: RGBA = RGBA::new(0.101, 0.101, 0.101, 1.0);
 
 /// The script-message handler name the selection user-script posts to.
 const SELECTION_HANDLER: &str = "selection";
+/// The script-message handler the link-hint overlay posts its `[{label,href}]`
+/// list to.
+const HINTS_HANDLER: &str = "hints";
 
 #[derive(Clone)]
 pub struct View {
@@ -36,17 +44,27 @@ pub struct View {
     /// The desired recolor (dark) state, tracked so `load_document` can pre-apply
     /// the `dark` class on `<html>` and paint dark from the very first frame.
     dark: Rc<Cell<bool>>,
+    /// Called with the JSON `[{label,href}]` list the hint overlay posts back.
+    hints_cb: Sink,
+    /// Called with a resolved target URI when the webview tries to navigate
+    /// (a link click); the shell decides whether to scroll, open, or delegate.
+    navigate_cb: Sink,
 }
 
 impl View {
     pub fn new(selection_clipboard: SelectionClipboard) -> Self {
         let ucm = UserContentManager::new();
         install_selection_copy(&ucm, selection_clipboard);
+        let hints_cb: Sink = Rc::new(RefCell::new(None));
+        install_hints(&ucm, hints_cb.clone());
 
         let webview = WebView::builder().user_content_manager(&ucm).build();
         webview.set_vexpand(true);
         webview.set_hexpand(true);
         webview.set_background_color(&BG_LIGHT);
+
+        let navigate_cb: Sink = Rc::new(RefCell::new(None));
+        install_navigation_policy(&webview, navigate_cb.clone());
 
         if let Some(settings) = WebViewExt::settings(&webview) {
             // We drive the viewport with `window.*` JS, so JavaScript stays on,
@@ -66,11 +84,24 @@ impl View {
         Self {
             webview,
             dark: Rc::new(Cell::new(false)),
+            hints_cb,
+            navigate_cb,
         }
     }
 
     pub fn widget(&self) -> &WebView {
         &self.webview
+    }
+
+    /// Install the shell's handler for the hint list the overlay posts back.
+    pub fn set_hints_handler(&self, f: impl Fn(String) + 'static) {
+        *self.hints_cb.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Install the shell's handler for attempted navigations (link clicks). The
+    /// argument is the resolved absolute target URI.
+    pub fn set_navigate_handler(&self, f: impl Fn(String) + 'static) {
+        *self.navigate_cb.borrow_mut() = Some(Box::new(f));
     }
 
     /// Load a rendered document. `base` is the source file; its URI becomes the
@@ -126,6 +157,32 @@ impl View {
             "{{ const e = document.getElementById({}); if (e) e.scrollIntoView(); }}",
             js_string(id)
         ));
+    }
+
+    /// Build the link-hint overlay: label every visible `<a href>` with a
+    /// home-row-alphabet tag and post the `[{label,href}]` list back to the
+    /// shell via the `hints` handler. `href` is the *resolved* absolute URI, so
+    /// the shell's routing sees the same value a real click would.
+    pub fn request_hints(&self) {
+        self.run_js(HINTS_BUILD_JS);
+    }
+
+    /// Narrow the visible hints to those whose label starts with `typed`.
+    pub fn filter_hints(&self, typed: &str) {
+        self.run_js(&format!(
+            "(() => {{ const o=document.getElementById('__jmnj_hints'); if(!o) return; \
+               const t={typed}; \
+               for (const el of o.querySelectorAll('.__jmnj_hint')) {{ \
+                 el.style.display = el.getAttribute('data-label').indexOf(t)===0 ? '' : 'none'; }} }})();",
+            typed = js_string(typed)
+        ));
+    }
+
+    /// Remove the hint overlay.
+    pub fn clear_hints(&self) {
+        self.run_js(
+            "(() => { const o=document.getElementById('__jmnj_hints'); if(o) o.remove(); })();",
+        );
     }
 
     /// Geometric zoom: webkit full-page zoom (scales everything, diagrams
@@ -232,24 +289,6 @@ impl View {
         );
     }
 
-    /// Query the vertical scroll percentage (0..=100), delivering it to
-    /// `callback`. Returns 0 for documents shorter than the viewport.
-    pub fn scroll_percent<F: FnOnce(u32) + 'static>(&self, callback: F) {
-        let script = "(() => { const d = document.documentElement, b = document.body; \
-             const max = (b.scrollHeight || d.scrollHeight) - window.innerHeight; \
-             return max > 0 ? Math.round((window.scrollY / max) * 100) : 0; })()";
-        self.webview.evaluate_javascript(
-            script,
-            None,
-            None,
-            None::<&gtk::gio::Cancellable>,
-            move |res| {
-                let p = res.ok().map(|v| v.to_double()).unwrap_or(0.0);
-                callback(p.clamp(0.0, 100.0) as u32);
-            },
-        );
-    }
-
     /// Query scroll offset (px), percentage (0..=100) and the content column's
     /// layout width (CSS px) in one JS round-trip, delivering all three to
     /// `callback`. Used by the D-Bus `GetState` method so a single reply
@@ -330,6 +369,85 @@ fn install_selection_copy(ucm: &UserContentManager, target: SelectionClipboard) 
             };
             clipboard.set_text(&text);
         }
+    });
+}
+
+/// The overlay-building script for [`View::request_hints`]. Finds visible
+/// links, assigns home-row-alphabet labels (`a`..`z`, then `aa`,`ab`,… past 26),
+/// draws a fixed-position tag over each, and posts the label→href map to Rust.
+const HINTS_BUILD_JS: &str = "(() => {\n\
+    const old=document.getElementById('__jmnj_hints'); if(old) old.remove();\n\
+    const vw=window.innerWidth, vh=window.innerHeight;\n\
+    const links=Array.prototype.slice.call(document.querySelectorAll('a[href]')).filter(a=>{\n\
+      const r=a.getBoundingClientRect();\n\
+      if(r.width<=0||r.height<=0) return false;\n\
+      if(r.bottom<0||r.top>vh||r.right<0||r.left>vw) return false;\n\
+      const s=getComputedStyle(a);\n\
+      return s.visibility!=='hidden'&&s.display!=='none';\n\
+    });\n\
+    const A='abcdefghijklmnopqrstuvwxyz', n=links.length, labels=[];\n\
+    if(n<=A.length){ for(let i=0;i<n;i++) labels.push(A[i]); }\n\
+    else { for(let i=0;i<A.length&&labels.length<n;i++) for(let j=0;j<A.length&&labels.length<n;j++) labels.push(A[i]+A[j]); }\n\
+    const overlay=document.createElement('div');\n\
+    overlay.id='__jmnj_hints';\n\
+    overlay.style.cssText='position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;';\n\
+    const out=[];\n\
+    links.forEach((a,i)=>{\n\
+      const r=a.getBoundingClientRect();\n\
+      const tag=document.createElement('span');\n\
+      tag.className='__jmnj_hint';\n\
+      tag.setAttribute('data-label',labels[i]);\n\
+      tag.textContent=labels[i];\n\
+      tag.style.cssText='position:fixed;left:'+Math.max(0,r.left)+'px;top:'+Math.max(0,r.top)+'px;'+\n\
+        'background:#ffd400;color:#000;font:bold 11px monospace;padding:0 3px;border-radius:3px;'+\n\
+        'border:1px solid #806b00;pointer-events:none;box-shadow:0 1px 2px rgba(0,0,0,.4);';\n\
+      overlay.appendChild(tag);\n\
+      out.push(labels[i]+'\\t'+a.href);\n\
+    });\n\
+    document.documentElement.appendChild(overlay);\n\
+    window.webkit.messageHandlers.hints.postMessage(out.join('\\n'));\n\
+  })();";
+
+/// Register the `hints` script-message handler: the overlay posts a JSON
+/// `[{label,href}]` string, which we forward to the shell-installed sink.
+fn install_hints(ucm: &UserContentManager, sink: Sink) {
+    ucm.register_script_message_handler(HINTS_HANDLER, None);
+    ucm.connect_script_message_received(Some(HINTS_HANDLER), move |_, value| {
+        let json = value.to_str();
+        if let Some(cb) = sink.borrow().as_ref() {
+            cb(json.to_string());
+        }
+    });
+}
+
+/// Deny every webview-initiated navigation except the programmatic document
+/// load (`load_html`/reload, which arrive as `NavigationType::Other`). A link
+/// click is routed to the shell instead — the app itself never navigates
+/// (DESIGN.md: offline-only, CSP-locked). See `set_navigate_handler`.
+fn install_navigation_policy(webview: &WebView, sink: Sink) {
+    webview.connect_decide_policy(move |_wv, decision, dtype| {
+        if !matches!(
+            dtype,
+            PolicyDecisionType::NavigationAction | PolicyDecisionType::NewWindowAction
+        ) {
+            return false; // resource-response decisions: default handling.
+        }
+        let Some(nav) = decision.downcast_ref::<NavigationPolicyDecision>() else {
+            return false;
+        };
+        let Some(action) = nav.navigation_action() else {
+            return false;
+        };
+        if matches!(action.navigation_type(), NavigationType::Other) {
+            return false; // our own load_html / reload — allow.
+        }
+        decision.ignore();
+        if let Some(uri) = action.request().and_then(|r| r.uri())
+            && let Some(cb) = sink.borrow().as_ref()
+        {
+            cb(uri.to_string());
+        }
+        true
     });
 }
 

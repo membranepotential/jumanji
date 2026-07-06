@@ -48,44 +48,83 @@ impl Watch {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
 
+        // Only events touching our specific file matter; everything else in the
+        // directory (sibling saves, editor swap files) is filtered out.
+        let target_name = file.file_name().map(|n| n.to_owned());
+        Self::start_impl(
+            &parent,
+            move |event| {
+                let hits = event
+                    .paths
+                    .iter()
+                    .any(|p| *p == file || p.file_name().map(|n| n.to_owned()) == target_name);
+                if !hits {
+                    return None;
+                }
+                Some(if file.exists() {
+                    FileEvent::Changed
+                } else {
+                    FileEvent::Removed
+                })
+            },
+            on_event,
+        )
+    }
+
+    /// Start watching a whole directory (non-recursive). Any content-mutating
+    /// event inside it fires [`FileEvent::Changed`] — used for the user-CSS
+    /// themes directory, where any `.css` add/edit/remove should re-render.
+    pub fn start_dir<F>(dir: &Path, on_event: F) -> anyhow::Result<Self>
+    where
+        F: Fn(FileEvent) + 'static,
+    {
+        Self::start_impl(dir, |_event| Some(FileEvent::Changed), on_event)
+    }
+
+    /// Watch `watch_path` (non-recursive), debounce, and marshal each debounced
+    /// batch onto the GTK main loop. `classify` maps a raw debounced event to an
+    /// optional [`FileEvent`]; `None` drops it. Only content-mutating event
+    /// kinds reach `classify` (`Access` events fire on every read — including our
+    /// own reload's — and would otherwise feed a self-sustaining reload loop).
+    fn start_impl<C, F>(watch_path: &Path, classify: C, on_event: F) -> anyhow::Result<Self>
+    where
+        C: Fn(&notify::Event) -> Option<FileEvent> + 'static,
+        F: Fn(FileEvent) + 'static,
+    {
         let (tx, rx) = mpsc::channel();
         let mut debouncer =
             new_debouncer(Duration::from_millis(150), None, tx).context("create file debouncer")?;
         debouncer
-            .watch(&parent, RecursiveMode::NonRecursive)
-            .with_context(|| format!("watch {}", parent.display()))?;
+            .watch(watch_path, RecursiveMode::NonRecursive)
+            .with_context(|| format!("watch {}", watch_path.display()))?;
 
         // Poll the channel from the main loop; the debouncer already coalesces,
         // so a coarse tick adds no perceptible latency.
-        let target_name = file.file_name().map(|n| n.to_owned());
         let poll = glib::timeout_add_local(Duration::from_millis(120), move || {
-            let mut touched = false;
+            let mut fired: Option<FileEvent> = None;
             while let Ok(result) = rx.try_recv() {
                 if let Ok(events) = result {
                     for event in events {
-                        // Only content-mutating kinds. `Access` events fire on
-                        // every read — including our own reload's — and would
-                        // otherwise feed a self-sustaining reload loop.
                         if !matches!(
                             event.kind,
                             EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
                         ) {
                             continue;
                         }
-                        let hits = event.paths.iter().any(|p| {
-                            *p == file || p.file_name().map(|n| n.to_owned()) == target_name
-                        });
-                        touched |= hits;
+                        if let Some(ev) = classify(&event) {
+                            // A `Removed` wins over a `Changed` in the same batch.
+                            fired = Some(match (fired, ev) {
+                                (Some(FileEvent::Removed), _) | (_, FileEvent::Removed) => {
+                                    FileEvent::Removed
+                                }
+                                _ => FileEvent::Changed,
+                            });
+                        }
                     }
                 }
             }
-            if touched {
-                let event = if file.exists() {
-                    FileEvent::Changed
-                } else {
-                    FileEvent::Removed
-                };
-                on_event(event);
+            if let Some(ev) = fired {
+                on_event(ev);
             }
             glib::ControlFlow::Continue
         });

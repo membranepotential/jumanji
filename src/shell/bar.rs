@@ -1,17 +1,41 @@
-//! Girara-style bottom chrome: a status line plus an input entry that only
-//! appears for `/` search. Flat, minimal, monospace — no toolbars or menus.
+//! Girara-style bottom chrome: a status line plus an input entry that appears
+//! for `/` search and `:` commands. Flat, minimal, monospace — no toolbars.
+
+use std::cell::Cell;
+use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, CssProvider, Entry, Label, Orientation};
 
+/// Which kind of input the bar is currently collecting. The prompt character
+/// and how `Enter` is interpreted (search vs command) both follow from this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prompt {
+    /// `/` incremental find.
+    Search,
+    /// `:` command line.
+    Command,
+}
+
+impl Prompt {
+    fn prefix(self) -> &'static str {
+        match self {
+            Prompt::Search => "/",
+            Prompt::Command => ":",
+        }
+    }
+}
+
 /// The bottom bar: `[ status_left ............ status_right ]` with a hidden
-/// single-line [`Entry`] stacked above it for search input.
+/// single-line [`Entry`] stacked above it for search/command input.
 #[derive(Clone)]
 pub struct Bar {
     container: GtkBox,
     status_left: Label,
     status_right: Label,
     entry: Entry,
+    /// The prompt kind while the input bar is open; `None` when it is hidden.
+    prompt: Rc<Cell<Option<Prompt>>>,
 }
 
 impl Bar {
@@ -47,6 +71,7 @@ impl Bar {
             status_left,
             status_right,
             entry,
+            prompt: Rc::new(Cell::new(None)),
         }
     }
 
@@ -83,9 +108,10 @@ impl Bar {
         self.status_left.set_text(msg);
     }
 
-    /// Show the input bar seeded with `prefix` (e.g. `/`) and give it focus.
-    pub fn open_input(&self, prefix: &str) {
-        self.entry.set_text(prefix);
+    /// Open the input bar for `prompt`, seeded with its prefix, and focus it.
+    pub fn open_input(&self, prompt: Prompt) {
+        self.prompt.set(Some(prompt));
+        self.entry.set_text(prompt.prefix());
         self.entry.set_visible(true);
         self.entry.grab_focus();
         self.entry.set_position(-1);
@@ -93,6 +119,7 @@ impl Bar {
 
     /// Hide and clear the input bar.
     pub fn close_input(&self) {
+        self.prompt.set(None);
         self.entry.set_text("");
         self.entry.set_visible(false);
     }
@@ -101,12 +128,25 @@ impl Bar {
         WidgetExt::is_visible(&self.entry)
     }
 
+    /// The active prompt kind, or `None` when the input bar is hidden.
+    pub fn prompt(&self) -> Option<Prompt> {
+        self.prompt.get()
+    }
+
     /// The current input text with the leading prefix character removed.
     pub fn input_query(&self) -> String {
         let text = self.entry.text();
         let mut chars = text.chars();
         chars.next();
         chars.as_str().to_string()
+    }
+
+    /// Replace the input text, preserving the leading prompt prefix, and put the
+    /// cursor at the end. Used by tab completion.
+    pub fn set_input_query(&self, query: &str) {
+        let prefix = self.prompt.get().map(Prompt::prefix).unwrap_or("");
+        self.entry.set_text(&format!("{prefix}{query}"));
+        self.entry.set_position(-1);
     }
 }
 
