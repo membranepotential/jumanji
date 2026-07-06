@@ -60,3 +60,19 @@ no-op) when they're absent. See `docs/TESTING.md`.
   (`feat:`, `fix:`, `docs:`, `refactor:`).
 - Before committing: `cargo test && cargo clippy -- -D warnings && cargo fmt`.
 - Update `docs/DEVLOG.md` alongside non-trivial changes.
+
+## Releasing
+
+Every version bump ships as a git tag **and** a matching GitHub release —
+the tag alone is not a release. Steps:
+
+1. Bump `version` in `Cargo.toml` (patch for fixes, minor for features);
+   `cargo build` to update `Cargo.lock`. Commit as `chore: release vX.Y.Z`.
+2. Tag `vX.Y.Z` and push the commit + tag.
+3. **Create the GitHub release with notes**: `gh release create vX.Y.Z --title
+   … --notes …`. Never skip this — a tag with no `gh release` is an incomplete
+   release. Write real notes (what changed, user-facing), not a bare version.
+4. Point the AUR `packaging/aur/PKGBUILD` at the new tag: set `pkgver` and
+   replace `sha256sums` with the sha256 of the pushed tag tarball
+   (`https://github.com/membranepotential/jumanji/archive/refs/tags/vX.Y.Z.tar.gz`).
+   Commit as `chore: point PKGBUILD at vX.Y.Z`.
