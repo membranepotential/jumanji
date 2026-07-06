@@ -1,25 +1,28 @@
 mod core;
 mod shell;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use gtk::glib;
 
 use crate::core::config::{self, Config};
+use crate::core::source::Source;
 
 /// A zathura-inspired markdown reader.
 #[derive(Debug, Parser)]
 #[command(name = "jumanji", version, about)]
 struct Cli {
-    /// The markdown file to open.
-    file: PathBuf,
+    /// The markdown file to open. Use `-` to read from standard input; with no
+    /// argument at all, a piped stdin is read (`some-tool | jumanji`).
+    file: Option<PathBuf>,
 
     /// Forward editor sync: jump to the rendered element nearest at-or-before
     /// this 1-based source line. If an instance already has the file open, the
     /// jump is forwarded to it over D-Bus and this process exits without opening
-    /// a window (like zathura's `--synctex-forward`).
+    /// a window (like zathura's `--synctex-forward`). Requires a file argument.
     #[arg(long, value_name = "LINE")]
     forward: Option<u32>,
 }
@@ -48,28 +51,60 @@ fn main() -> ExitCode {
 
     let cli = Cli::parse();
 
-    let file = match std::path::absolute(&cli.file) {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("jumanji: {}: {err}", cli.file.display());
-            return ExitCode::FAILURE;
+    // Classify the input: a file path, an explicit `-`, or a bare pipe. `None`
+    // means no file and stdin is an interactive terminal — nothing to read.
+    let source = match Source::resolve(cli.file.as_deref(), std::io::stdin().is_terminal()) {
+        Some(s) => s,
+        None => {
+            Cli::command()
+                .error(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "no input: give a markdown file, `-` to read stdin, or pipe into jumanji",
+                )
+                .exit();
         }
     };
 
-    if !file.exists() {
-        eprintln!("jumanji: {}: no such file", file.display());
-        return ExitCode::FAILURE;
+    // `--forward` is a file-only feature (it targets a source line in a saved
+    // document and can hand off to an instance that already has that file open).
+    // It is meaningless for a stream, so reject the combination up front.
+    if cli.forward.is_some() && source.is_stdin() {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--forward requires a file argument; it cannot be used with stdin (`-`)",
+            )
+            .exit();
     }
 
-    // Forward editor sync (DESIGN D7): if `--forward <line>` is given and an
-    // instance already has this file open, hand it the jump over D-Bus and exit
-    // without opening a second window (zathura's `--synctex-forward` behaviour).
-    // Otherwise fall through and open normally, jumping once the load finishes.
-    if let Some(line) = cli.forward
-        && shell::dbus::forward_to_running_instance(&file, line)
-    {
-        return ExitCode::SUCCESS;
-    }
+    // Resolve a file source to an absolute, existing path (and take the D-Bus
+    // forward-to-running-instance shortcut). Stdin passes straight through.
+    let source = match source {
+        Source::File(path) => {
+            let path = match std::path::absolute(&path) {
+                Ok(path) => path,
+                Err(err) => {
+                    eprintln!("jumanji: {}: {err}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            if !path.exists() {
+                eprintln!("jumanji: {}: no such file", path.display());
+                return ExitCode::FAILURE;
+            }
+            // Forward editor sync (DESIGN D7): if `--forward <line>` is given and
+            // an instance already has this file open, hand it the jump over
+            // D-Bus and exit without opening a second window (zathura's
+            // `--synctex-forward`). Otherwise fall through and open normally.
+            if let Some(line) = cli.forward
+                && shell::dbus::forward_to_running_instance(&path, line)
+            {
+                return ExitCode::SUCCESS;
+            }
+            Source::File(path)
+        }
+        Source::Stdin => Source::Stdin,
+    };
 
     // Malformed config is surfaced but non-fatal: the reader must still open.
     let config = match Config::load(config::xdg_config_dir().as_deref()) {
@@ -80,7 +115,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let exit = shell::app::run(file, config, cli.forward);
+    let exit = shell::app::run(source, config, cli.forward);
     if exit == glib::ExitCode::SUCCESS {
         ExitCode::SUCCESS
     } else {

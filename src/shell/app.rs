@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use gtk::gdk::{Key as GdkKey, ModifierType};
 use gtk::gio;
@@ -27,10 +28,12 @@ use crate::core::jumplist::Jumplist;
 use crate::core::keymap::{Key, KeyPress, Keymap, MatchResult, Matcher};
 use crate::core::marks::{Marks, Position};
 use crate::core::pipeline::{self, Options as RenderOptions};
+use crate::core::source::Source;
 use crate::core::{Action, Direction, Heading, Mode};
 
 use super::bar::{Bar, Prompt};
 use super::dbus;
+use super::stdin::StdinReader;
 use super::toc::TocView;
 use super::view::{View, ViewportState, ZoomAnchor};
 use super::watch::{FileEvent, Watch};
@@ -75,9 +78,18 @@ struct Completion {
 
 /// Mutable shell state shared across GTK callbacks.
 struct Shell {
+    /// The document's base path: the real file, or — for a stdin stream — a
+    /// sentinel under the current directory (`<cwd>/stdin.md`) so document-
+    /// relative images and `.md` links resolve against the CWD, which is what a
+    /// pipe user expects. Never read/written for stdin (content comes from
+    /// [`stdin_buffer`](Self::stdin_buffer)).
     file: PathBuf,
-    /// The document's basename, restored to the statusbar's left field after a
-    /// transient message or mode label clears it.
+    /// The content buffer when reading stdin (`Some` ⇒ this is a stdin
+    /// document). The reader thread appends bytes; renders snapshot it. `None`
+    /// for a file document.
+    stdin_buffer: Option<Arc<Mutex<Vec<u8>>>>,
+    /// The document's basename (or `stdin`), restored to the statusbar's left
+    /// field after a transient message or mode label clears it.
     filename: String,
     /// Live options, mutated by `:set`; the source of truth the derived render
     /// options and step fields are re-synced from.
@@ -150,33 +162,63 @@ struct Shell {
     history: History,
     _watch: Option<Watch>,
     _theme_watch: Option<Watch>,
+    /// The stdin reader thread + poll source, for a stdin document. Dropping it
+    /// stops the streaming updates.
+    _stdin: Option<StdinReader>,
     /// Keeps the per-instance D-Bus name owned for the process lifetime.
     _dbus: Option<gtk::gio::OwnerId>,
 }
 
-/// Launch the application for `file` with the resolved `config`. `forward` is an
-/// optional `--forward <line>` to jump to once the initial load finishes.
-pub fn run(file: PathBuf, config: Config, forward: Option<u32>) -> glib::ExitCode {
+impl Shell {
+    /// Whether this is a stdin (streaming) document rather than a file.
+    fn is_stdin(&self) -> bool {
+        self.stdin_buffer.is_some()
+    }
+}
+
+/// Launch the application for `source` with the resolved `config`. `forward` is
+/// an optional `--forward <line>` to jump to once the initial load finishes
+/// (file sources only; rejected for stdin before we get here).
+pub fn run(source: Source, config: Config, forward: Option<u32>) -> glib::ExitCode {
     let app = Application::builder().application_id(APP_ID).build();
 
     let keymap = Rc::new(config.keymap);
     let options = config.options;
 
     app.connect_activate(move |app| {
-        build_ui(app, file.clone(), options.clone(), keymap.clone(), forward);
+        build_ui(
+            app,
+            source.clone(),
+            options.clone(),
+            keymap.clone(),
+            forward,
+        );
     });
 
     // We parse args ourselves (see `main`); don't let GTK interpret argv.
     app.run_with_args::<&str>(&[])
 }
 
+/// The document base path for `source`: the real file, or a sentinel under the
+/// current directory for stdin so relative images/links resolve against the CWD.
+fn base_path(source: &Source) -> PathBuf {
+    match source {
+        Source::File(path) => path.clone(),
+        Source::Stdin => std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("stdin.md"),
+    }
+}
+
 fn build_ui(
     app: &Application,
-    file: PathBuf,
+    source: Source,
     options: Options,
     keymap: Rc<Keymap>,
     forward: Option<u32>,
 ) {
+    let is_stdin = source.is_stdin();
+    let file = base_path(&source);
     let view = View::new(options.selection_clipboard);
     let toc_view = TocView::new();
     let bar = Bar::new();
@@ -200,10 +242,7 @@ fn build_ui(
         .child(&layout)
         .build();
 
-    let filename = file
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| file.to_string_lossy().into_owned());
+    let filename = source.display_name();
     bar.set_filename(&filename);
 
     let config_dir = config::xdg_config_dir();
@@ -212,6 +251,7 @@ fn build_ui(
 
     let shell = Rc::new(RefCell::new(Shell {
         file: file.clone(),
+        stdin_buffer: None,
         filename,
         options: options.clone(),
         render_opts: RenderOptions {
@@ -259,13 +299,19 @@ fn build_ui(
         history,
         _watch: None,
         _theme_watch: None,
+        _stdin: None,
         _dbus: None,
     }));
 
     // Restore any saved window-state for this file so the first painted frame is
     // already at the right place. Scroll is deferred to load-finished. Read the
     // value out before taking the mutable borrow (avoid a reentrant borrow).
-    let saved = shell.borrow().history.get(&file);
+    // Skipped for stdin: a stream has no stable identity to key history on.
+    let saved = if is_stdin {
+        None
+    } else {
+        shell.borrow().history.get(&file)
+    };
     if let Some(st) = saved {
         let mut s = shell.borrow_mut();
         s.text_zoom = st.text_zoom;
@@ -282,7 +328,13 @@ fn build_ui(
     connect_motion(&shell);
     connect_input_entry(&shell);
     connect_close(&shell);
-    start_watch(&shell);
+    // A stdin document streams from a reader thread; a file document watches the
+    // filesystem for live reload. The two are mutually exclusive.
+    if is_stdin {
+        start_stdin(&shell);
+    } else {
+        start_watch(&shell);
+    }
     start_theme_watch(&shell);
     serve_dbus(&shell);
 
@@ -331,7 +383,15 @@ fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
     // User CSS themes are reloaded on every render so edits hot-swap in.
     s.render_opts.extra_css = load_themes(&s.config_dir);
     let path = s.file.clone();
-    match std::fs::read_to_string(&path) {
+    // Content comes from the stdin buffer for a stream, else from the file. A
+    // chunk boundary may split a multibyte char; `from_utf8_lossy` renders it as
+    // a replacement char that self-corrects on the next chunk.
+    let md = match &s.stdin_buffer {
+        Some(buf) => Ok(String::from_utf8_lossy(&buf.lock().unwrap()).into_owned()),
+        None => std::fs::read_to_string(&path)
+            .map_err(|err| format!("cannot read {}: {err}", path.display())),
+    };
+    match md {
         Ok(md) => {
             let doc = pipeline::render(&md, &s.render_opts);
             s.toc = doc.toc.clone();
@@ -342,9 +402,8 @@ fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
             s.view.set_dark(dark);
             s.view.load_document(&doc, &path);
         }
-        Err(err) => {
-            s.bar
-                .set_message(&format!("cannot read {}: {err}", path.display()));
+        Err(msg) => {
+            s.bar.set_message(&msg);
         }
     }
 }
@@ -623,9 +682,13 @@ fn connect_close(shell: &Rc<RefCell<Shell>>) {
     let shell = shell.clone();
     window.connect_close_request(move |_| {
         let mut s = shell.borrow_mut();
-        record_current_state(&mut s);
-        if let Some(dir) = s.data_dir.clone() {
-            let _ = write_history(&dir, &s.history);
+        // A stdin stream has no file identity to persist window-state against
+        // (zathura does not remember stdin documents either), so skip history.
+        if !s.is_stdin() {
+            record_current_state(&mut s);
+            if let Some(dir) = s.data_dir.clone() {
+                let _ = write_history(&dir, &s.history);
+            }
         }
         glib::Propagation::Proceed
     });
@@ -634,6 +697,17 @@ fn connect_close(shell: &Rc<RefCell<Shell>>) {
 fn start_watch(shell: &Rc<RefCell<Shell>>) {
     let path = shell.borrow().file.clone();
     restart_watch(shell, &path);
+}
+
+/// Start streaming from standard input: install the reader (its buffer becomes
+/// the render source) and re-render on each debounced batch, preserving the
+/// reading position exactly like live reload. EOF just stops the updates.
+fn start_stdin(shell: &Rc<RefCell<Shell>>) {
+    let handler_shell = shell.clone();
+    let reader = StdinReader::start(move || render_and_load(&handler_shell, true));
+    let mut s = shell.borrow_mut();
+    s.stdin_buffer = Some(reader.buffer());
+    s._stdin = Some(reader);
 }
 
 /// (Re)point the document watcher at `path`, replacing any existing one.
@@ -681,9 +755,17 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
         Rc::new(move |invocation: gtk::gio::DBusMethodInvocation| {
             let (view, file, dark, zoom, text_zoom, section, toc_len, loaded, mode) = {
                 let s = shell.borrow();
+                // Report `stdin` for a stream, not its CWD sentinel path: it is
+                // honest, and it keeps the D-Bus forward-search (which matches on
+                // this field, DESIGN D7) from ever treating a stream as a file.
+                let file = if s.is_stdin() {
+                    "stdin".to_string()
+                } else {
+                    s.file.to_string_lossy().into_owned()
+                };
                 (
                     s.view.clone(),
-                    s.file.to_string_lossy().into_owned(),
+                    file,
                     s.dark,
                     s.zoom,
                     s.text_zoom,
@@ -740,6 +822,14 @@ fn goto_source_line(shell: &Rc<RefCell<Shell>>, line: u32) {
 /// and spawn the editor detached — never blocking the UI. Any failure (bad line,
 /// no program, spawn error) is a statusbar notice, never a crash.
 fn on_editor_sync(shell: &Rc<RefCell<Shell>>, line: &str) {
+    // A stdin stream has no file to point an editor at, so `%f` is meaningless.
+    if shell.borrow().is_stdin() {
+        shell
+            .borrow()
+            .bar
+            .set_message("editor sync unavailable for a stdin document (no file)");
+        return;
+    }
     let Ok(line) = line.trim().parse::<u32>() else {
         return;
     };
@@ -1397,7 +1487,15 @@ fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf) {
     }
     {
         let mut s = shell.borrow_mut();
-        record_current_state(&mut s);
+        // Opening a file ends any stdin stream and starts a normal file document
+        // (with live reload, history, editor sync). Persist the *previous* file's
+        // position first, but not a stream's (it has no history identity).
+        if s.is_stdin() {
+            s.stdin_buffer = None;
+            s._stdin = None;
+        } else {
+            record_current_state(&mut s);
+        }
         if s.mode == Mode::Toc {
             leave_toc(&mut s);
         }
