@@ -2,6 +2,61 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — editor pairing / sync (M3, DESIGN D7 — the SyncTeX analogue)
+
+**What:** forward and reverse editor sync, zathura's `--synctex-forward` /
+`synctex-editor-command` mapped onto markdown.
+
+- **Forward (editor → reader).** New `--forward <LINE>` CLI flag + `GotoLine(line:
+  u32)` D-Bus method on the per-instance interface. Scrolls to the element whose
+  source line is the greatest at-or-before `LINE` (jumplist-pushed, like any
+  jump). `jumanji --forward N file.md` first tries to forward to an instance that
+  already has `file.md` open — enumerate `…jumanji.PID-` names, read each's
+  `GetState` `file` (reused, no bespoke `GetFile`), and on a canonical-path match
+  call `GotoLine(N)` and **exit 0 without a window**; otherwise open and jump
+  after load (`pending_forward`). The discovery/forward runs before any GTK init
+  (`shell::dbus::forward_to_running_instance`), so it needs no display.
+- **Reverse (reader → editor).** A capture-phase Ctrl+primary-click user-script
+  walks up to the nearest `[data-sourcepos]` ancestor and posts its line over a
+  new `editorsync` script-message handler; the shell substitutes it into
+  `editor-command` and spawns the editor detached via `gio::Subprocess` (reaped
+  by the main loop, never blocking). Only Ctrl+click is intercepted, so plain
+  clicks / link routing / selection are untouched; failures are statusbar notices.
+- **`editor-command` (config, typed).** Default `$EDITOR +%l %f` (zathura
+  placeholder style). Parsed once into `core::editor::EditorCommand` — a typed
+  argv template (tokens of literal / `%l` / `%f` segments), so substitution is a
+  pure fold and a path with spaces stays one argument (argv-based spawn, not a
+  shell). The shell expands a leading `$VAR` per token at spawn time. Config-only,
+  like `[renderers]` (not a `:set` target).
+- **Source-line map.** Enabled comrak `render.sourcepos` → `data-sourcepos` on
+  every native block/inline element: attribute-only, so **zero structural/CSS
+  change** (chosen over wrapping blocks in marker divs, which would break the
+  stylesheet's child/sibling selectors). The code-fence passes replace their node
+  with a raw `HtmlBlock` (which comrak emits without sourcepos) but keep its
+  `.sourcepos`, so one core pass (`pipeline::annotate_html_block_lines`) injects a
+  matching `data-sourcepos` into each wrapper's opening tag (synthetic table-wrap
+  divs marked line 0 → skipped). One uniform attribute; forward and reverse JS
+  read the same thing; document order keeps start lines non-decreasing.
+
+**Deviation from the D7 sketch:** the attribute is comrak's `data-sourcepos`
+(explicitly the design's first-choice option), not a custom `data-line` — its
+native, no-layout-change emission is why it wins. Consequence: inline elements
+are annotated too, which only sharpens reverse-click precision.
+
+**Tests:** **146 → 160 unit** (`core::editor`: 8 — placeholder parse/substitution,
+spaces-in-path, `%%`, unknown/trailing `%`, empty-template error; `core::config`:
+2 — `editor-command` default/parse + empty error; `core::pipeline`: 4 —
+`inject_sourcepos`, block+wrapper line emission, monotonic non-decreasing lines,
+table-wrap carries no line). **26 → 30 e2e** (`GotoLine` scrolls; `--forward`
+fresh-launch jumps after load; second-instance `--forward` drives the running
+reader and exits 0 without a window; reverse Ctrl+click spawns `editor-command`
+into a recorder script and the argv is asserted — deterministic, not flaky). A
+handful of pipeline unit tests loosened exact-tag asserts (`<table>` → `<table`,
+etc.) now that `data-sourcepos` is present. `cargo test && clippy -D warnings &&
+fmt` all clean. No new dependencies.
+
+Next: AUR package and stdin streaming remain for M3.
+
 ## 2026-07-06 — fix: MathML layout broken by mathjax2 font shadowing (D8)
 
 **What:** on this machine MathML rendered with wildly wrong vertical layout —

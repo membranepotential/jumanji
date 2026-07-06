@@ -46,6 +46,16 @@
 # "primary" (X11 PRIMARY, middle-click paste) or "clipboard" (Ctrl-V paste).
 # selection-clipboard = "primary"
 
+# Reverse editor sync (DESIGN D7): the command run on a Ctrl+click, to open your
+# editor at the clicked element's source line. `%l` is the line, `%f` the file
+# path (`%%` is a literal `%`), zathura's synctex-placeholder style. A leading
+# `$VAR` is expanded from the environment, and the spawn is argv-based (not a
+# shell), so a file path with spaces stays a single argument. The complement is
+# forward sync: `jumanji --forward <line> file.md` points an already-open reader
+# (or a fresh one) at that source line — wire it into your editor to jump both
+# ways. Examples: "nvim +%l %f", "code -g %f:%l", "gvim --remote +%l %f".
+# editor-command = "$EDITOR +%l %f"
+
 # External fence renderers (DESIGN D6.2). Each key is a fenced-code-block
 # language token; the value is a shell command run via `sh -c` with the fence
 # body piped in on stdin. Whatever the command writes to stdout (SVG or HTML)

@@ -78,6 +78,15 @@ restyle the reader; GFM alerts (`> [!NOTE]` …) render as callouts. LaTeX math 
 inline `$…$` and display `$$…$$`, matrices and aligned environments — is
 typeset to native MathML (no JavaScript), and recolors with the page.
 
+**Editor pairing** (zathura's SyncTeX, for markdown). Forward: `jumanji
+--forward <line> file.md` scrolls the reader to that source line — if an instance
+already has the file open it is driven over D-Bus and no new window opens,
+otherwise one opens and jumps once loaded. Reverse: `Ctrl`+click any element to
+open your editor at its source line via `editor-command` (`%l` = line, `%f` =
+file; default `$EDITOR +%l %f`). Wire `--forward` into your editor's cursor-moved
+hook and the click into a listener for round-trip navigation between source and
+render.
+
 External fence renderers extend the diagram support to any tool: map a fence
 language to a shell command in `[renderers]` (e.g. `d2 = "d2 - -"`, `dot =
 "dot -Tsvg"`) and jumanji pipes the fence body to it and inlines the SVG/HTML it
@@ -94,6 +103,7 @@ scroll-step = 60        # pixels per j/k
 zoom-step = 0.1
 default-recolor = false # start in dark mode
 page-width = 720        # px, content column width
+editor-command = "$EDITOR +%l %f"  # reverse editor sync (Ctrl+click), %l line / %f file
 
 [keys.normal]
 "J" = "section next"
