@@ -78,7 +78,11 @@ impl View {
             settings.set_enable_offline_web_application_cache(false);
             settings.set_javascript_can_access_clipboard(false);
             settings.set_javascript_can_open_windows_automatically(false);
-            settings.set_enable_smooth_scrolling(true);
+            // Zathura semantics: scrolling is immediate. Smooth scrolling makes
+            // WebKit animate every wheel tick (~100 ms each), which reads as lag
+            // on large documents; keyboard scrolls are JS `scrollBy` and are
+            // instant either way.
+            settings.set_enable_smooth_scrolling(false);
         }
 
         Self {
@@ -131,14 +135,19 @@ impl View {
     }
 
     pub fn scroll_by(&self, dx: i64, dy: i64) {
-        self.run_js(&format!("window.scrollBy({dx}, {dy});"));
+        // `behavior: 'instant'` pins the zathura-instant semantics regardless of
+        // the engine's smooth-scrolling setting: a repeated key must never
+        // restart an in-flight scroll animation.
+        self.run_js(&format!(
+            "window.scrollBy({{left: {dx}, top: {dy}, behavior: 'instant'}});"
+        ));
     }
 
     /// Scroll by a fraction of the viewport height (half-page navigation).
     pub fn scroll_half_page(&self, down: bool, times: u32) {
         let sign = if down { 1.0 } else { -1.0 };
         self.run_js(&format!(
-            "window.scrollBy(0, {sign} * (window.innerHeight / 2) * {times});"
+            "window.scrollBy({{top: {sign} * (window.innerHeight / 2) * {times}, behavior: 'instant'}});"
         ));
     }
 

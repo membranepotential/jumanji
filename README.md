@@ -55,19 +55,26 @@ webview sees a keypress, so the vim layer is absolute. See
 | `h` / `l` | scroll left / right |
 | `d` / `u` | scroll half page down / up |
 | `J` / `K` | next / previous section (heading) |
-| `gg` / `G` | go to top / bottom |
-| `+` / `-` / `=` | zoom in / out / reset |
+| `gg` / `G` / `<N>G` | go to top / bottom / section N |
+| `+` / `-` / `=` | zoom in / out / reset (reset clears text zoom too) |
 | `/` | search (`n` / `N` for next / previous match) |
-| `Tab` | table of contents |
+| `Tab` | table of contents (`j`/`k` move, `l`/`h` expand/collapse, `Enter` jump) |
+| `f` / `F` | follow link via hints / show link target |
+| `m<x>` / `'<x>` | set / jump to quickmark `x` |
+| `Ctrl-o` / `Ctrl-i` | jumplist back / forward |
 | `Ctrl-r` | recolor (dark mode) |
 | `r` | reload file |
-| `:` | command line |
+| `:` | command line (`open`, `set`, any action; `Tab` completes) |
 | `Esc` | abort / back to normal mode |
 | `q` | quit |
 
 Counts work as prefixes (`5j`). Every binding is remappable in the config file.
 
-Mouse: wheel scrolls, `Ctrl`+wheel zooms, links are clickable.
+Mouse: wheel scrolls, `Ctrl`+wheel zooms geometrically, `Ctrl`+`Shift`+wheel
+zooms the text, links are clickable (external links open in your browser —
+jumanji itself never touches the network). Scroll position and zoom are
+remembered per file. Drop `.css` files into `~/.config/jumanji/themes/` to
+restyle the reader; GFM alerts (`> [!NOTE]` …) render as callouts.
 
 ## Configuration
 

@@ -249,9 +249,16 @@ Functional core, imperative shell. The core is pure and GTK-free.
 
 ## Risks & mitigations
 
-- **WebKitGTK footprint/cold-start** — no credible published numbers; measure a
-  hello-world webkit6 window on the target machine early (M1). Escape hatch:
-  core pipeline is UI-independent (D2).
+- **WebKitGTK footprint/cold-start** — *measured (2026-07, release build,
+  target machine):* spawn → content ≈ **950–1050 ms**, of which the Rust
+  pipeline is ~20 ms; the rest is WebKit web-process spawn (~250 ms) plus
+  one-time engine warmup (~440 ms). Surgical fixes were tested and disproven
+  (pre-warm, load-before-present, hwaccel/a11y toggles: ±0). A warm process
+  re-loads in ~35 ms, so the honest levers are architectural, both deferred:
+  a daemon/window-reuse mode over the D-Bus seam (D7), or the egui escape
+  hatch (D2). Smooth scrolling is deliberately **off** (zathura-instant
+  semantics; WebKit otherwise animates every wheel tick ~100 ms, 4× the
+  composited frames on SVG-heavy pages).
 - **merman parity gaps** — degrade to highlighted code block + error note;
   external-renderer seam (D6.2) as user-side fallback.
 - **Editor save races** — editors rename-replace on save; watch the parent

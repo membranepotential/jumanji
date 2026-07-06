@@ -2,6 +2,78 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — v0.2.0: performance investigation — measure, don't guess
+
+User: "startup could be faster, scrolling feels janky." A dedicated
+measurement pass (release build, headless Xvfb, medians over runs, ffmpeg
+frame capture for what the user actually sees) instead of speculative fixes:
+
+- **Startup ≈ 950–1050 ms is a WebKitGTK floor, not app code.** The Rust
+  pipeline renders the full demo (11 mermaid diagrams) in **20 ms**; WebKit
+  web-process spawn (253 ms) + one-time engine warmup/layout (436 ms)
+  dominate, with a blank window from ~290 ms until content pops. Every
+  surgical fix was tested and disproven (pre-warm, load-before-present —
+  250 ms *worse*, hwaccel toggles, a11y off, font trims: all ±0). This is
+  DESIGN.md D2's documented risk materializing. Real levers are
+  architectural and deferred: a daemon/window-reuse mode over the existing
+  D-Bus seam (a warm process loads in 35 ms), or D2's egui escape hatch.
+- **Scroll jank = smooth scrolling × SVG compositing.** Headless scrolling
+  is mechanically flawless (zero lost distance over 60-key storms; the
+  per-key status JS round-trip is 0.28 ms — debouncing would be pointless).
+  But `enable_smooth_scrolling(true)` makes WebKit animate every wheel tick
+  (~100 ms, 4× the composited frames for the same distance). **Applied:**
+  smooth scrolling off + explicit `behavior:'instant'` in the scroll JS —
+  zathura semantics, and a repeated `j` can never restart an in-flight
+  animation. Feel needs confirming on the real GPU (Xvfb has none), along
+  with two user-side experiments: `WEBKIT_DISABLE_DMABUF_RENDERER=1` and
+  touchpad inertia through the capture-phase scroll controller.
+- **Rendering needs no work in release.** Syntax set/theme already
+  OnceLock-cached; live reload 57–78 ms end-to-end. Debug builds were
+  10–20× slower in the pipeline: **applied** `[profile.dev.package."*"]
+  opt-level = 2` (deps optimized once, the crate itself stays fast to
+  rebuild). Disproven-and-not-built: status-bar debounce, mermaid
+  content-hash cache, syntax-set pre-warm thread.
+
+## 2026-07-06 — v0.2.0: milestone M2 — TOC, hints, command line, marks, persistence
+
+M2 complete, split core-first then shell, both halves by Opus subagents
+against a pinned contract; 105 unit + 18 e2e tests, clippy/fmt clean.
+
+Core (pure, unit-tested): `command.rs` (`:` parse + completion; path
+completion delegated to the shell via `Completions::Path`), `jumplist.rs`
+(vim semantics, cap 100), `marks.rs` (char registers, position+zoom),
+`history.rs` (per-file state, TOML array-of-tables for lossless LRU
+round-trips, cap 500), keymap char-argument bindings (`m`/`'` capture the
+next key as a typed argument — no stringly dispatch), `Mode::Toc` default
+table, runtime `Options::set` returning a typed `SetEffect`
+(Rerender/Recolor/None), comrak GFM alerts (verified against vendored
+source: `extension.alerts`, `.markdown-alert-<kind>` classes) styled via
+`--alert-*` accents + `color-mix` tints, and `extra_css` emission for user
+themes.
+
+Shell: TOC mode as a `gtk::Stack` page (collapsible outline tree, dispatcher
+driven, counts work); `f`/`F` link hints (overlay JS labels visible links,
+posts `label\thref` back; shell-local hint input state, *not* a keymap
+mode); navigation policy that denies everything except our programmatic
+loads — fragment clicks scroll in-place (jumplist push), local `.md` links
+open in-window and re-point the watcher, anything else goes to the system
+handler (the reader itself stays offline); `:` command line with typed
+prompts, Tab completion incl. real filesystem completion; quickmarks +
+jumplist wired through async scroll queries; per-file scroll/zoom/text-zoom
+persistence at `$XDG_DATA_HOME/jumanji/history.toml` (restored on open,
+flushed synchronously on close — two RefCell-reentrancy bugs found by the
+new e2e tests and fixed); user CSS themes hot-swapped by a second directory
+watcher; `GetState.mode` now truthful (normal/toc/hint/command/search).
+The e2e harness gained private `XDG_DATA_HOME` isolation and a
+clean-quit + relaunch flow to prove persistence.
+
+Deliberately skipped: window-geometry persistence (core history stores
+per-file entries only; a second format wasn't worth it), mouse-click e2e for
+fragments (hint-follow exercises the identical routing deterministically).
+
+Next: M3 — editor sync (D-Bus forward/reverse), external fence renderers,
+math, stdin streaming; decide on the AUR publish.
+
 ## 2026-07-06 — Arch/AUR packaging
 
 Added real Arch Linux packaging so jumanji installs and upgrades like any
