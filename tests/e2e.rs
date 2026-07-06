@@ -17,7 +17,7 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -293,6 +293,76 @@ impl Harness {
         h.xdotool(["windowfocus", "--sync", &h.window_id]);
 
         h
+    }
+
+    /// Launch `jumanji -` with a piped stdin, returning the harness and the
+    /// child's stdin handle so the test can stream markdown in (and drop it to
+    /// signal EOF). Mirrors [`launch_in_forward`](Self::launch_in_forward) but
+    /// passes `-` and pipes stdin instead of a file argument. Blocks until the
+    /// initial load finishes (an empty stream still renders and reports loaded).
+    fn launch_stdin() -> (Self, std::process::ChildStdin) {
+        let id = next_display();
+        let config_home = std::env::temp_dir().join(format!("jumanji-e2e-xdg-stdin-{id}"));
+        let data_home = std::env::temp_dir().join(format!("jumanji-e2e-data-stdin-{id}"));
+        let _ = fs::create_dir_all(&config_home);
+        let _ = fs::create_dir_all(&data_home);
+
+        let display = next_display();
+        let display_arg = format!(":{display}");
+
+        let xvfb = Command::new("Xvfb")
+            .arg(&display_arg)
+            .args(["-screen", "0", "1280x1024x24"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn Xvfb");
+        wait_for(Duration::from_secs(10), || {
+            Path::new(&format!("/tmp/.X11-unix/X{display}")).exists()
+        })
+        .expect("Xvfb socket did not appear");
+
+        let (dbus, dbus_addr) = spawn_private_bus();
+
+        let mut app = Command::new(env!("CARGO_BIN_EXE_jumanji"))
+            .arg("-")
+            .env("DISPLAY", &display_arg)
+            .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("XDG_DATA_HOME", &data_home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn jumanji -");
+        let stdin = app.stdin.take().expect("child stdin pipe");
+        let dest = format!("{INTERFACE}.PID-{}", app.id());
+
+        let conn = gio::DBusConnection::for_address_sync(
+            &dbus_addr,
+            gio::DBusConnectionFlags::AUTHENTICATION_CLIENT
+                | gio::DBusConnectionFlags::MESSAGE_BUS_CONNECTION,
+            None,
+            gio::Cancellable::NONE,
+        )
+        .expect("connect to private session bus");
+
+        let mut h = Harness {
+            display,
+            dbus_addr,
+            conn,
+            dest,
+            window_id: String::new(),
+            file: PathBuf::from("-"),
+            app,
+            dbus,
+            xvfb,
+        };
+
+        h.wait_for_state("initial stdin load", Duration::from_secs(20), |s| s.loaded);
+        h.window_id = h.find_window();
+        h.xdotool(["windowfocus", "--sync", &h.window_id]);
+        (h, stdin)
     }
 
     /// Type a UTF-8 string into the focused widget (the input bar), for driving
@@ -1319,6 +1389,121 @@ fn external_fence_renderer_produces_output() {
 
     drop(h);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// stdin streaming (DESIGN M3)
+// ---------------------------------------------------------------------------
+
+/// A markdown fragment with `count` `## Section <first..>` headings, each padded
+/// with filler so the rendered document is tall enough to scroll. `title` is
+/// prepended (an extra `#` heading) when non-empty.
+fn stdin_doc(title: &str, first: u32, count: u32) -> String {
+    let mut s = String::new();
+    if !title.is_empty() {
+        s.push_str(&format!("# {title}\n"));
+    }
+    for i in first..first + count {
+        s.push_str(&format!("\n## Section {i}\n\n"));
+        for _ in 0..14 {
+            s.push_str("Lorem ipsum dolor sit amet consectetur adipiscing elit sed do.\n");
+        }
+    }
+    s
+}
+
+#[test]
+fn stdin_dash_renders_after_content_then_close() {
+    // `jumanji -` with content written to stdin then closed must render: the TOC
+    // fills in and the document reports loaded.
+    let Some(_g) = setup_guard() else { return };
+    let (h, mut stdin) = Harness::launch_stdin();
+
+    let doc = stdin_doc("Streamed", 1, 3); // # + 3 ## => toc_len 4
+    stdin.write_all(doc.as_bytes()).expect("write stdin");
+    stdin.flush().expect("flush stdin");
+    drop(stdin); // EOF
+
+    let s = h.wait_for_state("stdin content renders a TOC", SETTLE, |s| {
+        s.loaded && s.toc_len >= 4
+    });
+    assert!(
+        s.toc_len >= 4,
+        "expected the streamed headings in the TOC, got {}",
+        s.toc_len
+    );
+}
+
+#[test]
+fn stdin_streaming_grows_toc_and_preserves_scroll() {
+    // Progressive rendering: write half a document, assert it renders; scroll
+    // into it; write the rest, assert the TOC grows and the reading position is
+    // preserved across the re-render (mirrors live_reload_grows_toc_and_preserves
+    // _dark, but driven by stdin chunks instead of file edits).
+    let Some(_g) = setup_guard() else { return };
+    let (h, mut stdin) = Harness::launch_stdin();
+
+    // Part one: title + 3 sections => toc_len 4.
+    let part1 = stdin_doc("Streamed", 1, 3);
+    stdin.write_all(part1.as_bytes()).expect("write part 1");
+    stdin.flush().expect("flush part 1");
+    let first = h.wait_for_state("first chunk renders", SETTLE, |s| s.toc_len >= 4);
+    let toc0 = first.toc_len;
+
+    // Scroll into the rendered content over D-Bus (no key focus needed).
+    h.execute_action("scroll down", 8);
+    let scrolled = h
+        .wait_for_state("scrolled into streamed content", SETTLE, |s| {
+            s.scroll_y > 0.0
+        })
+        .scroll_y;
+
+    // Part two: 3 more sections => toc grows to 7.
+    let part2 = stdin_doc("", 4, 3);
+    stdin.write_all(part2.as_bytes()).expect("write part 2");
+    stdin.flush().expect("flush part 2");
+    drop(stdin); // EOF
+
+    let grown = h.wait_for_state("second chunk grows the TOC", Duration::from_secs(10), |s| {
+        s.toc_len > toc0
+    });
+    assert!(
+        grown.toc_len > toc0,
+        "streaming more content should grow the TOC: {toc0} -> {}",
+        grown.toc_len
+    );
+    // The re-render preserves the reading position, exactly like live reload.
+    // `toc_len` updates synchronously as the new doc is built, but the scroll
+    // restore lands later in the load-finished handler, so wait for the position
+    // to settle back — a broken preservation (stuck at the post-reload top) would
+    // time out here rather than pass by luck.
+    let settled = h.wait_for_state("reading position restored after re-render", SETTLE, |s| {
+        s.toc_len > toc0 && (s.scroll_y - scrolled).abs() < 5.0
+    });
+    assert!(
+        (settled.scroll_y - scrolled).abs() < 5.0,
+        "scroll position must be preserved across a streaming re-render: \
+         was {scrolled}, now {}",
+        settled.scroll_y
+    );
+}
+
+#[test]
+fn stdin_instant_eof_renders_fine() {
+    // `echo | jumanji -` — stdin closes immediately (empty). The reader hits EOF
+    // at once; the app must render fine (loaded, driveable), never crash or hang.
+    let Some(_g) = setup_guard() else { return };
+    let (h, stdin) = Harness::launch_stdin();
+    drop(stdin); // immediate EOF, no bytes written
+
+    // Still loaded and answering D-Bus after the instant EOF.
+    let s = h.wait_for_state("instant-EOF stdin stays loaded", SETTLE, |s| s.loaded);
+    assert!(s.loaded, "empty stdin should still render and load");
+    // And it still drives (no wedged main loop after EOF).
+    h.execute_action("recolor", 1);
+    h.wait_for_state("instant-EOF stdin still responds to actions", SETTLE, |s| {
+        s.dark
+    });
 }
 
 // ---------------------------------------------------------------------------
