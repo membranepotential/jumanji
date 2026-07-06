@@ -508,7 +508,11 @@ fn flush_wheel_zoom(shell: &Rc<RefCell<Shell>>) {
 /// Translate window→webview (GTK logical px), then divide by the zoom level to
 /// get CSS px for `elementFromPoint`: the CSS viewport is `deviceWidth /
 /// (scale × zoom)` and GTK logical px is `deviceWidth / scale`, so the display
-/// scale factor cancels and only the zoom divisor remains.
+/// scale factor cancels and only the zoom divisor remains. **Must be evaluated
+/// at the zoom level the page is currently laid out at** (the pre-change zoom):
+/// the divisor is that level, so calling it after updating `Shell.zoom` would
+/// convert with the wrong scale and misplace the anchor — the error grows with
+/// distance from the origin (the cursor-near-bottom bug).
 fn cursor_anchor(s: &Shell) -> ZoomAnchor {
     let (wx, wy) = s.pointer;
     let webview = s.view.widget();

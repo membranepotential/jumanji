@@ -710,6 +710,53 @@ fn ctrl_wheel_zooms_towards_cursor_without_overflow() {
 }
 
 #[test]
+fn ctrl_wheel_zoom_anchors_with_cursor_near_bottom() {
+    // Regression for the cursor-near-bottom anchor bug: the capture JS runs while
+    // the page is still laid out at the OLD zoom, so the window→CSS px conversion
+    // (`cursor_anchor` divides by the zoom) must use the OLD zoom. The bug set
+    // `s.zoom` to the new level *before* computing the anchor, so the divisor was
+    // wrong and the error grew with distance from the origin — worst with the
+    // cursor low in the viewport. Precise element-level anchoring isn't
+    // observable over the GetState surface, so we assert the robust invariants
+    // the brief calls for: no page h-scroll, and the reflow moves the reading
+    // position in the correct direction (zoom-in anchored below the top scrolls
+    // down) without flinging to the top.
+    let Some((_g, h)) = setup() else { return };
+
+    // Scroll into the middle of the document first.
+    h.execute_action("scroll down", 12);
+    let before = h.wait_for_state("scrolled to mid", SETTLE, |s| {
+        s.scroll_y > 0.0 && s.scroll_percent > 5 && s.scroll_percent < 90
+    });
+
+    // Pointer ~80% down the ~800 px-tall window, then three ticks in.
+    h.mouse_move(200, 620);
+    h.ctrl_wheel(true, 3, 5);
+    let after = h.wait_for_state("cursor-near-bottom zoom applied", SETTLE, |s| s.zoom > 1.0);
+
+    assert!(
+        after.doc_scroll_width <= after.viewport_width + 1.0,
+        "no page h-scroll after cursor-near-bottom zoom: scrollWidth {} vs viewport {}",
+        after.doc_scroll_width,
+        after.viewport_width
+    );
+    // Correct direction: anchoring a point below the top while zooming in keeps
+    // that lower point fixed, which scrolls the viewport *down*, never up.
+    assert!(
+        after.scroll_y > before.scroll_y - 1.0,
+        "zoom-in anchored near the bottom must not scroll upward: {} -> {}",
+        before.scroll_y,
+        after.scroll_y
+    );
+    // And it must stay in the document, not fling back to the top.
+    assert!(
+        after.scroll_y > 0.0,
+        "reading position should stay in the document, not jump to the top: y={}",
+        after.scroll_y
+    );
+}
+
+#[test]
 fn ctrl_wheel_burst_coalesces_without_losing_steps() {
     // A rapid 10-tick burst must apply as one coalesced anchored zoom yet lose no
     // step: zoom-step 0.1 × 10 ≈ +1.0, so it settles near 2.0.
