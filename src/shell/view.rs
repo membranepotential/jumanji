@@ -64,6 +64,10 @@ pub struct ViewportState {
     /// Rendered width of the first `<math>` element (0 if none). CSS px. Lets
     /// e2e assert MathML actually laid out with nonzero geometry.
     pub math_width: f64,
+    /// Rendered width of the first external-renderer output (`.rendered-fence
+    /// svg`), 0 if none. CSS px. Lets e2e assert a configured fence renderer
+    /// (DESIGN D6.2) actually produced visible output.
+    pub fence_width: f64,
     /// Computed `color` of the first python function-name span
     /// (`.entity.name.function.python`), as a CSS `rgb(...)` string ("" if the
     /// document has no python code). Lets e2e assert the dark-mode syntax-CSS
@@ -439,12 +443,14 @@ impl View {
              const m = document.querySelector('main') || b; \
              const svg = document.querySelector('.mermaid svg'); \
              const math = document.querySelector('math'); \
+             const rf = document.querySelector('.rendered-fence svg'); \
              const fn = document.querySelector('.entity.name.function.python'); \
              return { y: window.scrollY, p: Math.min(100, Math.max(0, p)), \
                       w: m.offsetWidth, vw: window.innerWidth, \
                       dw: Math.max(d.scrollWidth, b.scrollWidth), \
                       gw: svg ? svg.getBoundingClientRect().width : 0, \
                       mw: math ? math.getBoundingClientRect().width : 0, \
+                      rw: rf ? rf.getBoundingClientRect().width : 0, \
                       fc: fn ? getComputedStyle(fn).color : '' }; })()";
         self.webview.evaluate_javascript(
             script,
@@ -466,6 +472,7 @@ impl View {
                         doc_scroll_width: num("dw"),
                         diagram_width: num("gw"),
                         math_width: num("mw"),
+                        fence_width: num("rw"),
                         fn_color,
                     });
                 }
@@ -477,6 +484,7 @@ impl View {
                     doc_scroll_width: 0.0,
                     diagram_width: 0.0,
                     math_width: 0.0,
+                    fence_width: 0.0,
                     fn_color: String::new(),
                 }),
             },

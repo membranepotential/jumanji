@@ -207,6 +207,10 @@ fn build_ui(app: &Application, file: PathBuf, options: Options, keymap: Rc<Keyma
             font_size_px: options.font_size_px,
             // Populated per-render from `<config>/jumanji/themes/*.css`.
             extra_css: Vec::new(),
+            // External fence renderers are config-only (no runtime `:set`), so
+            // copy them once here; live reload re-runs the pipeline (and thus
+            // the renderers) for free.
+            renderers: options.renderers.clone(),
         },
         config_dir: config_dir.clone(),
         data_dir,
@@ -709,7 +713,7 @@ fn state_json(
         "{{\"file\":{file},\"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
          \"content_width\":{content_width},\"viewport_width\":{viewport_width},\
          \"doc_scroll_width\":{doc_scroll_width},\"diagram_width\":{diagram_width},\
-         \"math_width\":{math_width},\"fn_color\":{fn_color},\
+         \"math_width\":{math_width},\"fence_width\":{fence_width},\"fn_color\":{fn_color},\
          \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded}}}",
         file = json_string(file),
@@ -720,6 +724,7 @@ fn state_json(
         doc_scroll_width = vs.doc_scroll_width,
         diagram_width = vs.diagram_width,
         math_width = vs.math_width,
+        fence_width = vs.fence_width,
         fn_color = json_string(&vs.fn_color),
         mode = json_string(mode),
     )
