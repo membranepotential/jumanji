@@ -2,6 +2,26 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — v0.1.1: config format bug — `[options]` was silently ignored
+
+Found while verifying the installed release: `default-recolor = true` had no
+effect. The parser expected option keys at the TOML **top level**, while the
+README/DESIGN (and the user's config) put them in an `[options]` table — and
+serde silently ignored the unknown `options` field, so the whole table was
+swallowed with no error. The "fonts worked" evidence was a red herring: the
+stylesheet defaults happen to match the configured fonts.
+
+- Implementation now matches the documented format: `[options]` +
+  `[keys.<mode>]`.
+- `deny_unknown_fields` on every raw config struct: a misplaced or misspelled
+  key now errors loudly (still non-fatal — stderr + defaults). Regression test
+  asserts the old top-level format errors.
+- e2e isolation hole closed: the harness inherited `$HOME`, so tests read the
+  developer's real `~/.config/jumanji/config.toml`; the app child now gets a
+  private empty `XDG_CONFIG_HOME`.
+
+Released as **v0.1.1** (v0.1.0 shipped with the bug).
+
 ## 2026-07-06 — v0.1.0: `+`/`-` back to geometric zoom, anchored text zoom
 
 User feedback after trying the two-axis zoom: `+`/`-` should do geometric

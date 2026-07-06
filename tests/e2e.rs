@@ -16,6 +16,7 @@
 
 #![cfg(unix)]
 
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -178,10 +179,16 @@ impl Harness {
 
         let (dbus, dbus_addr) = spawn_private_bus();
 
+        // Isolate the app from the developer's real ~/.config/jumanji: an empty
+        // private XDG_CONFIG_HOME means every test runs on default options.
+        let config_home = std::env::temp_dir().join(format!("jumanji-e2e-xdg-{display}"));
+        let _ = fs::create_dir_all(&config_home);
+
         let app = Command::new(env!("CARGO_BIN_EXE_jumanji"))
             .arg(&file)
             .env("DISPLAY", &display_arg)
             .env("DBUS_SESSION_BUS_ADDRESS", &dbus_addr)
+            .env("XDG_CONFIG_HOME", &config_home)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

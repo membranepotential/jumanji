@@ -115,9 +115,10 @@ impl Config {
     /// the defaults.
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(text)?;
+        let raw_opts = raw.options.unwrap_or_default();
 
         let defaults = Options::default();
-        let selection_clipboard = match raw.selection_clipboard {
+        let selection_clipboard = match raw_opts.selection_clipboard {
             Some(s) => {
                 SelectionClipboard::parse(&s).map_err(|message| ConfigError::OptionValue {
                     key: "selection-clipboard",
@@ -127,14 +128,14 @@ impl Config {
             None => defaults.selection_clipboard,
         };
         let options = Options {
-            scroll_step_px: raw.scroll_step.unwrap_or(defaults.scroll_step_px),
-            zoom_step: raw.zoom_step.unwrap_or(defaults.zoom_step),
-            text_zoom_step: raw.text_zoom_step.unwrap_or(defaults.text_zoom_step),
-            page_width_px: raw.page_width.unwrap_or(defaults.page_width_px),
-            default_recolor: raw.default_recolor.unwrap_or(defaults.default_recolor),
-            font_body: raw.font_body.unwrap_or(defaults.font_body),
-            font_mono: raw.font_mono.unwrap_or(defaults.font_mono),
-            font_size_px: raw.font_size.unwrap_or(defaults.font_size_px),
+            scroll_step_px: raw_opts.scroll_step.unwrap_or(defaults.scroll_step_px),
+            zoom_step: raw_opts.zoom_step.unwrap_or(defaults.zoom_step),
+            text_zoom_step: raw_opts.text_zoom_step.unwrap_or(defaults.text_zoom_step),
+            page_width_px: raw_opts.page_width.unwrap_or(defaults.page_width_px),
+            default_recolor: raw_opts.default_recolor.unwrap_or(defaults.default_recolor),
+            font_body: raw_opts.font_body.unwrap_or(defaults.font_body),
+            font_mono: raw_opts.font_mono.unwrap_or(defaults.font_mono),
+            font_size_px: raw_opts.font_size.unwrap_or(defaults.font_size_px),
             selection_clipboard,
         };
 
@@ -304,8 +305,20 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
     })
 }
 
-#[derive(Debug, Deserialize)]
+/// The file's top level: an `[options]` table and `[keys.<mode>]` tables, as
+/// documented in the README. `deny_unknown_fields` everywhere: a misplaced or
+/// misspelled key must error loudly (surfaced non-fatally by the caller), not
+/// be silently ignored.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
+    options: Option<RawOptions>,
+    keys: Option<RawKeys>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawOptions {
     #[serde(rename = "scroll-step")]
     scroll_step: Option<u32>,
     #[serde(rename = "zoom-step")]
@@ -324,10 +337,10 @@ struct RawConfig {
     font_size: Option<u32>,
     #[serde(rename = "selection-clipboard")]
     selection_clipboard: Option<String>,
-    keys: Option<RawKeys>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawKeys {
     normal: Option<BTreeMap<String, String>>,
     toc: Option<BTreeMap<String, String>>,
@@ -339,6 +352,14 @@ mod tests {
     use crate::core::keymap::{MatchResult, Matcher};
 
     #[test]
+    fn unknown_or_misplaced_keys_error_loudly() {
+        // Top-level option keys (the pre-[options] format) must error, not be
+        // silently ignored — regression for default-recolor being swallowed.
+        assert!(Config::parse("default-recolor = true").is_err());
+        assert!(Config::parse("[options]\ntypo-key = 1").is_err());
+    }
+
+    #[test]
     fn empty_config_is_defaults() {
         let c = Config::parse("").unwrap();
         assert_eq!(c.options, Options::default());
@@ -348,6 +369,7 @@ mod tests {
     fn options_parse() {
         let c = Config::parse(
             r#"
+            [options]
             scroll-step = 120
             zoom-step = 0.25
             page-width = 900
@@ -363,7 +385,7 @@ mod tests {
 
     #[test]
     fn partial_options_keep_defaults() {
-        let c = Config::parse("scroll-step = 42").unwrap();
+        let c = Config::parse("[options]\nscroll-step = 42").unwrap();
         assert_eq!(c.options.scroll_step_px, 42);
         assert_eq!(c.options.zoom_step, Options::default().zoom_step);
     }
@@ -501,6 +523,7 @@ mod tests {
     fn font_and_zoom_options_parse() {
         let c = Config::parse(
             r#"
+            [options]
             font-body = "Inter"
             font-mono = "Fira Code"
             font-size = 20
@@ -523,14 +546,14 @@ mod tests {
             SelectionClipboard::Primary
         );
         assert_eq!(
-            Config::parse("selection-clipboard = \"clipboard\"")
+            Config::parse("[options]\nselection-clipboard = \"clipboard\"")
                 .unwrap()
                 .options
                 .selection_clipboard,
             SelectionClipboard::Clipboard
         );
         assert_eq!(
-            Config::parse("selection-clipboard = \"PRIMARY\"")
+            Config::parse("[options]\nselection-clipboard = \"PRIMARY\"")
                 .unwrap()
                 .options
                 .selection_clipboard,
