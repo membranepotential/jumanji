@@ -17,8 +17,10 @@ everything from the keyboard. Close it. That's the whole program.
 
 ## Status
 
-Early development. The MVP targets Linux (X11/Wayland via GTK4). Expect sharp
-edges.
+**1.0** — milestone M3 complete: real typography, vim keybindings, Mermaid and
+external-tool diagrams, LaTeX math (MathML), editor pairing (SyncTeX-style),
+and reading from a pipe. Linux-first (X11/Wayland via GTK4). Young, but the
+whole reader loop is there; expect the occasional sharp edge.
 
 ## Why
 
@@ -78,20 +80,76 @@ restyle the reader; GFM alerts (`> [!NOTE]` …) render as callouts. LaTeX math 
 inline `$…$` and display `$$…$$`, matrices and aligned environments — is
 typeset to native MathML (no JavaScript), and recolors with the page.
 
-**Editor pairing** (zathura's SyncTeX, for markdown). Forward: `jumanji
---forward <line> file.md` scrolls the reader to that source line — if an instance
-already has the file open it is driven over D-Bus and no new window opens,
-otherwise one opens and jumps once loaded. Reverse: `Ctrl`+click any element to
-open your editor at its source line via `editor-command` (`%l` = line, `%f` =
-file; default `$EDITOR +%l %f`). Wire `--forward` into your editor's cursor-moved
-hook and the click into a listener for round-trip navigation between source and
-render.
+## Editor pairing (zathura's SyncTeX, for markdown)
 
-External fence renderers extend the diagram support to any tool: map a fence
-language to a shell command in `[renderers]` (e.g. `d2 = "d2 - -"`, `dot =
-"dot -Tsvg"`) and jumanji pipes the fence body to it and inlines the SVG/HTML it
-prints — the same pipeline seam mermaid uses internally, no plugin API. A
-failing command degrades to a highlighted code block plus an error note.
+Round-trip navigation between your editor and the reader, both directions:
+
+- **Forward (editor → reader):** `jumanji --forward <line> file.md` scrolls the
+  reader to the element whose source line is the greatest at-or-before `<line>`.
+  If an instance already has the file open, the jump is handed to it over D-Bus
+  and **no new window opens**; otherwise one opens and jumps once loaded.
+- **Reverse (reader → editor):** `Ctrl`+click any element to open your editor at
+  its source line via the `editor-command` config option (`%l` = line, `%f` =
+  file, `%%` = literal `%`; default `$EDITOR +%l %f`). Failures (unset `$EDITOR`,
+  bad line, spawn error) are a statusbar notice, never a crash.
+
+### Neovim hook
+
+**Forward** — push the reader to your cursor line. Drop this in your config
+(e.g. `after/ftplugin/markdown.lua`); `CursorHold` keeps it from spamming on
+every motion (tune with `:set updatetime`):
+
+```lua
+vim.api.nvim_create_autocmd({ "CursorHold", "BufWritePost" }, {
+  buffer = 0,
+  callback = function()
+    vim.system({ "jumanji", "--forward",
+      tostring(vim.fn.line(".")), vim.fn.expand("%:p") })
+  end,
+})
+```
+
+**Reverse** — make `Ctrl`+click jump inside your *running* Neovim instead of
+spawning a fresh one. Start Neovim listening on a known socket:
+
+```sh
+nvim --listen /tmp/nvim.pipe file.md
+```
+
+then point `editor-command` at it (needs [`neovim-remote`](https://github.com/mhinz/neovim-remote), `pipx install neovim-remote`):
+
+```toml
+[options]
+editor-command = "nvr --servername /tmp/nvim.pipe +%l %f"
+```
+
+The default `$EDITOR +%l %f` also works — it just opens a new editor per click
+rather than reusing a session.
+
+## External fence renderers
+
+Extend diagram support to any tool without a plugin API: map a fence language to
+a shell command in `[renderers]`, and jumanji pipes the fence body to that
+command's **stdin** and inlines the SVG/HTML it prints on **stdout** — the same
+pipeline seam mermaid uses internally.
+
+```toml
+[renderers]
+d2   = "d2 - -"        # ```d2   fences via https://d2lang.com  (pacman -S d2)
+dot  = "dot -Tsvg"     # ```dot  fences via Graphviz            (pacman -S graphviz)
+gnuplot = "gnuplot -e 'set terminal svg' -"
+```
+
+A ```` ```dot ```` fence then renders as a diagram. Details:
+
+- The command runs via `sh -c` with the fence body on stdin — no temp files, no
+  argument substitution. Language keys match the fence's first info token,
+  case-insensitively.
+- Hard **5 s** timeout and **4 MiB** output cap. Any failure (spawn error,
+  non-zero exit, timeout, empty or non-UTF-8 output) degrades gracefully to a
+  highlighted code block plus an error note — never a crash or blank page.
+- A configured `mermaid` renderer **overrides** the built-in one.
+- Live reload re-runs the whole pipeline, so edits re-render for free.
 
 ## Configuration
 
