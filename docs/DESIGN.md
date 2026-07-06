@@ -340,6 +340,17 @@ Functional core, imperative shell. The core is pure and GTK-free.
   hatch (D2). Smooth scrolling is deliberately **off** (zathura-instant
   semantics; WebKit otherwise animates every wheel tick ~100 ms, 4× the
   composited frames on SVG-heavy pages).
+- **WebKitGTK DMABUF-renderer layer dropouts** — on some Intel/Mesa X11 GPUs
+  WebKit's DMABUF renderer intermittently drops composited layers while
+  scrolling (each `overflow-x: auto` box — tables, code, diagrams — is a
+  composited layer that flickers out and back). Known upstream (WebKit bug
+  262607 family). **Mitigation (binding default):** the shell sets
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1` at process start *unless the user already
+  set the variable* (any value wins, so it stays an escape hatch without a
+  config option); it must run before WebKit spawns its first render process, so
+  it lives at the very top of `main`. Env-var + no-GPU-headless means this can't
+  be e2e-asserted; verified on evidence + upstream precedent, feel-tested on the
+  real GPU before release.
 - **merman parity gaps** — degrade to highlighted code block + error note;
   external-renderer seam (D6.2) as user-side fallback.
 - **Editor save races** — editors rename-replace on save; watch the parent
