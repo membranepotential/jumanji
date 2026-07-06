@@ -2,6 +2,39 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — fix: TOC click+Enter jumped to the wrong (stale) entry
+
+**What:** in TOC/index mode, clicking a heading row and pressing `Enter` jumped
+to the *first* heading instead of the clicked one. Reproduced via an e2e mouse
+probe; present on HEAD and v0.2.2.
+
+**Root cause (two selection states):** `src/shell/toc.rs` kept a shell-internal
+`Model::selected` node index that `j`/`k`/`h`/`l` mutated and `Enter`
+(`TocSelect`) read — but a mouse click only moved the `ListBox`'s own visual
+selection, never `Model::selected`. So click + `Enter` used the stale internal
+index (initially the top entry, scroll ≈ 56px).
+
+**Fix (Out-of-the-Tar-Pit — one source of truth):** deleted `Model::selected`;
+the `ListBox`'s selected row is now the single selection state. A visible-row
+index maps to a tree node via `Model::visible()`, so `selected_node()` reads the
+current selection back on demand — no sync glue between two states.
+- `move_selection` clamps/moves the ListBox row directly; expand/collapse read
+  the selected node, mutate the tree, and `refresh(select_node)` repaints and
+  reselects the same node by its new visible position; `selected()` (used by the
+  jump) reads whatever row is selected — mouse or keyboard. Counts still work
+  (generic in the dispatcher, unchanged).
+- Also connected the `ListBox` `row-activated` signal (new
+  `TocView::set_activate_handler`, wired in `app.rs::connect_toc_activate`) to
+  the same `toc_select` jump path, so **double-clicking** a row jumps directly —
+  GTK convention and zathura's index spirit (single click = select only).
+
+**Tests:** 160 unit unchanged; **30 → 32 e2e**: `toc_click_then_return_jumps_to_
+clicked_row` (clicks a row below the fold, asserts the jump lands well past the
+first-heading offset — fails on the buggy code where click is ignored) and
+`toc_double_click_activates_and_jumps`. Both deterministic across repeated runs
+(plain `click`/`double_click` harness helpers deliver the button at the pointer,
+the proven XTEST pattern). `cargo test && clippy -D warnings && fmt` all clean.
+
 ## 2026-07-06 — editor pairing / sync (M3, DESIGN D7 — the SyncTeX analogue)
 
 **What:** forward and reverse editor sync, zathura's `--synctex-forward` /

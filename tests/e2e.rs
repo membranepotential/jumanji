@@ -383,6 +383,28 @@ impl Harness {
         self.xdotool(["keyup".to_string(), "ctrl".to_string()]);
     }
 
+    /// Plain left-click at window-relative `(x, y)`. Like [`ctrl_click`], the
+    /// button event is delivered via XTEST at the pointer, since bare Xvfb drops
+    /// synthetic `--window` button events.
+    fn click(&self, x: i32, y: i32) {
+        self.mouse_move(x, y);
+        self.xdotool(["click".to_string(), "1".to_string()]);
+    }
+
+    /// Double left-click at window-relative `(x, y)` (two clicks close enough to
+    /// register as an activation). Delivered at the pointer, as with [`click`].
+    fn double_click(&self, x: i32, y: i32) {
+        self.mouse_move(x, y);
+        self.xdotool([
+            "click".to_string(),
+            "--repeat".to_string(),
+            "2".to_string(),
+            "--delay".to_string(),
+            "25".to_string(),
+            "1".to_string(),
+        ]);
+    }
+
     /// Forward editor sync over D-Bus: `GotoLine(line)`.
     fn goto_line(&self, line: u32) {
         self.call("GotoLine", Some(&(line,).to_variant()))
@@ -1084,6 +1106,61 @@ fn toc_select_jumps_and_returns_to_normal() {
     h.wait_for_state("TOC select jumps and exits", SETTLE, |s| {
         s.mode == "normal" && s.scroll_y > 1.0
     });
+}
+
+#[test]
+fn toc_click_then_return_jumps_to_clicked_row() {
+    // Regression: a mouse click on a TOC row must move the *selection* that
+    // Enter jumps to. Before the fix, j/k moved a shell-internal index while a
+    // click only changed the visual selection, so click+Enter jumped to the
+    // stale internal entry (the first heading) instead of the clicked row.
+    let Some((_g, h)) = setup() else { return };
+    assert_eq!(h.get_state().scroll_y, 0.0, "starts at top");
+
+    // Baseline: enter TOC and select the top entry (no movement) with Enter.
+    // This is where the buggy code jumped for *any* click — the first heading.
+    h.key(&["Tab"]);
+    h.wait_for_state("TOC mode", SETTLE, |s| s.mode == "toc");
+    h.key(&["Return"]);
+    let first = h.wait_for_state("first-entry jump", SETTLE, |s| s.mode == "normal");
+
+    // Now re-enter TOC, click a row well below the fold, and press Enter. The
+    // jump must land at the clicked section, far below the first heading.
+    h.key(&["Tab"]);
+    h.wait_for_state("TOC mode again", SETTLE, |s| s.mode == "toc");
+    h.click(200, 220);
+    h.key(&["Return"]);
+    let clicked = h.wait_for_state("click+Enter jumps to clicked row", SETTLE, |s| {
+        s.mode == "normal" && s.scroll_y > first.scroll_y + 50.0
+    });
+    assert!(
+        clicked.scroll_y > first.scroll_y + 50.0,
+        "click+Enter should jump to the clicked entry (well below the first \
+         heading at {}), got {}",
+        first.scroll_y,
+        clicked.scroll_y
+    );
+}
+
+#[test]
+fn toc_double_click_activates_and_jumps() {
+    // Double-clicking a row activates it: it jumps directly (no Enter) and
+    // returns to normal mode, matching GTK convention.
+    let Some((_g, h)) = setup() else { return };
+    assert_eq!(h.get_state().scroll_y, 0.0, "starts at top");
+
+    h.key(&["Tab"]);
+    h.wait_for_state("TOC mode", SETTLE, |s| s.mode == "toc");
+
+    h.double_click(200, 220);
+    let jumped = h.wait_for_state("double-click activates and jumps", SETTLE, |s| {
+        s.mode == "normal" && s.scroll_y > 50.0
+    });
+    assert!(
+        jumped.scroll_y > 50.0,
+        "double-click should jump below the first heading, got {}",
+        jumped.scroll_y
+    );
 }
 
 #[test]

@@ -275,6 +275,7 @@ fn build_ui(
     }
 
     install_view_handlers(&shell);
+    connect_toc_activate(&shell);
     connect_load_finished(&shell);
     connect_keys(&shell, keymap);
     connect_scroll(&shell);
@@ -1103,6 +1104,15 @@ fn refresh_status(shell: &Rc<RefCell<Shell>>) {
 // ---------------------------------------------------------------------------
 // TOC mode
 // ---------------------------------------------------------------------------
+
+/// Wire double-click / activate on a TOC row to the same jump path as `Enter`.
+fn connect_toc_activate(shell: &Rc<RefCell<Shell>>) {
+    let handler_shell = shell.clone();
+    shell
+        .borrow()
+        .toc_view
+        .set_activate_handler(move || toc_select(&handler_shell));
+}
 
 /// Toggle between the content page and the TOC page (zathura `Tab`).
 fn toggle_toc(shell: &Rc<RefCell<Shell>>) {
