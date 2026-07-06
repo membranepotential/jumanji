@@ -64,6 +64,13 @@ pub struct ViewportState {
     /// Rendered width of the first `<math>` element (0 if none). CSS px. Lets
     /// e2e assert MathML actually laid out with nonzero geometry.
     pub math_width: f64,
+    /// Vertical superscript shift of the first `<msup>`, as a fraction of the
+    /// base box height: `(base.top − sup.top) / base.height` (0 if no msup). A
+    /// sane superscript sits a little above the base top, so this is a small
+    /// positive number (< 1). The `mathjax2`-shadowing bug drove it to ~6 (the
+    /// superscript flung line-heights above the base); the e2e asserts it stays
+    /// well under one base-height.
+    pub msup_shift_ratio: f64,
     /// Rendered width of the first external-renderer output (`.rendered-fence
     /// svg`), 0 if none. CSS px. Lets e2e assert a configured fence renderer
     /// (DESIGN D6.2) actually produced visible output.
@@ -445,11 +452,18 @@ impl View {
              const math = document.querySelector('math'); \
              const rf = document.querySelector('.rendered-fence svg'); \
              const fn = document.querySelector('.entity.name.function.python'); \
+             const msup = document.querySelector('math msup'); \
+             let ms = 0; \
+             if (msup && msup.children.length >= 2) { \
+               const bb = msup.children[0].getBoundingClientRect(); \
+               const sb = msup.children[1].getBoundingClientRect(); \
+               if (bb.height > 0) ms = (bb.top - sb.top) / bb.height; } \
              return { y: window.scrollY, p: Math.min(100, Math.max(0, p)), \
                       w: m.offsetWidth, vw: window.innerWidth, \
                       dw: Math.max(d.scrollWidth, b.scrollWidth), \
                       gw: svg ? svg.getBoundingClientRect().width : 0, \
                       mw: math ? math.getBoundingClientRect().width : 0, \
+                      ms: ms, \
                       rw: rf ? rf.getBoundingClientRect().width : 0, \
                       fc: fn ? getComputedStyle(fn).color : '' }; })()";
         self.webview.evaluate_javascript(
@@ -472,6 +486,7 @@ impl View {
                         doc_scroll_width: num("dw"),
                         diagram_width: num("gw"),
                         math_width: num("mw"),
+                        msup_shift_ratio: num("ms"),
                         fence_width: num("rw"),
                         fn_color,
                     });
@@ -484,6 +499,7 @@ impl View {
                     doc_scroll_width: 0.0,
                     diagram_width: 0.0,
                     math_width: 0.0,
+                    msup_shift_ratio: 0.0,
                     fence_width: 0.0,
                     fn_color: String::new(),
                 }),

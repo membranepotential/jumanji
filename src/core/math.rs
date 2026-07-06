@@ -297,6 +297,28 @@ mod tests {
     }
 
     #[test]
+    fn math_css_has_no_local_font_sources_and_unique_family_names() {
+        // jumanji edit (3): family names must be unique+unshadowable and no
+        // `local()` source may consult system fonts. Otherwise Arch's `mathjax2`
+        // package shadows "Latin Modern Math" with MATH-table-less, huge-ascent
+        // subsets and WebKit derives broken math layout constants from them.
+        let css = math_css();
+        // No `local(` source anywhere — the page must stay self-contained.
+        assert!(
+            !css.contains("local("),
+            "math CSS must not consult system fonts via local()"
+        );
+        // The embedded families use the unshadowable unique names.
+        assert!(css.contains("Jumanji Math"));
+        assert!(css.contains("Jumanji Roman"));
+        // No `font-family` declaration may still name the shadowable upstream
+        // families (the patch comment references them, so check the declaration
+        // form, not a bare substring).
+        assert!(!css.contains("font-family: Latin Modern"));
+        assert!(!css.contains("font-family: LMRoman12"));
+    }
+
+    #[test]
     fn base64_matches_known_vectors() {
         // RFC 4648 test vectors.
         assert_eq!(base64_encode(b""), "");

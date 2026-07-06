@@ -1,45 +1,54 @@
 @namespace m url('http://www.w3.org/1998/Math/MathML');
 
 /* Vendored from pulldown-latex 0.7.1 (github.com/carloskiki/pulldown-latex,
-   MIT — see LICENSE.pulldown-latex). Two jumanji edits, both marked `jumanji:`:
+   MIT — see LICENSE.pulldown-latex). Three jumanji edits, all marked `jumanji:`:
    (1) the vendored-font url() refs below are rewritten to base64 `data:` URIs
        at runtime by `core::math` (jumanji serves no external resources — no
-       app:// scheme, CSP `default-src 'none'`), and
+       app:// scheme, CSP `default-src 'none'`),
    (2) the negation-slash gradient's hardcoded opaque black is changed to
-       `currentColor` so it stays visible after Ctrl-r recolor (dark mode). */
+       `currentColor` so it stays visible after Ctrl-r recolor (dark mode), and
+   (3) the embedded font families are renamed to unshadowable unique names
+       ("Latin Modern Math" -> "Jumanji Math", "LMRoman12" -> "Jumanji Roman")
+       and every system-`local` font source is removed. Family names are
+       shadowable by system fonts: the Arch `mathjax2` package installs MathJax
+       v2's split webfonts under the family name "Latin Modern Math" —
+       MATH-table-less, huge-ascent subsets — and WebKit prefers those system
+       fonts over our vendored woff2, so it derives math layout constants from
+       those garbage metrics and the layout breaks (superscripts flung
+       line-heights above the base, fractions split across lines). Unique names
+       + no system font sources keep the page self-contained (DESIGN D8) and
+       rendering deterministic across machines. */
 
-/* Latin Modern Roman has various sizes. We use the generic name
-   "Latin Modern Roman" for the local versions and "LMRoman12" for the Web font.
-*/
+/* jumanji: Latin Modern Roman has various sizes. The vendored Web font is
+   "Jumanji Roman" (upstream "LMRoman12"). */
 @font-face {
-    font-family: LMRoman12;
+    font-family: Jumanji Roman;
     src: url('font/lmroman12-regular.woff2');
 }
 
 @font-face {
-    font-family: LMRoman12;
+    font-family: Jumanji Roman;
     src: url('font/lmroman12-bold.woff2');
     font-weight: bold;
 }
 
 @font-face {
-    font-family: LMRoman12;
+    font-family: Jumanji Roman;
     src: url('font/lmroman12-italic.woff2');
     font-style: italic;
 }
 
 @font-face {
-    font-family: Latin Modern Math;
-    src: local('Latin Modern Math'), local('LatinModernMath-Regular'),
-        url('font/latinmodern-math.woff2');
+    font-family: Jumanji Math;
+    src: url('font/latinmodern-math.woff2');
 }
 
 m|mtext {
-    font-family: Latin Modern Roman, LMRoman12;
+    font-family: Jumanji Roman;
 }
 
 m|math {
-    font-family: Latin Modern Math;
+    font-family: Jumanji Math;
 }
 
 /* MathML css styling */

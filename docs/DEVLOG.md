@@ -2,6 +2,44 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-06 — fix: MathML layout broken by mathjax2 font shadowing (D8)
+
+**What:** on this machine MathML rendered with wildly wrong vertical layout —
+superscripts flung ~6 line-heights above the base, fractions split across lines.
+**Root cause:** the vendored pulldown-latex `@font-face` for the math font listed
+`src: local('Latin Modern Math'), local('LatinModernMath-Regular'), url(…woff2)`.
+The Arch `mathjax2` package installs MathJax v2's split webfonts system-wide and
+registers the family name "Latin Modern Math" (`fc-match "Latin Modern Math"` →
+`LatinModernMathJax_Alphabets-Regular.woff`) — subsets with **no OpenType MATH
+table** and deliberately huge ascent metrics. WebKit resolves the `local()`
+source first, gets that subset, and derives its math layout constants from the
+garbage metrics.
+
+**Diagnosis (system MiniBrowser, three-way experiment in the same engine):**
+default font list → broken; forcing `DejaVu Math TeX Gyre` → correct; our
+vendored woff2 under a UNIQUE family name (`JumanjiMath`) → pixel-perfect. So the
+font *file* was fine; the family-name *resolution* was poisoned.
+
+**Fix (minimal, `src/core/assets/math/styles.css`):** removed every `local()`
+source and renamed the embedded families to unshadowable names — `Latin Modern
+Math` → `Jumanji Math`, `LMRoman12` → `Jumanji Roman` (and dropped the shadowable
+`Latin Modern Roman` fallback from `m|mtext`). The page is self-contained by
+design (D8), so consulting system fonts was only ever a nondeterminism hazard.
+`core::math`'s url()→data: rewrite matches url tokens, not family names, so it was
+unaffected (verified). A comment block at the top of the vendored sheet documents
+the patch and why.
+
+**Regression tests:** unit — `math_css()` must contain no `local(` and must name
+the unique families. e2e (headless Xvfb) — a **geometry** assertion that would
+have caught this: for the demo's `$E = mc^2$`, a new `msup_shift_ratio` probe
+(`(base.top − sup.top) / base.height` of the first `<msup>`) must be a sane
+fraction (0 < r < 1); the broken build measured ~6. Healthy value on this machine:
+**0.73**. Wired the probe through `ViewportState`/`GetState`/`state_json` and the
+e2e mini-parser, same narrow-probe pattern as `math_width`/`fence_width`.
+
+Tests: **145 → 146 unit**, **25 → 26 e2e**, all green; clippy/fmt clean. DESIGN
+D8 gains the no-`local()`/unique-family constraint.
+
 ## 2026-07-06 — external fence renderers (M3, DESIGN D6 seam 2)
 
 **What:** any fenced code block whose language has a configured renderer is now

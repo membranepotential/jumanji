@@ -291,6 +291,18 @@ is 100% Rust (D3), so a JS math engine (KaTeX/MathJax) is out by construction.
   page for free. The one hardcoded colour in the vendored sheet — the negation
   slash's opaque-black gradient stop — is patched to `currentColor` so it stays
   visible in dark mode (marked `jumanji:` in `assets/math/styles.css`).
+- **Deterministic fonts — no `local()`, unique family names (binding).** The
+  vendored sheet must never consult system fonts: every `local()` source is
+  removed and the embedded families are renamed to unshadowable names (`Latin
+  Modern Math` → `Jumanji Math`, `LMRoman12` → `Jumanji Roman`). Why: CSS family
+  names are shadowable, and Arch's `mathjax2` package registers "Latin Modern
+  Math" for MathJax v2's split webfonts — MATH-table-less, huge-ascent subsets —
+  which WebKit prefers over our woff2 via `local()`, then derives math layout
+  constants from garbage metrics (superscripts flung line-heights above the base,
+  fractions split across lines). Unique names + no `local()` keep the
+  self-contained page's rendering identical across machines. Marked `jumanji:` in
+  `assets/math/styles.css`; pinned by a `core::math` unit test (no `local(`,
+  unique names present) and an e2e geometry probe (`msup_shift_ratio`).
 - **No-page-h-scroll invariant (D5a):** display math is wrapped in a
   `.math-scroll` block (a `<span>` set to `display:block`, valid inside the
   enclosing `<p>`) so a wide matrix/alignment scrolls inside its own box, never

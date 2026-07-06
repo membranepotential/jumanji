@@ -713,7 +713,8 @@ fn state_json(
         "{{\"file\":{file},\"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
          \"content_width\":{content_width},\"viewport_width\":{viewport_width},\
          \"doc_scroll_width\":{doc_scroll_width},\"diagram_width\":{diagram_width},\
-         \"math_width\":{math_width},\"fence_width\":{fence_width},\"fn_color\":{fn_color},\
+         \"math_width\":{math_width},\"msup_shift_ratio\":{msup_shift_ratio},\
+         \"fence_width\":{fence_width},\"fn_color\":{fn_color},\
          \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded}}}",
         file = json_string(file),
@@ -724,6 +725,7 @@ fn state_json(
         doc_scroll_width = vs.doc_scroll_width,
         diagram_width = vs.diagram_width,
         math_width = vs.math_width,
+        msup_shift_ratio = vs.msup_shift_ratio,
         fence_width = vs.fence_width,
         fn_color = json_string(&vs.fn_color),
         mode = json_string(mode),

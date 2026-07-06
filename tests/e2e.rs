@@ -102,6 +102,10 @@ struct State {
     /// First `<math>` rendered width in CSS px (0 if none). Nonzero proves the
     /// MathML actually laid out.
     math_width: f64,
+    /// First `<msup>` superscript shift as a fraction of the base-box height
+    /// (0 if none). A sane superscript is a small positive number (< 1); the
+    /// `mathjax2`-font-shadowing bug drove it to ~6.
+    msup_shift_ratio: f64,
     /// First `.rendered-fence svg` width in CSS px (0 if none). Nonzero proves a
     /// configured external fence renderer (DESIGN D6.2) produced visible output.
     fence_width: f64,
@@ -131,6 +135,7 @@ impl State {
             doc_scroll_width: field(json, "doc_scroll_width")?.parse().ok()?,
             diagram_width: field(json, "diagram_width")?.parse().ok()?,
             math_width: field(json, "math_width")?.parse().ok()?,
+            msup_shift_ratio: field(json, "msup_shift_ratio")?.parse().ok()?,
             fence_width: field(json, "fence_width")?.parse().ok()?,
             fn_color: field_str(json, "fn_color")?,
             dark: field(json, "dark")? == "true",
@@ -607,6 +612,25 @@ fn math_renders_as_mathml_with_width() {
         s.math_width > 0.0,
         "expected a rendered <math> element with nonzero width, got {}",
         s.math_width
+    );
+}
+
+#[test]
+fn math_superscript_vertical_offset_is_sane() {
+    // Regression for the mathjax2 font-shadowing bug: the demo's `$E = mc^2$`
+    // has a `<msup>` (the `c^2`). A healthy superscript sits just above the base
+    // top, so `(base.top - sup.top) / base.height` is a small positive number
+    // well under one base-height. The bug (WebKit resolving `local('Latin Modern
+    // Math')` to mathjax2's MATH-table-less, huge-ascent subset) flung the
+    // superscript ~6 base-heights up. The unique-family + no-local() fix keeps
+    // layout deterministic; assert the shift stays sane (< 1 base-height).
+    let Some((_g, h)) = setup() else { return };
+    let s = h.get_state();
+    assert!(
+        s.msup_shift_ratio > 0.0 && s.msup_shift_ratio < 1.0,
+        "msup superscript shift must be a sane fraction of the base height \
+         (0 < r < 1), got {}",
+        s.msup_shift_ratio
     );
 }
 
