@@ -60,25 +60,64 @@ impl KeySequence {
     }
 }
 
+/// A key sequence that captures the *next* keypress as a `char` argument,
+/// zathura-style: `m<x>` sets quickmark `x`, `'<x>` jumps to it. The captured
+/// character is not known until the follow-up press, so it cannot be baked
+/// into a plain [`Action`] at bind time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CharArgKind {
+    QuickmarkSet,
+    QuickmarkJump,
+}
+
+impl CharArgKind {
+    /// Build the concrete [`Action`] once the argument char is captured.
+    fn with_char(self, c: char) -> Action {
+        match self {
+            CharArgKind::QuickmarkSet => Action::QuickmarkSet(c),
+            CharArgKind::QuickmarkJump => Action::QuickmarkJump(c),
+        }
+    }
+}
+
+/// What a key sequence maps to: either a fixed action, or a prefix that
+/// captures the next character as its argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Binding {
+    Action(Action),
+    CharArg(CharArgKind),
+}
+
 /// The bindings for every mode. Built from [`Keymap::default`] and then
 /// overlaid with user overrides from the config.
 #[derive(Debug, Clone)]
 pub struct Keymap {
-    bindings: HashMap<Mode, HashMap<KeySequence, Action>>,
+    bindings: HashMap<Mode, HashMap<KeySequence, Binding>>,
 }
 
 impl Keymap {
-    /// Install or replace a binding for `mode`.
+    /// Install or replace a plain action binding for `mode`.
     pub fn bind(&mut self, mode: Mode, seq: KeySequence, action: Action) {
-        self.bindings.entry(mode).or_default().insert(seq, action);
+        self.bindings
+            .entry(mode)
+            .or_default()
+            .insert(seq, Binding::Action(action));
+    }
+
+    /// Install or replace a char-argument binding (e.g. `m`/`'`) for `mode`.
+    pub fn bind_char_arg(&mut self, mode: Mode, seq: KeySequence, kind: CharArgKind) {
+        self.bindings
+            .entry(mode)
+            .or_default()
+            .insert(seq, Binding::CharArg(kind));
     }
 
     fn lookup(&self, mode: Mode, seq: &[KeyPress]) -> Lookup {
         let Some(table) = self.bindings.get(&mode) else {
             return Lookup::None;
         };
-        if let Some(action) = table.get(seq_as_slice_key(seq)) {
-            return Lookup::Exact(action.clone());
+        if let Some(binding) = table.get(seq_as_slice_key(seq)) {
+            return Lookup::Exact(binding.clone());
         }
         // Partial match: some binding starts with `seq`.
         let is_prefix = table
@@ -121,7 +160,7 @@ impl std::hash::Hash for KeySeqSlice {
 }
 
 enum Lookup {
-    Exact(Action),
+    Exact(Binding),
     Prefix,
     None,
 }
@@ -170,12 +209,41 @@ impl Default for Keymap {
             ToggleToc,
         );
         km.bind(n, c(':'), CommandLine);
+        // Link hints, quickmarks, and the jumplist (M2). `f`/`F` enter the
+        // shell-side hint overlay; `m`/`'` capture the next char as the
+        // quickmark register; `Ctrl-o`/`Ctrl-i` walk the jumplist.
+        km.bind(n, c('f'), FollowLink);
+        km.bind(n, c('F'), ShowLinkTarget);
+        km.bind_char_arg(n, c('m'), CharArgKind::QuickmarkSet);
+        km.bind_char_arg(n, c('\''), CharArgKind::QuickmarkJump);
+        km.bind(n, ctrl('o'), JumpBackward);
+        km.bind(n, ctrl('i'), JumpForward);
         km.bind(
             n,
             KeySequence::single(KeyPress::new(Key::Escape, false, false)),
             Abort,
         );
         km.bind(n, c('q'), Quit);
+
+        // TOC-mode keys (zathura index navigation). Reachable once the shell
+        // switches the matcher into `Mode::Toc`; all remappable via
+        // `[keys.toc]`.
+        let t = Mode::Toc;
+        km.bind(t, c('j'), TocNext);
+        km.bind(t, c('k'), TocPrevious);
+        km.bind(t, c('l'), TocExpand);
+        km.bind(t, c('h'), TocCollapse);
+        km.bind(
+            t,
+            KeySequence::single(KeyPress::new(Key::Enter, false, false)),
+            TocSelect,
+        );
+        km.bind(
+            t,
+            KeySequence::single(KeyPress::new(Key::Tab, false, false)),
+            ToggleToc,
+        );
+        km.bind(t, c('q'), Quit);
         km
     }
 }
@@ -198,6 +266,9 @@ pub struct Matcher {
     mode: Mode,
     count: Option<u32>,
     pending: Vec<KeyPress>,
+    /// When set, the previous keypress was a char-argument prefix (`m`/`'`) and
+    /// the next printable press is captured as its argument.
+    capture: Option<CharArgKind>,
 }
 
 impl Matcher {
@@ -206,6 +277,7 @@ impl Matcher {
             mode,
             count: None,
             pending: Vec::new(),
+            capture: None,
         }
     }
 
@@ -241,10 +313,25 @@ impl Matcher {
     fn reset(&mut self) {
         self.count = None;
         self.pending.clear();
+        self.capture = None;
     }
 
     /// Feed one keypress; advance the matcher and report the outcome.
     pub fn feed(&mut self, kp: KeyPress, keymap: &Keymap) -> MatchResult {
+        // A char-argument prefix (`m`/`'`) is pending: the next press is its
+        // argument. Any non-control character is captured; Escape (or any
+        // non-character key) aborts the pending capture.
+        if let Some(kind) = self.capture.take() {
+            self.reset();
+            return match kp.key {
+                Key::Char(c) if !c.is_control() => MatchResult::Matched {
+                    action: kind.with_char(c),
+                    count: None,
+                },
+                _ => MatchResult::NoMatch,
+            };
+        }
+
         // Count digits accumulate only at the start of a sequence, unmodified.
         if self.pending.is_empty()
             && !kp.ctrl
@@ -260,7 +347,14 @@ impl Matcher {
 
         self.pending.push(kp);
         match keymap.lookup(self.mode, &self.pending) {
-            Lookup::Exact(action) => {
+            Lookup::Exact(Binding::CharArg(kind)) => {
+                // Arm the char-argument capture; the mark register comes on the
+                // next press. Quickmarks take no count, so drop any prefix.
+                self.reset();
+                self.capture = Some(kind);
+                MatchResult::Pending
+            }
+            Lookup::Exact(Binding::Action(action)) => {
                 let count = self.count;
                 self.reset();
                 // `<count>G` folds the count into `GotoSection`; the count is
@@ -470,6 +564,191 @@ mod tests {
             m.feed(KeyPress::new(Key::Tab, false, false), &km),
             MatchResult::Matched {
                 action: Action::ToggleToc,
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn quickmark_set_captures_next_char() {
+        let km = km();
+        let mut m = Matcher::new(Mode::Normal);
+        // `m` arms the capture (pending), `a` completes it.
+        assert_eq!(m.feed(KeyPress::char('m'), &km), MatchResult::Pending);
+        assert_eq!(
+            m.feed(KeyPress::char('a'), &km),
+            MatchResult::Matched {
+                action: Action::QuickmarkSet('a'),
+                count: None
+            }
+        );
+        assert!(m.pending_indicator().is_empty());
+    }
+
+    #[test]
+    fn quickmark_jump_captures_next_char() {
+        let km = km();
+        let mut m = Matcher::new(Mode::Normal);
+        assert_eq!(m.feed(KeyPress::char('\''), &km), MatchResult::Pending);
+        assert_eq!(
+            m.feed(KeyPress::char('Z'), &km),
+            MatchResult::Matched {
+                action: Action::QuickmarkJump('Z'),
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn quickmark_char_is_case_and_symbol_preserving() {
+        let km = km();
+        let mut m = Matcher::new(Mode::Normal);
+        m.feed(KeyPress::char('m'), &km);
+        // Uppercase and digit registers must survive verbatim.
+        assert_eq!(
+            m.feed(KeyPress::char('5'), &km),
+            MatchResult::Matched {
+                action: Action::QuickmarkSet('5'),
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn escape_aborts_pending_capture() {
+        let km = km();
+        let mut m = Matcher::new(Mode::Normal);
+        assert_eq!(m.feed(KeyPress::char('m'), &km), MatchResult::Pending);
+        assert_eq!(
+            m.feed(KeyPress::new(Key::Escape, false, false), &km),
+            MatchResult::NoMatch
+        );
+        // Capture cleared: a fresh `j` scrolls normally.
+        assert_eq!(
+            m.feed(KeyPress::char('j'), &km),
+            MatchResult::Matched {
+                action: Action::Scroll(Direction::Down),
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn count_before_quickmark_is_dropped_not_leaked() {
+        let km = km();
+        let mut m = Matcher::new(Mode::Normal);
+        // `3m` then `a`: the count does not attach to the quickmark and does
+        // not leak into the following command.
+        assert_eq!(feed_str(&mut m, &km, "3"), MatchResult::Pending);
+        assert_eq!(m.feed(KeyPress::char('m'), &km), MatchResult::Pending);
+        assert_eq!(
+            m.feed(KeyPress::char('a'), &km),
+            MatchResult::Matched {
+                action: Action::QuickmarkSet('a'),
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn follow_link_and_jumplist_defaults() {
+        let km = km();
+        let mut m = Matcher::new(Mode::Normal);
+        assert_eq!(
+            m.feed(KeyPress::char('f'), &km),
+            MatchResult::Matched {
+                action: Action::FollowLink,
+                count: None
+            }
+        );
+        assert_eq!(
+            m.feed(KeyPress::char('F'), &km),
+            MatchResult::Matched {
+                action: Action::ShowLinkTarget,
+                count: None
+            }
+        );
+        assert_eq!(
+            m.feed(KeyPress::new(Key::Char('o'), true, false), &km),
+            MatchResult::Matched {
+                action: Action::JumpBackward,
+                count: None
+            }
+        );
+        assert_eq!(
+            m.feed(KeyPress::new(Key::Char('i'), true, false), &km),
+            MatchResult::Matched {
+                action: Action::JumpForward,
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn toc_mode_navigation_keys() {
+        let km = km();
+        let mut m = Matcher::new(Mode::Toc);
+        assert_eq!(
+            m.feed(KeyPress::char('j'), &km),
+            MatchResult::Matched {
+                action: Action::TocNext,
+                count: None
+            }
+        );
+        assert_eq!(
+            m.feed(KeyPress::char('k'), &km),
+            MatchResult::Matched {
+                action: Action::TocPrevious,
+                count: None
+            }
+        );
+        assert_eq!(
+            m.feed(KeyPress::char('l'), &km),
+            MatchResult::Matched {
+                action: Action::TocExpand,
+                count: None
+            }
+        );
+        assert_eq!(
+            m.feed(KeyPress::char('h'), &km),
+            MatchResult::Matched {
+                action: Action::TocCollapse,
+                count: None
+            }
+        );
+        assert_eq!(
+            m.feed(KeyPress::new(Key::Enter, false, false), &km),
+            MatchResult::Matched {
+                action: Action::TocSelect,
+                count: None
+            }
+        );
+        assert_eq!(
+            m.feed(KeyPress::new(Key::Tab, false, false), &km),
+            MatchResult::Matched {
+                action: Action::ToggleToc,
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn toc_j_differs_from_normal_j() {
+        // Same key, different mode → different action (mode-scoped tables).
+        let km = km();
+        let mut normal = Matcher::new(Mode::Normal);
+        let mut toc = Matcher::new(Mode::Toc);
+        assert_eq!(
+            normal.feed(KeyPress::char('j'), &km),
+            MatchResult::Matched {
+                action: Action::Scroll(Direction::Down),
+                count: None
+            }
+        );
+        assert_eq!(
+            toc.feed(KeyPress::char('j'), &km),
+            MatchResult::Matched {
+                action: Action::TocNext,
                 count: None
             }
         );

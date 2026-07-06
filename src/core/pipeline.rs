@@ -32,6 +32,11 @@ pub struct Options {
     pub font_mono: String,
     /// Base body font size in pixels (the text-zoom 100% reference).
     pub font_size_px: u32,
+    /// User CSS theme sources, each emitted verbatim in its own `<style>`
+    /// block *after* the built-in and generated CSS so user rules win the
+    /// cascade. The shell populates this from `~/.config/jumanji/themes/*.css`
+    /// (sorted by filename); the core just concatenates in the given order.
+    pub extra_css: Vec<String>,
 }
 
 impl Default for Options {
@@ -41,6 +46,7 @@ impl Default for Options {
             font_body: String::new(),
             font_mono: String::new(),
             font_size_px: 18,
+            extra_css: Vec::new(),
         }
     }
 }
@@ -123,6 +129,9 @@ fn comrak_options<'a>() -> ComrakOptions<'a> {
     o.extension.autolink = true;
     o.extension.tasklist = true;
     o.extension.footnotes = true;
+    // GitHub-style alerts (`> [!NOTE]` …) → `<div class="markdown-alert
+    // markdown-alert-note">…`. Styled in assets/style.css.
+    o.extension.alerts = true;
     // Empty prefix => ids are the bare GitHub-style slug. `toc::extract`
     // mirrors this to keep TOC anchors identical to the emitted ids.
     o.extension.header_id_prefix = Some(String::new());
@@ -163,6 +172,15 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options) -> String {
         .map(|h| escape_html(&h.text))
         .unwrap_or_else(|| "jumanji".to_string());
 
+    // User themes come last so their rules win the cascade over the built-in
+    // and generated styles. Each source keeps its own `<style>` block, so one
+    // malformed theme cannot break the parsing of another.
+    let user_css: String = opts
+        .extra_css
+        .iter()
+        .map(|css| format!("<style>{css}</style>\n"))
+        .collect();
+
     format!(
         "<!doctype html>\n\
          <html lang=\"en\">\n\
@@ -175,6 +193,7 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options) -> String {
          <style>{root_vars}</style>\n\
          <style>{light}</style>\n\
          <style>{dark}</style>\n\
+         {user_css}\
          </head>\n\
          <body id=\"top\">\n\
          <main id=\"content\" class=\"markdown-body\">\n\
@@ -188,6 +207,7 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options) -> String {
         root_vars = root_vars_css(opts),
         light = highlight::light_css(),
         dark = highlight::dark_css(),
+        user_css = user_css,
         body = body,
     )
 }
@@ -327,5 +347,75 @@ mod tests {
         let doc = render("## Getting Started\n", &Options::default());
         assert_eq!(doc.toc[0].anchor, "#getting-started");
         assert!(doc.html.contains("id=\"getting-started\""));
+    }
+
+    #[test]
+    fn gfm_alert_renders_with_expected_classes() {
+        let html = render_str("> [!NOTE]\n> Heads up.\n");
+        // comrak 0.53 emits `<div class="markdown-alert markdown-alert-note">`
+        // with a `<p class="markdown-alert-title">` heading.
+        assert!(html.contains("markdown-alert markdown-alert-note"));
+        assert!(html.contains("markdown-alert-title"));
+        assert!(html.contains("Heads up."));
+    }
+
+    #[test]
+    fn all_alert_kinds_get_their_class() {
+        for (kw, class) in [
+            ("NOTE", "markdown-alert-note"),
+            ("TIP", "markdown-alert-tip"),
+            ("IMPORTANT", "markdown-alert-important"),
+            ("WARNING", "markdown-alert-warning"),
+            ("CAUTION", "markdown-alert-caution"),
+        ] {
+            let html = render_str(&format!("> [!{kw}]\n> body\n"));
+            assert!(html.contains(class), "missing {class} for [!{kw}]");
+        }
+    }
+
+    #[test]
+    fn user_css_emitted_verbatim_after_builtin_css() {
+        let marker = ".my-user-theme{color:hotpink}";
+        let html = render(
+            "# x\n",
+            &Options {
+                extra_css: vec![marker.to_string()],
+                ..Options::default()
+            },
+        )
+        .html;
+        assert!(html.contains(marker));
+        // It must come after the generated dark-theme block so it wins the
+        // cascade, and before the body.
+        let user = html.find(marker).unwrap();
+        let dark_marker = html.find("html.dark").unwrap();
+        let body = html.find("<body").unwrap();
+        assert!(dark_marker < user, "user CSS must follow generated CSS");
+        assert!(user < body, "user CSS must sit in <head>");
+    }
+
+    #[test]
+    fn multiple_user_css_blocks_keep_order_and_isolation() {
+        let html = render(
+            "# x\n",
+            &Options {
+                extra_css: vec!["/*first*/".to_string(), "/*second*/".to_string()],
+                ..Options::default()
+            },
+        )
+        .html;
+        let first = html.find("/*first*/").unwrap();
+        let second = html.find("/*second*/").unwrap();
+        assert!(first < second);
+        // Each source is wrapped in its own <style> block.
+        assert!(html.contains("<style>/*first*/</style>"));
+        assert!(html.contains("<style>/*second*/</style>"));
+    }
+
+    #[test]
+    fn no_user_css_emits_no_extra_style_blocks() {
+        // Default options carry no themes; the four built-in blocks are all.
+        let html = render_str("# x\n");
+        assert_eq!(html.matches("<style>").count(), 4);
     }
 }

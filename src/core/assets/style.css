@@ -31,6 +31,14 @@
   --note-border: #e6b800;
   --note-fg: #7a5b00;
   --selection: #b3d4fc;
+
+  /* GFM alert accents (GitHub palette). Each drives the left border and the
+   * title colour; the box background is a faint tint of the accent. */
+  --alert-note: #0969da;
+  --alert-tip: #1a7f37;
+  --alert-important: #8250df;
+  --alert-warning: #9a6700;
+  --alert-caution: #cf222e;
 }
 
 html.dark {
@@ -49,6 +57,12 @@ html.dark {
   --note-border: #8a6d00;
   --note-fg: #e8c766;
   --selection: #2c5480;
+
+  --alert-note: #4493f8;
+  --alert-tip: #3fb950;
+  --alert-important: #ab7df8;
+  --alert-warning: #d29922;
+  --alert-caution: #f85149;
 }
 
 html {
@@ -188,6 +202,52 @@ blockquote > :first-child {
 }
 blockquote > :last-child {
   margin-bottom: 0;
+}
+
+/* ---- GFM alerts / callouts ----------------------------------------------- */
+
+/* comrak emits `<div class="markdown-alert markdown-alert-<kind>">` with a
+ * leading `<p class="markdown-alert-title">`. Each kind colours its left
+ * border and title through the `--alert-*` accent; the box tint is derived
+ * from the accent with `color-mix` so it adapts to light/dark automatically. */
+.markdown-alert {
+  --alert-accent: var(--fg-muted);
+  margin: 1.4em 0;
+  padding: 0.4em 1.1em;
+  border-left: 0.28em solid var(--alert-accent);
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, var(--alert-accent) 8%, transparent);
+}
+.markdown-alert > :first-child {
+  margin-top: 0;
+}
+.markdown-alert > :last-child {
+  margin-bottom: 0;
+}
+.markdown-alert-title {
+  display: flex;
+  align-items: center;
+  font-family: system-ui, sans-serif;
+  font-weight: 650;
+  line-height: 1;
+  color: var(--alert-accent);
+  margin: 0 0 0.6em;
+}
+
+.markdown-alert-note {
+  --alert-accent: var(--alert-note);
+}
+.markdown-alert-tip {
+  --alert-accent: var(--alert-tip);
+}
+.markdown-alert-important {
+  --alert-accent: var(--alert-important);
+}
+.markdown-alert-warning {
+  --alert-accent: var(--alert-warning);
+}
+.markdown-alert-caution {
+  --alert-accent: var(--alert-caution);
 }
 
 /* ---- Inline code & code blocks ------------------------------------------ */

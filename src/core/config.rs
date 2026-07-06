@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use super::keymap::{Key, KeyPress, KeySequence, Keymap};
+use super::keymap::{CharArgKind, Key, KeyPress, KeySequence, Keymap};
 use super::{Action, Direction, Mode};
 
 /// Which system clipboard a text selection is copied to, zathura-style.
@@ -72,6 +72,95 @@ impl Default for Options {
             selection_clipboard: SelectionClipboard::Primary,
         }
     }
+}
+
+/// What the shell must do after a successful runtime `:set`.
+// Consumed by the parallel M2 shell-integration work (`:set` handling); the
+// pure API and its tests land first, hence the allow.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetEffect {
+    /// Re-run the render pipeline (the option feeds generated CSS/HTML).
+    Rerender,
+    /// Only re-apply the dark/light recolor state; no re-render needed.
+    Recolor,
+    /// Nothing to do now — picked up the next time the option is used.
+    None,
+}
+
+impl Options {
+    /// Apply a runtime `:set key value`. Returns the [`SetEffect`] the shell
+    /// must honour, or `Err(msg)` for an unknown key, an unparseable value, or
+    /// an option that cannot change at runtime.
+    #[allow(dead_code)] // wired into `:set` by the parallel shell-integration work
+    pub fn set(&mut self, key: &str, value: &str) -> Result<SetEffect, String> {
+        let value = value.trim();
+        match key.trim() {
+            "page-width" => {
+                self.page_width_px = parse_scalar::<u32>(value, "page-width")?;
+                Ok(SetEffect::Rerender)
+            }
+            "font-size" => {
+                self.font_size_px = parse_scalar::<u32>(value, "font-size")?;
+                Ok(SetEffect::Rerender)
+            }
+            "font-body" => {
+                self.font_body = unquote(value).to_string();
+                Ok(SetEffect::Rerender)
+            }
+            "font-mono" => {
+                self.font_mono = unquote(value).to_string();
+                Ok(SetEffect::Rerender)
+            }
+            "default-recolor" => {
+                self.default_recolor = parse_scalar::<bool>(value, "default-recolor")?;
+                Ok(SetEffect::Recolor)
+            }
+            "scroll-step" => {
+                self.scroll_step_px = parse_scalar::<u32>(value, "scroll-step")?;
+                Ok(SetEffect::None)
+            }
+            "zoom-step" => {
+                self.zoom_step = parse_scalar::<f64>(value, "zoom-step")?;
+                Ok(SetEffect::None)
+            }
+            "text-zoom-step" => {
+                self.text_zoom_step = parse_scalar::<f64>(value, "text-zoom-step")?;
+                Ok(SetEffect::None)
+            }
+            "selection-clipboard" => {
+                // Validate for a helpful message, but reject regardless: the
+                // clipboard target is wired at view-construction time.
+                SelectionClipboard::parse(value)
+                    .map_err(|m| format!("selection-clipboard: {m}"))?;
+                Err("selection-clipboard cannot be changed at runtime".to_string())
+            }
+            other => Err(format!("unknown option `{other}`")),
+        }
+    }
+}
+
+/// Parse a scalar option value with a typed error message. Reuses each type's
+/// own `FromStr`, the same coercion serde performs on the TOML scalar.
+#[allow(dead_code)] // used by `Options::set` (not yet wired into the shell)
+fn parse_scalar<T>(value: &str, key: &str) -> Result<T, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    value
+        .parse::<T>()
+        .map_err(|e| format!("{key}: invalid value {value:?}: {e}"))
+}
+
+/// Strip a single matched pair of surrounding double quotes, so both
+/// `:set font-body Inter` and `:set font-body "Fira Code"` behave.
+#[allow(dead_code)] // used by `Options::set` (not yet wired into the shell)
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .unwrap_or(value)
 }
 
 /// A fully-resolved configuration: options plus the effective keymap.
@@ -172,12 +261,15 @@ fn apply_key_table(
             key: key.clone(),
             message,
         })?;
-        let action = parse_action(&action).map_err(|message| ConfigError::KeyBinding {
+        let binding = parse_binding(&action).map_err(|message| ConfigError::KeyBinding {
             mode: mode_name,
             key: key.clone(),
             message,
         })?;
-        keymap.bind(mode, seq, action);
+        match binding {
+            ParsedBinding::Action(action) => keymap.bind(mode, seq, action),
+            ParsedBinding::CharArg(kind) => keymap.bind_char_arg(mode, seq, kind),
+        }
     }
     Ok(())
 }
@@ -268,12 +360,34 @@ fn parse_key_name(name: &str) -> Result<Key, String> {
 
 /// Parse an action string (`"section next"`, `"goto bottom"`, `"recolor"`)
 /// into a typed [`Action`]. Case-insensitive; extra whitespace tolerated.
+///
+/// The one case-*sensitive* exception is a quickmark with an explicit register:
+/// `"mark set <c>"` / `"mark jump <c>"` (used by the D-Bus `ExecuteAction`
+/// path), where `<c>` is a single character kept verbatim (`ma` ≠ `mA`).
 pub fn parse_action(s: &str) -> Result<Action, String> {
-    let normalized = s
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
+    // Quickmark-with-register: handled before lowercasing so the register keeps
+    // its case. In key tables the char is omitted (a `CharArg` binding instead);
+    // here, supplying it produces a concrete action for automation/testing.
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    if tokens.len() >= 2 && tokens[0].eq_ignore_ascii_case("mark") {
+        let kind = tokens[1].to_ascii_lowercase();
+        if kind == "set" || kind == "jump" {
+            let reg = tokens.get(2).copied().unwrap_or("");
+            let mut chars = reg.chars();
+            return match (chars.next(), chars.next()) {
+                (Some(c), None) => Ok(if kind == "set" {
+                    Action::QuickmarkSet(c)
+                } else {
+                    Action::QuickmarkJump(c)
+                }),
+                _ => Err(format!(
+                    "`mark {kind}` needs a single-character register, e.g. `mark {kind} a`"
+                )),
+            };
+        }
+    }
+
+    let normalized = tokens.join(" ").to_lowercase();
     use Action::*;
     use Direction::*;
     Ok(match normalized.as_str() {
@@ -299,10 +413,98 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
         "reload" => Reload,
         "toggle toc" | "toc" => ToggleToc,
         "command" | "command line" => CommandLine,
+        "follow link" => FollowLink,
+        "show link target" => ShowLinkTarget,
+        "jump backward" => JumpBackward,
+        "jump forward" => JumpForward,
+        "toc next" => TocNext,
+        "toc previous" | "toc prev" => TocPrevious,
+        "toc expand" => TocExpand,
+        "toc collapse" => TocCollapse,
+        "toc select" => TocSelect,
         "abort" => Abort,
         "quit" => Quit,
         other => return Err(format!("unknown action '{other}'")),
     })
+}
+
+/// A parsed key-table binding: either a fixed action, or a char-argument prefix
+/// (`mark set` / `mark jump` with no register — the register is captured live).
+pub(crate) enum ParsedBinding {
+    Action(Action),
+    CharArg(CharArgKind),
+}
+
+/// Parse a key-table action string into a [`ParsedBinding`]. Bare `mark set` /
+/// `mark jump` (no register) become a [`CharArgKind`] prefix binding; anything
+/// else defers to [`parse_action`].
+fn parse_binding(s: &str) -> Result<ParsedBinding, String> {
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    if tokens.len() == 2 && tokens[0].eq_ignore_ascii_case("mark") {
+        match tokens[1].to_ascii_lowercase().as_str() {
+            "set" => return Ok(ParsedBinding::CharArg(CharArgKind::QuickmarkSet)),
+            "jump" => return Ok(ParsedBinding::CharArg(CharArgKind::QuickmarkJump)),
+            _ => {}
+        }
+    }
+    parse_action(s).map(ParsedBinding::Action)
+}
+
+/// The canonical option keys (`:set <key>` completion; also the TOML spelling).
+#[allow(dead_code)] // consumed by command-line completion (shell-integration work)
+pub fn option_keys() -> &'static [&'static str] {
+    &[
+        "scroll-step",
+        "zoom-step",
+        "text-zoom-step",
+        "page-width",
+        "default-recolor",
+        "font-body",
+        "font-mono",
+        "font-size",
+        "selection-clipboard",
+    ]
+}
+
+/// The canonical action strings, one per action, for command-line completion
+/// (`:` exec names). Char-argument quickmarks are offered by their bare prefix.
+#[allow(dead_code)] // consumed by command-line completion (shell-integration work)
+pub fn action_names() -> &'static [&'static str] {
+    &[
+        "scroll down",
+        "scroll up",
+        "scroll left",
+        "scroll right",
+        "half-page down",
+        "half-page up",
+        "section next",
+        "section previous",
+        "goto top",
+        "goto bottom",
+        "zoom in",
+        "zoom out",
+        "text zoom in",
+        "text zoom out",
+        "zoom reset",
+        "search",
+        "search next",
+        "search previous",
+        "recolor",
+        "reload",
+        "toggle toc",
+        "follow link",
+        "show link target",
+        "mark set",
+        "mark jump",
+        "jump backward",
+        "jump forward",
+        "toc next",
+        "toc previous",
+        "toc expand",
+        "toc collapse",
+        "toc select",
+        "abort",
+    ]
 }
 
 /// The file's top level: an `[options]` table and `[keys.<mode>]` tables, as
@@ -573,5 +775,158 @@ mod tests {
     fn missing_file_is_defaults() {
         let c = Config::load(Some(Path::new("/nonexistent/xyz"))).unwrap();
         assert_eq!(c.options, Options::default());
+    }
+
+    #[test]
+    fn m2_action_strings_parse() {
+        assert_eq!(parse_action("follow link").unwrap(), Action::FollowLink);
+        assert_eq!(
+            parse_action("show link target").unwrap(),
+            Action::ShowLinkTarget
+        );
+        assert_eq!(parse_action("jump backward").unwrap(), Action::JumpBackward);
+        assert_eq!(parse_action("jump forward").unwrap(), Action::JumpForward);
+        assert_eq!(parse_action("toc next").unwrap(), Action::TocNext);
+        assert_eq!(parse_action("toc previous").unwrap(), Action::TocPrevious);
+        assert_eq!(parse_action("toc expand").unwrap(), Action::TocExpand);
+        assert_eq!(parse_action("toc collapse").unwrap(), Action::TocCollapse);
+        assert_eq!(parse_action("toc select").unwrap(), Action::TocSelect);
+    }
+
+    #[test]
+    fn mark_action_string_with_register_is_case_sensitive() {
+        assert_eq!(
+            parse_action("mark set a").unwrap(),
+            Action::QuickmarkSet('a')
+        );
+        assert_eq!(
+            parse_action("mark set A").unwrap(),
+            Action::QuickmarkSet('A')
+        );
+        assert_eq!(
+            parse_action("mark jump z").unwrap(),
+            Action::QuickmarkJump('z')
+        );
+        // The `mark` keyword itself is case-insensitive.
+        assert_eq!(
+            parse_action("Mark Set q").unwrap(),
+            Action::QuickmarkSet('q')
+        );
+    }
+
+    #[test]
+    fn mark_action_string_requires_single_char_register() {
+        assert!(parse_action("mark set").is_err());
+        assert!(parse_action("mark set ab").is_err());
+        assert!(parse_action("mark jump").is_err());
+    }
+
+    #[test]
+    fn key_table_mark_without_register_is_char_arg_binding() {
+        let c = Config::parse(
+            r#"
+            [keys.normal]
+            "g" = "mark set"
+            "b" = "mark jump"
+            "#,
+        )
+        .unwrap();
+        let mut m = Matcher::new(Mode::Normal);
+        // `g` then `x` sets quickmark x.
+        assert_eq!(m.feed(KeyPress::char('g'), &c.keymap), MatchResult::Pending);
+        assert_eq!(
+            m.feed(KeyPress::char('x'), &c.keymap),
+            MatchResult::Matched {
+                action: Action::QuickmarkSet('x'),
+                count: None
+            }
+        );
+        assert_eq!(m.feed(KeyPress::char('b'), &c.keymap), MatchResult::Pending);
+        assert_eq!(
+            m.feed(KeyPress::char('y'), &c.keymap),
+            MatchResult::Matched {
+                action: Action::QuickmarkJump('y'),
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn toc_key_table_remaps() {
+        let c = Config::parse(
+            r#"
+            [keys.toc]
+            "n" = "toc next"
+            "#,
+        )
+        .unwrap();
+        let mut m = Matcher::new(Mode::Toc);
+        assert_eq!(
+            m.feed(KeyPress::char('n'), &c.keymap),
+            MatchResult::Matched {
+                action: Action::TocNext,
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_set_rerender_options() {
+        let mut o = Options::default();
+        assert_eq!(o.set("page-width", "900").unwrap(), SetEffect::Rerender);
+        assert_eq!(o.page_width_px, 900);
+        assert_eq!(o.set("font-size", "22").unwrap(), SetEffect::Rerender);
+        assert_eq!(o.font_size_px, 22);
+        assert_eq!(
+            o.set("font-body", "Fira Sans").unwrap(),
+            SetEffect::Rerender
+        );
+        assert_eq!(o.font_body, "Fira Sans");
+        // Quoted string value is unwrapped.
+        assert_eq!(
+            o.set("font-mono", "\"JetBrains Mono\"").unwrap(),
+            SetEffect::Rerender
+        );
+        assert_eq!(o.font_mono, "JetBrains Mono");
+    }
+
+    #[test]
+    fn runtime_set_recolor_and_none_effects() {
+        let mut o = Options::default();
+        assert_eq!(
+            o.set("default-recolor", "true").unwrap(),
+            SetEffect::Recolor
+        );
+        assert!(o.default_recolor);
+        assert_eq!(o.set("scroll-step", "80").unwrap(), SetEffect::None);
+        assert_eq!(o.scroll_step_px, 80);
+        assert_eq!(o.set("zoom-step", "0.25").unwrap(), SetEffect::None);
+        assert_eq!(o.zoom_step, 0.25);
+        assert_eq!(o.set("text-zoom-step", "0.2").unwrap(), SetEffect::None);
+    }
+
+    #[test]
+    fn runtime_set_rejects_bad_and_immutable() {
+        let mut o = Options::default();
+        assert!(o.set("page-width", "wide").is_err());
+        assert!(o.set("zoom-step", "lots").is_err());
+        assert!(o.set("no-such-option", "1").is_err());
+        // selection-clipboard cannot change at runtime, even with a valid value.
+        assert!(o.set("selection-clipboard", "clipboard").is_err());
+        assert_eq!(o.selection_clipboard, SelectionClipboard::Primary);
+    }
+
+    #[test]
+    fn option_keys_cover_the_options_surface() {
+        // Every advertised option key must be a real `:set` target.
+        let mut o = Options::default();
+        for key in option_keys() {
+            let r = o.set(key, "1");
+            // Known key: either applied, or a deliberate runtime rejection —
+            // never the "unknown option" error.
+            if let Err(msg) = r {
+                assert!(!msg.contains("unknown option"), "{key}: {msg}");
+            }
+        }
     }
 }

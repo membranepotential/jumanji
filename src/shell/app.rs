@@ -109,6 +109,9 @@ fn build_ui(
             font_body: options.font_body.clone(),
             font_mono: options.font_mono.clone(),
             font_size_px: options.font_size_px,
+            // Populated by the shell from ~/.config/jumanji/themes/*.css (M2
+            // shell-integration work); empty keeps the built-in styling.
+            extra_css: Vec::new(),
         },
         scroll_step: options.scroll_step_px as i64,
         zoom_step: options.zoom_step,
@@ -533,6 +536,17 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
         }
         Action::ToggleToc => s.bar.set_message("table of contents: not implemented (M2)"),
         Action::CommandLine => s.bar.set_message("command line: not implemented (M2)"),
+        Action::FollowLink => s.bar.set_message("follow link: not implemented (M2)"),
+        Action::ShowLinkTarget => s.bar.set_message("show link target: not implemented (M2)"),
+        Action::QuickmarkSet(_) => s.bar.set_message("set quickmark: not implemented (M2)"),
+        Action::QuickmarkJump(_) => s.bar.set_message("jump to quickmark: not implemented (M2)"),
+        Action::JumpBackward => s.bar.set_message("jumplist back: not implemented (M2)"),
+        Action::JumpForward => s.bar.set_message("jumplist forward: not implemented (M2)"),
+        Action::TocNext
+        | Action::TocPrevious
+        | Action::TocExpand
+        | Action::TocCollapse
+        | Action::TocSelect => s.bar.set_message("toc navigation: not implemented (M2)"),
         Action::Abort => {
             s.matcher.set_mode(Mode::Normal);
             if s.bar.is_input_visible() {

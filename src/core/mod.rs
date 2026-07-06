@@ -2,8 +2,12 @@
 //!
 //! Everything in this module must be testable without a display.
 
+pub mod command;
 pub mod config;
+pub mod history;
+pub mod jumplist;
 pub mod keymap;
+pub mod marks;
 pub mod pipeline;
 pub mod toc;
 
@@ -73,6 +77,30 @@ pub enum Action {
     Reload,
     ToggleToc,
     CommandLine,
+    /// Enter link-hint mode and jump to the chosen link (hint interaction and
+    /// overlay live in the shell; the keymap only fires the entry action).
+    FollowLink,
+    /// Enter link-hint mode and show the chosen link's target in the statusbar
+    /// instead of navigating to it.
+    ShowLinkTarget,
+    /// Set quickmark `char` to the current reading position (zathura `m<x>`).
+    QuickmarkSet(char),
+    /// Jump to the position stored in quickmark `char` (zathura `'<x>`).
+    QuickmarkJump(char),
+    /// Jumplist back (`Ctrl-o`).
+    JumpBackward,
+    /// Jumplist forward (`Ctrl-i`).
+    JumpForward,
+    /// TOC-mode: move the selection to the next visible entry.
+    TocNext,
+    /// TOC-mode: move the selection to the previous visible entry.
+    TocPrevious,
+    /// TOC-mode: expand the selected entry's children.
+    TocExpand,
+    /// TOC-mode: collapse the selected entry.
+    TocCollapse,
+    /// TOC-mode: jump to the selected entry and leave TOC mode.
+    TocSelect,
     Abort,
     Quit,
 }
