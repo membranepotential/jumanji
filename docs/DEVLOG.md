@@ -2,6 +2,29 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-07 — Fix: independent processes per file (GApplication NON_UNIQUE)
+
+Opening a second file while one was already open failed:
+`failed to export D-Bus object: An object is already exported … at
+/org/membranepotential/jumanji` and `could not own D-Bus name …PID-<pid>;
+automation disabled` — and the "second" window showed the *first* file.
+
+Root cause: the GTK `Application` ran in the default single-instance mode. A
+second `jumanji <file2>` saw the primary already owned `…jumanji`, so
+GApplication forwarded *activation* to the first process instead of running the
+second process's own `activate`. The primary then re-ran `build_ui` for its
+original file, re-exporting the D-Bus object at the same path (error 1) and
+re-owning its own PID name (error 2), and popping a duplicate window on the
+wrong document.
+
+Fix: build the `Application` with `ApplicationFlags::NON_UNIQUE`, so each
+`jumanji <file>` is a fully independent process (zathura semantics) — which is
+what the per-PID D-Bus surface (`…jumanji.PID-<pid>`) always assumed.
+Verified under Xvfb + a private session bus: two instances now own distinct PID
+names and each reports its own file over `GetState`; the neovim `--forward`
+routing still finds the running instance and exits without a second window.
+DESIGN D7 updated to record the invariant. Next: nothing outstanding.
+
 ## 2026-07-07 — Release v1.2.0
 
 Minor bump collecting the two features since v1.1.1: the in-repo Neovim plugin

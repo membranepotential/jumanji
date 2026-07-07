@@ -180,7 +180,17 @@ impl Shell {
 /// an optional `--forward <line>` to jump to once the initial load finishes
 /// (file sources only; rejected for stdin before we get here).
 pub fn run(source: Source, config: Config, forward: Option<u32>) -> glib::ExitCode {
-    let app = Application::builder().application_id(APP_ID).build();
+    // NON_UNIQUE: every `jumanji <file>` is its own independent process, like
+    // zathura. Without it, GApplication's single-instance negotiation makes a
+    // second launch forward *activation* to the first process (which then
+    // re-runs `build_ui` for its own file — wrong document, a duplicate window,
+    // and a clash with our per-PID D-Bus surface: the object is re-exported at
+    // the same path and the PID name is re-owned, both of which fail). Each
+    // instance still owns a distinct `…jumanji.PID-<pid>` name for automation.
+    let app = Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::NON_UNIQUE)
+        .build();
 
     let keymap = Rc::new(config.keymap);
     let options = config.options;

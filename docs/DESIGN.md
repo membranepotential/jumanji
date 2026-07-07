@@ -273,7 +273,13 @@ built; the surface is fixed below.
 
 - **Forward (editor → reader).** A `--forward <LINE>` CLI flag plus a
   `GotoLine(line: u32)` method on the existing per-instance interface
-  (`org.membranepotential.jumanji.PID-<pid>`, `src/shell/dbus.rs`). Semantics:
+  (`org.membranepotential.jumanji.PID-<pid>`, `src/shell/dbus.rs`). The per-PID
+  model **requires** the GTK `Application` to run with `NON_UNIQUE` (set in
+  `app::run`): every `jumanji <file>` is its own independent process (zathura
+  semantics). Without it, GApplication's single-instance negotiation forwards a
+  second launch's *activation* to the first process — reopening its own file in a
+  duplicate window and colliding on the shared D-Bus object path — so distinct
+  files could never be open at once. Semantics:
   scroll to the rendered element whose source line is the greatest at-or-before
   `LINE`, recording the departure on the jumplist first (a jump like any other).
   - **Second-instance routing (mirrors `--synctex-forward`):** `jumanji
