@@ -2,6 +2,13 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-07 — Release v1.2.0
+
+Minor bump collecting the two features since v1.1.1: the in-repo Neovim plugin
+for two-way editor sync (`lua/jumanji/`) and the wider 960 px default content
+column. No behavior change beyond those; released as tag + GitHub release, AUR
+PKGBUILD repointed.
+
 ## 2026-07-07 — Wider default content column (720 → 960 px)
 
 The default `page-width` was 720 px, which on a 1920-logical-px display (a 4K
