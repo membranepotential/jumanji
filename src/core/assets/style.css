@@ -14,7 +14,7 @@
 
 :root {
   /* Overridden by a generated block using opts.page_width_px. */
-  --content-width: 720px;
+  --content-width: 960px;
 
   /* Horizontal padding constants. `--main-pad-x` is the reading column's side
    * padding; `--mermaid-pad` is the diagram box's inner padding. */

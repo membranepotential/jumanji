@@ -160,7 +160,7 @@ A ```` ```dot ```` fence then renders as a diagram. Details:
 scroll-step = 60        # pixels per j/k
 zoom-step = 0.1
 default-recolor = false # start in dark mode
-page-width = 720        # px, content column width
+page-width = 960        # px, content column width
 editor-command = "$EDITOR +%l %f"  # reverse editor sync (Ctrl+click), %l line / %f file
 
 [keys.normal]

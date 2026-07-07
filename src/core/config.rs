@@ -75,7 +75,7 @@ impl Default for Options {
             scroll_step_px: 60,
             zoom_step: 0.1,
             text_zoom_step: 0.1,
-            page_width_px: 720,
+            page_width_px: 960,
             default_recolor: false,
             font_body: String::new(),
             font_mono: String::new(),

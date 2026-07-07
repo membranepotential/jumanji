@@ -50,7 +50,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            page_width_px: 720,
+            page_width_px: 960,
             font_body: String::new(),
             font_mono: String::new(),
             font_size_px: 18,

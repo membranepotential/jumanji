@@ -2,6 +2,16 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-07-07 — Wider default content column (720 → 960 px)
+
+The default `page-width` was 720 px, which on a 1920-logical-px display (a 4K
+panel at 2× scale) reads as roughly a third of the screen. Bumped the default
+to 960 px so it lands at ~half the width out of the box. Purely a default
+change — the config knob and the intrinsic-width diagram model are untouched.
+Updated everywhere the default lives: `Options`/`Defaults` in `pipeline.rs` and
+`config.rs`, the `--content-width` CSS fallback, the DESIGN option table, and
+the README/demo sample configs.
+
 ## 2026-07-07 — Statusbar/search UX polish (1.1.1)
 
 Three zathura-fidelity fixes, all in the shell:

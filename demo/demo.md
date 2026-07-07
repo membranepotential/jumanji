@@ -78,7 +78,7 @@ def fib(n: int) -> int:
 # ~/.config/jumanji/config.toml
 [options]
 scroll-step = 60
-page-width = 720
+page-width = 960
 
 [keys.normal]
 "<C-d>" = "halfpage down"

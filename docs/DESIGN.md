@@ -121,7 +121,7 @@ Options surface (all optional; defaults in parentheses):
 | `scroll-step` | u32 (`60`) | pixels per `j`/`k`/`h`/`l` before count |
 | `zoom-step` | f64 (`0.1`) | geometric zoom increment per step |
 | `text-zoom-step` | f64 (`0.1`) | text zoom increment (fraction of base) per step |
-| `page-width` | u32 (`720`) | content column width, px |
+| `page-width` | u32 (`960`) | content column width, px |
 | `default-recolor` | bool (`false`) | start in dark mode |
 | `font-body` | string (`""`) | prose font family; empty = stylesheet default serif stack |
 | `font-mono` | string (`""`) | code font family; empty = stylesheet default mono stack |
