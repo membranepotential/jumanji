@@ -12,6 +12,36 @@ Updated everywhere the default lives: `Options`/`Defaults` in `pipeline.rs` and
 `config.rs`, the `--content-width` CSS fallback, the DESIGN option table, and
 the README/demo sample configs.
 
+## 2026-07-07 — Neovim plugin: two-way sync without `--listen` (D7 editor half)
+
+The README's copy-paste Neovim snippets grew into a real plugin, shipped
+in-repo at `lua/jumanji/` (fzf-style repo-as-plugin; DESIGN D7 updated). Both
+directions reuse the existing D7 surfaces — nothing changed on the Rust side.
+
+- **Forward.** `require("jumanji").open()` (suggested `<leader>cj`,
+  ft=markdown) pairs the buffer with a reader: discovers a running instance
+  with the file open via session-bus scan + `GetState` (pid from the bus name
+  is the liveness handle) or spawns `jumanji --forward <line> <file>` detached.
+  `CursorHold`/`BufWritePost` autocmds push the cursor line while that pid is
+  alive; a dead pid disarms quietly, so a closed reader is never resurrected
+  by a stray autocmd.
+- **Reverse.** `editor-command = "nvim -l …/lua/jumanji/reverse.lua %l %f"` —
+  vimtex's inverse-search pattern instead of the README's old `nvr` +
+  `--listen` recipe: the scripting-mode nvim globs default server sockets
+  (`stdpath("run")/nvim.*`, socket-type filtered, own pid skipped — self-RPC
+  deadlocks), and the instance with the file loaded claims the jump + raises
+  its terminal (`$WINDOWID`/xdotool); otherwise the first reachable instance
+  opens the file. Two bugs found by headless tests: `ok and res or nil`
+  swallowed the meaningful `false` ("reachable, didn't claim"), and socket
+  paths >107 chars get silently truncated by `sun_path` (only bit the test
+  harness — real sockets live in `$XDG_RUNTIME_DIR`).
+- **Verified headless** (Xvfb + real instance for forward; `--listen`
+  listeners for reverse): claim, fallback, no-instance, route-to-existing
+  (no second window), spawn-at-line, live push, detach survival.
+
+Next: nothing planned for the plugin; candidates are a `%c` column placeholder
+and TOC-aware reverse jumps.
+
 ## 2026-07-07 — Statusbar/search UX polish (1.1.1)
 
 Three zathura-fidelity fixes, all in the shell:

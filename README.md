@@ -93,38 +93,49 @@ Round-trip navigation between your editor and the reader, both directions:
   file, `%%` = literal `%`; default `$EDITOR +%l %f`). Failures (unset `$EDITOR`,
   bad line, spawn error) are a statusbar notice, never a crash.
 
-### Neovim hook
+### Neovim plugin (two-way sync)
 
-**Forward** — push the reader to your cursor line. Drop this in your config
-(e.g. `after/ftplugin/markdown.lua`); `CursorHold` keeps it from spamming on
-every motion (tune with `:set updatetime`):
+The repo doubles as a Neovim plugin (fzf-style: `lua/jumanji/` at the repo
+root). With lazy.nvim:
 
 ```lua
-vim.api.nvim_create_autocmd({ "CursorHold", "BufWritePost" }, {
-  buffer = 0,
-  callback = function()
-    vim.system({ "jumanji", "--forward",
-      tostring(vim.fn.line(".")), vim.fn.expand("%:p") })
-  end,
-})
+{
+  "membranepotential/jumanji",
+  name = "jumanji.nvim",
+  ft = "markdown",
+  opts = {},
+  keys = {
+    { "<leader>cj", function() require("jumanji").open() end,
+      desc = "Jumanji Reader (sync)", ft = "markdown" },
+  },
+}
 ```
 
-**Reverse** — make `Ctrl`+click jump inside your *running* Neovim instead of
-spawning a fresh one. Start Neovim listening on a known socket:
+- **Forward** — the keybind (or `:Jumanji`) pairs the buffer with a reader:
+  it reuses the instance that already has the file open (found over the
+  session bus, pid taken from its bus name) or spawns one at the cursor line.
+  While the paired reader is open, `CursorHold`/`BufWritePost` keep it
+  following the cursor (`opts = { live = false }` to sync only on explicit
+  jumps); closing the reader disarms sync silently.
+- **Reverse** — `Ctrl`+click jumps inside your *running* Neovim, no `--listen`
+  or `neovim-remote` needed. Point `editor-command` at the bundled entry point
+  (absolute path — template arguments get no `~`/`$VAR` expansion):
 
-```sh
-nvim --listen /tmp/nvim.pipe file.md
-```
+  ```toml
+  [options]
+  editor-command = "nvim -l /abs/path/to/jumanji/lua/jumanji/reverse.lua %l %f"
+  ```
 
-then point `editor-command` at it (needs [`neovim-remote`](https://github.com/mhinz/neovim-remote), `pipx install neovim-remote`):
+  With lazy.nvim that's
+  `~/.local/share/nvim/lazy/jumanji.nvim/lua/jumanji/reverse.lua`, spelled
+  out. It works the way vimtex's inverse search does: a short-lived
+  scripting-mode `nvim -l` finds every running instance through its default
+  server socket (`stdpath("run")/nvim.<pid>.0`), asks each over RPC, and the
+  one with the file loaded claims the jump — falling back to opening the file
+  in the first reachable instance.
 
-```toml
-[options]
-editor-command = "nvr --servername /tmp/nvim.pipe +%l %f"
-```
-
-The default `$EDITOR +%l %f` also works — it just opens a new editor per click
-rather than reusing a session.
+The default `$EDITOR +%l %f` also works without any of this — it just opens a
+new editor per click rather than reusing a session.
 
 ## External fence renderers
 

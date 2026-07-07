@@ -302,6 +302,28 @@ built; the surface is fixed below.
     shell expands a leading `$VAR` per token at spawn time (keeping env I/O out of
     the pure core). Config-only, like `[renderers]` — not a `:set` target.
 
+- **Neovim plugin (`lua/jumanji/`, in-repo).** The editor half of D7 ships in
+  this repo as a Neovim plugin at the root (`lua/jumanji/init.lua`), the fzf
+  precedent: one clone serves both `cargo` and plugin managers, and the plugin
+  version can never drift from the reader it drives. It adds no third surface —
+  both directions ride the surfaces above:
+  - *Forward:* `open()` pairs a buffer with a reader — it discovers an instance
+    that has the file open exactly like the CLI does (session-bus name scan +
+    `GetState` file match; the pid embedded in the bus name is the liveness
+    handle) or spawns `jumanji --forward <line> <file>` detached. While that
+    pid is alive, `CursorHold`/`BufWritePost` push the cursor line via
+    `--forward`; when it dies, sync disarms silently (no reader resurrection
+    from a stray autocmd).
+  - *Reverse:* `editor-command = "nvim -l …/lua/jumanji/reverse.lua %l %f"`.
+    The `-l` entry point is vimtex's inverse-search pattern: enumerate running
+    instances via their default server sockets (`stdpath("run")/nvim.*`,
+    skipping its own pid — even scripting mode owns a socket, and self-RPC
+    deadlocks), RPC each, and the instance with the file loaded claims the
+    jump (then raises its terminal via `$WINDOWID` + xdotool); no claimant ⇒
+    open the file in the first reachable instance. This keeps plain `nvim`
+    usable — no `--listen`, no `nvr`, no fixed socket path, any number of
+    instances.
+
 - **Source-line mapping (the SyncTeX line map).** comrak's `render.sourcepos`
   emits `data-sourcepos="startLine:col-endLine:col"` on every rendered element
   (block *and* inline), so most of the document is addressable natively with **no
