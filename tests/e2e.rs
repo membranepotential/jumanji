@@ -200,17 +200,25 @@ impl Harness {
     /// the live-reload test, which mutates a throwaway copy. Fresh private XDG
     /// dirs are allocated per launch.
     fn launch_file(file: PathBuf) -> Self {
+        Self::launch_file_in_dir(file, None)
+    }
+
+    /// As [`launch_file`](Self::launch_file), but with an explicit working
+    /// directory for the child. The vault index is rooted at the process CWD
+    /// (DESIGN D11), so any test that exercises `[[wikilink]]` resolution must
+    /// launch inside the tree it expects to resolve against.
+    fn launch_file_in_dir(file: PathBuf, cwd: Option<PathBuf>) -> Self {
         let id = next_display();
         let config_home = std::env::temp_dir().join(format!("jumanji-e2e-xdg-{id}"));
         let data_home = std::env::temp_dir().join(format!("jumanji-e2e-data-{id}"));
-        Self::launch_in(file, config_home, data_home)
+        Self::launch_in_forward(file, config_home, data_home, None, cwd)
     }
 
     /// Launch on `file` with explicit private `config_home`/`data_home` dirs. The
     /// data home holds `history.toml`, so a relaunch on the same data home
     /// exercises window-state persistence.
     fn launch_in(file: PathBuf, config_home: PathBuf, data_home: PathBuf) -> Self {
-        Self::launch_in_forward(file, config_home, data_home, None)
+        Self::launch_in_forward(file, config_home, data_home, None, None)
     }
 
     /// As [`launch_in`](Self::launch_in), but optionally passing `--forward
@@ -220,6 +228,7 @@ impl Harness {
         config_home: PathBuf,
         data_home: PathBuf,
         forward: Option<u32>,
+        cwd: Option<PathBuf>,
     ) -> Self {
         let display = next_display();
         let display_arg = format!(":{display}");
@@ -248,6 +257,10 @@ impl Harness {
         cmd.arg(&file);
         if let Some(line) = forward {
             cmd.args(["--forward", &line.to_string()]);
+        }
+        // The vault index is rooted at the child's working directory (D11).
+        if let Some(cwd) = &cwd {
+            cmd.current_dir(cwd);
         }
         let app = cmd
             .env("DISPLAY", &display_arg)
@@ -1592,7 +1605,7 @@ fn forward_flag_jumps_after_load_on_fresh_launch() {
     let config_home = std::env::temp_dir().join(format!("jumanji-e2e-fwd-cfg-{id}"));
     let data_home = std::env::temp_dir().join(format!("jumanji-e2e-fwd-data-{id}"));
 
-    let h = Harness::launch_in_forward(demo, config_home, data_home, Some(FORWARD_LINE));
+    let h = Harness::launch_in_forward(demo, config_home, data_home, Some(FORWARD_LINE), None);
     let s = h.wait_for_state("fresh --forward jumps after load", SETTLE, |s| {
         s.scroll_y > 0.0
     });
@@ -1727,4 +1740,110 @@ fn reverse_ctrl_click_spawns_editor_command() {
 
     drop(h);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// Obsidian dialect (DESIGN D11)
+// ---------------------------------------------------------------------------
+
+/// Build a throwaway vault under the system temp dir and return its root.
+/// A vault is just a directory of notes — there is no marker to create; what
+/// makes it the vault is launching the reader *in* it (DESIGN D11).
+fn temp_vault(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("jumanji-e2e-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create vault");
+    dir
+}
+
+/// Enough prose that a heading placed after it sits well below the fold.
+fn filler() -> String {
+    (1..=80)
+        .map(|i| format!("Filler paragraph {i} padding the document past the fold.\n\n"))
+        .collect()
+}
+
+#[test]
+fn wikilink_follows_across_vault_notes() {
+    // The checked-in fixture vault, entered the way a user would: the reader is
+    // launched *inside* `demo/vault`, so the index is rooted there and
+    // `[[Concepts/Callouts]]` resolves vault-wide. The emitted `file://` link
+    // then routes through `open_uri` → `open_file` like any other.
+    // `Welcome.md`'s first link is that one, so the first hint label follows it.
+    let Some(_g) = setup_guard() else { return };
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let vault = Path::new(manifest).join("demo").join("vault");
+    let h = Harness::launch_file_in_dir(vault.join("Welcome.md"), Some(vault.clone()));
+    assert!(
+        h.get_state().file.ends_with("Welcome.md"),
+        "starts on Welcome.md"
+    );
+
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    h.wait_for_state("wikilink opens the target note", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("Callouts.md")
+    });
+}
+
+#[test]
+fn wikilink_heading_fragment_scrolls_target_document() {
+    // The `pending_anchor` path: a cross-document fragment used to be dropped
+    // (the file opened at the top). A one-link vault keeps the hint label
+    // deterministic, so what is asserted is the anchor, not the hint ordering.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("frag");
+    std::fs::write(
+        vault.join("Source.md"),
+        "# Source\n\nGo to [[Target#Folding]].\n",
+    )
+    .expect("write Source.md");
+    std::fs::write(
+        vault.join("Target.md"),
+        format!("# Target\n\n{}## Folding\n\nLanded here.\n", filler()),
+    )
+    .expect("write Target.md");
+
+    let h = Harness::launch_file_in_dir(vault.join("Source.md"), Some(vault.clone()));
+    assert!(h.get_state().file.ends_with("Source.md"));
+
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    h.wait_for_state(
+        "fragment link opens the target *at the anchor*",
+        SETTLE,
+        |s| s.mode == "normal" && s.file.ends_with("Target.md") && s.scroll_y > 1.0,
+    );
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn unresolved_wikilink_is_not_hintable() {
+    // An unresolved link carries no `href`, so the `a[href]` hint overlay never
+    // sees it — dead by construction, not by a guard in the router. `[[Nowhere]]`
+    // is written *first*, so an href would have claimed the `a` label.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("unresolved");
+    std::fs::write(
+        vault.join("Source.md"),
+        "# Source\n\n[[Nowhere]] and then [[Target]].\n",
+    )
+    .expect("write Source.md");
+    std::fs::write(vault.join("Target.md"), "# Target\n\nArrived.\n").expect("write Target.md");
+
+    let h = Harness::launch_file_in_dir(vault.join("Source.md"), Some(vault.clone()));
+
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    h.wait_for_state("the first hint is the resolvable link", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("Target.md")
+    });
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
 }

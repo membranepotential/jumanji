@@ -303,3 +303,18 @@ Anchored at `#notes`.
 ### Notes
 
 Anchored at `#notes-1` — fragment links stay unique.
+
+## Obsidian dialect
+
+Callouts cover all 27 Obsidian spellings, mapped onto 13 canonical types:
+
+> [!tip] Custom title
+> The type is case-insensitive, and the title is optional.
+
+> [!question]- Collapsed by default
+> A `-` marker folds the callout closed; `+` folds it open. No marker at all
+> means a plain box with no disclosure control, which is what Obsidian shows.
+
+Prose can be ==highlighted==, and `[[wikilinks]]` resolve against the
+document's vault — [[Nowhere]] has no target here, so it renders inert rather
+than as a broken link. See `demo/vault/Welcome.md` for the full sampler.

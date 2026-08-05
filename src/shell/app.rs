@@ -27,8 +27,10 @@ use crate::core::history::{FileState, History};
 use crate::core::jumplist::{Jumplist, Location};
 use crate::core::keymap::{Key, KeyPress, Keymap, MatchResult, Matcher};
 use crate::core::marks::{Marks, Position};
+use crate::core::obsidian;
 use crate::core::pipeline::{self, Options as RenderOptions};
 use crate::core::source::Source;
+use crate::core::vault::Vault;
 use crate::core::{Action, Direction, Heading, Mode};
 
 use super::bar::{Bar, Prompt};
@@ -95,9 +97,20 @@ struct Shell {
     /// options and step fields are re-synced from.
     options: Options,
     render_opts: RenderOptions,
+    /// Per-document link resolution (DESIGN D11): the vault this document sits
+    /// in, or a `Loose` fallback. Rebuilt on every document load and on `r`,
+    /// never by the watch-driven live reload — editing a note cannot rename
+    /// another one, so a re-render reuses the index it was loaded with.
+    vault: Vault,
     /// Reverse editor-sync template (DESIGN D7): spawned on Ctrl+click with
     /// `%l`/`%f` substituted. Config-only (copied from options at construction).
     editor_command: EditorCommand,
+    /// A fragment to scroll to once the *next* load finishes — how a
+    /// cross-document link (`other.md#section`, or a resolved `[[Note#H]]`)
+    /// keeps its anchor (DESIGN D11). Applied after `pending_restore`, so it
+    /// overrides the restored history scroll; one-shot, so a stale anchor
+    /// cannot leak into the following document.
+    pending_anchor: Option<String>,
     /// A `--forward <line>` requested on the command line, applied once the
     /// initial load finishes (DESIGN D7 forward sync on a fresh launch).
     pending_forward: Option<u32>,
@@ -209,6 +222,17 @@ pub fn run(source: Source, config: Config, forward: Option<u32>) -> glib::ExitCo
     app.run_with_args::<&str>(&[])
 }
 
+/// The vault for `source`, rooted at the **process working directory** (DESIGN
+/// D11). There is no marker directory to discover: jumanji borrows Obsidian's
+/// syntax and none of its machinery, so "the vault" is simply wherever you
+/// launched the reader. jumanji never `chdir`s, so this is constant for the
+/// process; it is recomputed per load rather than cached because the index
+/// behind it must be fresh, and one `getcwd` is free next to the directory walk.
+fn vault_for(source: &Path) -> Vault {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    Vault::rooted(&root, source)
+}
+
 /// The document base path for `source`: the real file, or a sentinel under the
 /// current directory for stdin so relative images/links resolve against the CWD.
 fn base_path(source: &Source) -> PathBuf {
@@ -276,8 +300,10 @@ fn build_ui(
             // the renderers) for free.
             renderers: options.renderers.clone(),
         },
+        vault: vault_for(&file),
         editor_command: options.editor_command.clone(),
         pending_forward: forward,
+        pending_anchor: None,
         config_dir: config_dir.clone(),
         data_dir,
         scroll_step: options.scroll_step_px as i64,
@@ -409,7 +435,7 @@ fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
     };
     match md {
         Ok(md) => {
-            let doc = pipeline::render(&md, &s.render_opts);
+            let doc = pipeline::render(&md, &s.render_opts, &s.vault);
             s.toc = doc.toc.clone();
             s.section = 0;
             // Record the desired recolor state before loading so `load_document`
@@ -419,6 +445,8 @@ fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
             s.view.load_document(&doc, &path);
         }
         Err(msg) => {
+            // No load will finish, so nothing would consume a pending anchor.
+            s.pending_anchor = None;
             s.bar.set_message(&msg);
         }
     }
@@ -448,16 +476,19 @@ fn connect_load_finished(shell: &Rc<RefCell<Shell>>) {
                 s.view.restore_scroll(y);
             }
         }
-        let forward = {
+        let (forward, anchor) = {
             let mut s = shell.borrow_mut();
             s.pending_restore = None;
             s.loaded = true;
-            // A `--forward <line>` overrides the restored scroll: the editor
-            // explicitly pointed the reader at this line, so jump there once.
-            s.pending_forward.take()
+            // Both override the restored scroll, and both are one-shot.
+            (s.pending_forward.take(), s.pending_anchor.take())
         };
+        // A `--forward <line>` wins over a link fragment: the editor explicitly
+        // pointed the reader at this line.
         if let Some(line) = forward {
             goto_source_line(&shell, line);
+        } else if let Some(anchor) = anchor {
+            shell.borrow().view.scroll_to_anchor(&anchor);
         }
         refresh_status(&shell);
     });
@@ -1086,6 +1117,10 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             s.toc_view.set_dark(dark);
         }
         Action::Reload => {
+            // An explicit reload is exactly when the index may have changed
+            // underfoot (a note created or renamed since the last load).
+            let file = s.file.clone();
+            s.vault = vault_for(&file);
             drop(s);
             render_and_load(shell, true);
         }
@@ -1457,18 +1492,20 @@ impl Shell {
 /// same-document fragment → scroll; local `.md`/`.markdown` → open in-window;
 /// anything else → hand to the system (never navigate the webview).
 fn open_uri(shell: &Rc<RefCell<Shell>>, uri: &str) {
-    let current = gio::File::for_path(&shell.borrow().file).uri().to_string();
+    let current = shell.borrow().file.clone();
+    // WebKit hands the fragment back percent-encoded, so a block id arrives as
+    // `%5E37066d` — and `getElementById` needs the literal `^` (DESIGN D11).
     let (base, frag) = match uri.split_once('#') {
-        Some((b, f)) => (b.to_string(), Some(f.to_string())),
+        Some((b, f)) => (b.to_string(), Some(obsidian::percent_decode(f))),
         None => (uri.to_string(), None),
     };
 
     // Same-document fragment: scroll to the anchor (recording a jump). We drive
     // the scroll ourselves rather than letting WebKit navigate.
-    if let Some(frag) = frag
-        && (base.is_empty() || base == current)
+    if let Some(anchor) = frag.clone()
+        && same_document(&current, &base)
     {
-        jump_to(shell, move |s| s.view.scroll_to_anchor(&frag));
+        jump_to(shell, move |s| s.view.scroll_to_anchor(&anchor));
         return;
     }
 
@@ -1479,7 +1516,10 @@ fn open_uri(shell: &Rc<RefCell<Shell>>, uri: &str) {
             .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
             .unwrap_or(false);
         if is_md {
-            open_file(shell, path);
+            // Cross-document fragments used to be dropped here; `open_file`
+            // carries this one over the load instead (D11 — which fixes plain
+            // markdown fragment links too, not just wikilinks).
+            open_file(shell, path, frag);
             return;
         }
     }
@@ -1500,8 +1540,9 @@ fn open_uri(shell: &Rc<RefCell<Shell>>, uri: &str) {
 /// Open `path` in this window in response to a link follow or `:open`. Records
 /// the current position on the jumplist first — so `Ctrl-o` / `Backspace`
 /// returns here — unless we're leaving a non-returnable stdin stream. The new
-/// file resumes at its saved scroll position (or the top, if unseen).
-fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf) {
+/// file resumes at its saved scroll position (or the top, if unseen), or at
+/// `anchor` when the link carried a fragment.
+fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf, anchor: Option<String>) {
     if !path.exists() {
         shell
             .borrow()
@@ -1511,6 +1552,11 @@ fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf) {
     }
     {
         let mut s = shell.borrow_mut();
+        // Arm the anchor only once the open is certain. Setting it before the
+        // existence check above left it armed on a dead link, ready to override
+        // the *next* document's restored scroll. Assigning unconditionally also
+        // clears a stale one on an anchor-less open.
+        s.pending_anchor = anchor;
         // Record the departure so the jumplist can return here. A stdin stream
         // has no reopenable identity, so leaving one records nothing.
         if !s.is_stdin() {
@@ -1548,6 +1594,11 @@ fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, restore_scroll: f64)
             leave_toc(&mut s);
         }
         s.file = path.clone();
+        // Rebuild the index before the render that follows — the new document
+        // may have arrived alongside notes the old index never saw. Watch-driven
+        // live reload deliberately does not (editing a note cannot rename
+        // another one — D11).
+        s.vault = vault_for(&path);
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1588,6 +1639,28 @@ fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
     gio::File::for_uri(uri).path()
 }
 
+/// Whether `base` (a fragment-less URI) names the document already open.
+///
+/// Compared as **paths**, never as URI strings: gio and
+/// `core::obsidian::percent_encode` disagree on which characters to escape
+/// (`'`, `(`, `)`, `+` among them), so a byte comparison misses a same-document
+/// `[[#Heading]]` in any file whose path contains one — reloading the document
+/// and pushing a spurious jumplist entry instead of just scrolling.
+fn same_document(current: &Path, base: &str) -> bool {
+    if base.is_empty() {
+        return true;
+    }
+    match file_uri_to_path(base) {
+        Some(path) => canonical(&path) == canonical(current),
+        None => false,
+    }
+}
+
+/// `path` canonicalized, or unchanged when it cannot be (it may not exist).
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 // ---------------------------------------------------------------------------
 // `:` command line
 // ---------------------------------------------------------------------------
@@ -1597,7 +1670,7 @@ fn run_command(shell: &Rc<RefCell<Shell>>, query: &str) {
         Ok(Command::Open(raw)) => {
             let current = shell.borrow().file.clone();
             let resolved = resolve_open_path(&current, &raw);
-            open_file(shell, resolved);
+            open_file(shell, resolved, None);
         }
         Ok(Command::Set(key, value)) => apply_set(shell, &key, &value),
         Ok(Command::Exec(action)) => execute(shell, action, 1),

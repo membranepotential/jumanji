@@ -37,8 +37,10 @@
   --note-fg: #7a5b00;
   --selection: #b3d4fc;
 
-  /* GFM alert accents (GitHub palette). Each drives the left border and the
-   * title colour; the box background is a faint tint of the accent. */
+  /* Callout accents (the GitHub alert palette). Each drives a callout's left
+   * border and title colour; the box background is a faint tint of the accent.
+   * Five accents carry all 13 canonical Obsidian types — see the mapping in
+   * the callout block below. */
   --alert-note: #0969da;
   --alert-tip: #1a7f37;
   --alert-important: #8250df;
@@ -215,13 +217,15 @@ blockquote > :last-child {
   margin-bottom: 0;
 }
 
-/* ---- GFM alerts / callouts ----------------------------------------------- */
+/* ---- Obsidian callouts --------------------------------------------------- */
 
-/* comrak emits `<div class="markdown-alert markdown-alert-<kind>">` with a
- * leading `<p class="markdown-alert-title">`. Each kind colours its left
- * border and title through the `--alert-*` accent; the box tint is derived
- * from the accent with `color-mix` so it adapts to light/dark automatically. */
-.markdown-alert {
+/* `core::callout` emits `<div class="callout callout-<canonical>"
+ * data-callout="<literal>">` with a leading `<p class="callout-title">`, or
+ * `<details>`/`<summary>` when the source carried a `+`/`-` fold marker. Each
+ * canonical type colours its left border and title through an `--alert-*`
+ * accent (the GFM alert palette, reused); the box tint is derived from the
+ * accent with `color-mix` so it adapts to light/dark automatically. */
+.callout {
   --alert-accent: var(--fg-muted);
   margin: 1.4em 0;
   padding: 0.4em 1.1em;
@@ -229,15 +233,16 @@ blockquote > :last-child {
   border-radius: 0 6px 6px 0;
   background: color-mix(in srgb, var(--alert-accent) 8%, transparent);
 }
-.markdown-alert > :first-child {
+.callout > :first-child {
   margin-top: 0;
 }
-.markdown-alert > :last-child {
+.callout > :last-child {
   margin-bottom: 0;
 }
-.markdown-alert-title {
+.callout-title {
   display: flex;
   align-items: center;
+  gap: 0.4em;
   font-family: system-ui, sans-serif;
   font-weight: 650;
   line-height: 1;
@@ -245,20 +250,121 @@ blockquote > :last-child {
   margin: 0 0 0.6em;
 }
 
-.markdown-alert-note {
+/* A foldable callout. `<details>` gives the disclosure for free — no
+ * JavaScript (DESIGN D3) — but its default marker sits outside the flex title,
+ * so it is replaced by a rotating triangle drawn on the summary itself. */
+details.callout > summary.callout-title {
+  cursor: pointer;
+  list-style: none;
+}
+details.callout > summary.callout-title::-webkit-details-marker {
+  display: none;
+}
+details.callout > summary.callout-title::before {
+  content: "\25b8";
+  display: inline-block;
+  transition: transform 120ms ease;
+}
+details.callout[open] > summary.callout-title::before {
+  transform: rotate(90deg);
+}
+details.callout[open] > summary.callout-title {
+  margin-bottom: 0.6em;
+}
+details.callout:not([open]) > summary.callout-title {
+  margin-bottom: 0;
+}
+
+/* The 13 canonical types over the 5 accents (plus the quote border). */
+.callout-note,
+.callout-info,
+.callout-todo,
+.callout-abstract {
   --alert-accent: var(--alert-note);
 }
-.markdown-alert-tip {
+.callout-tip,
+.callout-success {
   --alert-accent: var(--alert-tip);
 }
-.markdown-alert-important {
-  --alert-accent: var(--alert-important);
-}
-.markdown-alert-warning {
+.callout-question,
+.callout-warning {
   --alert-accent: var(--alert-warning);
 }
-.markdown-alert-caution {
+.callout-failure,
+.callout-danger,
+.callout-bug {
   --alert-accent: var(--alert-caution);
+}
+.callout-example {
+  --alert-accent: var(--alert-important);
+}
+.callout-quote {
+  --alert-accent: var(--quote-border);
+}
+
+/* ---- Obsidian links, embeds and markers ---------------------------------- */
+
+/* An unresolved link carries no `href` (DESIGN D11), so it is inert by
+ * construction; the styling just says so. */
+.internal-link.is-unresolved {
+  color: var(--fg-muted);
+  text-decoration: underline dotted;
+  cursor: default;
+}
+
+/* An image embed obeys the no-page-h-scroll invariant (D5a), which is also
+ * what caps an oversized `|W` declaration from the source. */
+img.internal-embed {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Transclusion is deferred, so a note/PDF/media embed renders as a link-card:
+ * visibly a door, not the content. */
+.embed-card {
+  display: inline-block;
+  padding: 0.15em 0.6em;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  text-decoration: none;
+  line-height: 1.5;
+}
+.embed-card::before {
+  content: "\21b3";
+  margin-right: 0.4em;
+  color: var(--fg-muted);
+}
+.embed-card.is-unresolved {
+  color: var(--fg-muted);
+  border-style: dashed;
+  cursor: default;
+}
+
+/* A block-reference landing point: zero-height, so it never disturbs layout,
+ * with enough scroll margin that `scrollIntoView` does not hug the viewport. */
+.block-anchor {
+  display: block;
+  height: 0;
+  scroll-margin-top: 2em;
+}
+
+/* `==highlight==` (comrak's `highlight` extension). */
+mark {
+  background: color-mix(in srgb, var(--alert-warning) 28%, transparent);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 0.15em;
+}
+
+/* A non-`x` task marker: Obsidian shows the character, so we do too. */
+.task-marker {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.85em;
+  padding: 0 0.3em;
+  margin-right: 0.3em;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--fg-muted);
 }
 
 /* ---- Inline code & code blocks ------------------------------------------ */

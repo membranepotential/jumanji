@@ -1,9 +1,11 @@
 //! Markdown -> self-contained HTML document. Pure; no I/O beyond `md` input.
 //!
-//! Pipeline: parse (comrak, GFM + footnotes + header ids) -> intercept mermaid
-//! fences -> highlight remaining code fences -> wrap tables for horizontal
-//! scroll -> extract the TOC -> format to HTML -> assemble a complete,
-//! offline, CSP-locked page with embedded CSS and inline SVG.
+//! Pipeline: parse (comrak, GFM + Obsidian dialect + footnotes + header ids) ->
+//! strip comments -> callouts -> intercept mermaid fences -> highlight
+//! remaining code fences -> embeds/wikilinks/block ids -> task markers -> wrap
+//! tables for horizontal scroll -> extract the TOC -> format to HTML ->
+//! assemble a complete, offline, CSP-locked page with embedded CSS and inline
+//! SVG. The ordering rationale lives on [`render`] itself.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -12,7 +14,10 @@ use comrak::nodes::{Ast, AstNode, LineColumn, NodeHtmlBlock, NodeValue};
 use comrak::{Arena, Options as ComrakOptions, format_html, parse_document};
 
 use super::highlight::escape_html;
-use super::{Heading, RenderedDocument, diagram, fence, highlight, math, toc};
+use super::vault::Vault;
+use super::{
+    Heading, RenderedDocument, callout, diagram, fence, highlight, math, textscan, toc, wikilink,
+};
 
 /// The stylesheet is embedded at compile time; nothing is fetched at runtime.
 const BASE_CSS: &str = include_str!("assets/style.css");
@@ -105,23 +110,44 @@ fn css_font_family(name: &str) -> String {
 /// Render a markdown document to a complete HTML page (embedded CSS, inline
 /// SVG diagrams). Never fails: broken fences degrade to highlighted code
 /// blocks with an error note.
-pub fn render(md: &str, opts: &Options) -> RenderedDocument {
+///
+/// `vault` is per-document state (it binds the source path), not config-derived
+/// render options — the Obsidian passes resolve `[[…]]` / `![[…]]` through it
+/// (DESIGN D11).
+pub fn render(md: &str, opts: &Options, vault: &Vault) -> RenderedDocument {
     let arena = Arena::new();
     let comrak_opts = comrak_options();
     let root = parse_document(&arena, md, &comrak_opts);
 
-    // Order matters. External fence renderers run first: a fence whose language
-    // has a configured command is consumed here (turned into an HTML block), so
-    // a configured `mermaid` renderer overrides the built-in mermaid pass, and
-    // the highlighter skips it too. Built-in mermaid then handles any remaining
-    // mermaid fences, and the highlighter the rest. Tables are wrapped last.
-    // Math touches only inline `Math` nodes (disjoint from code blocks and
-    // tables), so its order is free. None of these add or reorder headings, so
-    // the TOC's anchors still match the emitted ids.
+    // Order matters, and every edge below is load-bearing (DESIGN D3/D6.2/D11):
+    //
+    // - Comments go first, so a commented-out fence never runs a renderer.
+    // - Callouts before the fence passes: a callout's body may hold a fence,
+    //   and unwrapping the blockquote must not move an already-rendered block.
+    // - External fence renderers before built-in mermaid: a fence whose
+    //   language has a configured command is consumed here (turned into an HTML
+    //   block), so a configured `mermaid` renderer overrides the built-in pass,
+    //   and the highlighter skips it too. Built-in mermaid then handles any
+    //   remaining mermaid fences, and the highlighter the rest.
+    // - Math touches only inline `Math` nodes (disjoint from code blocks and
+    //   tables), so its position among the block passes is free.
+    // - Embeds before wikilinks: `!` consumes the `[`, so `![[x]]` survives as
+    //   literal text while `[[x]]` is a node — the two must not race on the
+    //   same text.
+    // - Block ids after wikilinks, so an `^id` inside a link label is not
+    //   mistaken for a trailing block id.
+    // - Tables are wrapped last; none of these add or reorder headings, so the
+    //   TOC's anchors still match the emitted ids.
+    textscan::strip_comments(&arena, root);
+    callout::transform_callouts(&arena, root);
     fence::transform_fences(root, &opts.renderers, &fence::run_command);
     diagram::transform_mermaid(root);
     highlight::highlight_code_blocks(root);
     let has_math = math::transform_math(root);
+    textscan::transform_embeds(&arena, root, vault);
+    wikilink::transform_wikilinks(&arena, root, vault);
+    textscan::extract_block_ids(&arena, root);
+    mark_task_symbols(&arena, root);
     wrap_tables(&arena, root);
 
     // Editor sync (DESIGN D7): the code-block-replacing passes above turn their
@@ -157,9 +183,24 @@ fn comrak_options<'a>() -> ComrakOptions<'a> {
     // them to MathML. GitHub's dollar rules apply (see `math.rs` tests).
     o.extension.math_dollars = true;
     o.extension.math_code = true;
-    // GitHub-style alerts (`> [!NOTE]` …) → `<div class="markdown-alert
-    // markdown-alert-note">…`. Styled in assets/style.css.
-    o.extension.alerts = true;
+    // GitHub-style alerts are **off**: `core::callout` subsumes them (DESIGN
+    // D11). comrak recognises 5 of Obsidian's 27 callout spellings and folds
+    // the `+`/`-` marker into the title, so one pass covering the whole dialect
+    // replaces it rather than running alongside it.
+    o.extension.alerts = false;
+    // Obsidian dialect (DESIGN D11) — four constructs that are flags, not code:
+    // `==highlight==` → `<mark>`, inline footnotes `^[…]` folded into the
+    // existing footnote numbering, `[[wikilinks]]` (url-first, which is
+    // Obsidian's order — `core::wikilink` does the resolution), and YAML
+    // frontmatter recognised so properties stop rendering as a setext heading.
+    o.extension.highlight = true;
+    o.extension.inline_footnotes = true;
+    o.extension.wikilinks_title_after_pipe = true;
+    o.extension.front_matter_delimiter = Some("---".to_string());
+    // `- [-]` / `- [?]` parse as task items instead of literal text;
+    // `core::pipeline::mark_task_symbols` then renders the character rather
+    // than a (wrong) checked box.
+    o.parse.relaxed_tasklist_matching = true;
     // Editor sync (DESIGN D7): emit `data-sourcepos="startLine:col-endLine:col"`
     // on every rendered element, so the shell can map a source line to the
     // nearest element (forward) and a clicked element back to its source line
@@ -171,6 +212,42 @@ fn comrak_options<'a>() -> ComrakOptions<'a> {
     o.extension.header_id_prefix = Some(String::new());
     o.render.r#unsafe = true;
     o
+}
+
+/// AST pass: render a non-`x` task marker as the character Obsidian shows.
+///
+/// `parse.relaxed_tasklist_matching` makes comrak *parse* `- [-]` / `- [?]`,
+/// but `render_task_item` emits `checked` for any non-empty symbol — so they
+/// would render as done, which is exactly wrong. Clearing the symbol is the
+/// honest state (not done); the character is put back as a small badge in front
+/// of the item's first paragraph (DESIGN D11 amendment).
+fn mark_task_symbols<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>) {
+    for node in root.descendants().collect::<Vec<_>>() {
+        let symbol = {
+            let mut data = node.data.borrow_mut();
+            match &mut data.value {
+                NodeValue::TaskItem(item) if matches!(item.symbol, Some(c) if !matches!(c, 'x' | 'X')) => {
+                    item.symbol.take()
+                }
+                _ => continue,
+            }
+        };
+        let Some(symbol) = symbol else { continue };
+        let Some(first) = node.first_child() else {
+            continue;
+        };
+        let badge = html_inline(
+            arena,
+            &format!(
+                "<span class=\"task-marker\">{}</span>",
+                escape_html(&symbol.to_string())
+            ),
+        );
+        match first.first_child() {
+            Some(inline) => inline.insert_before(badge),
+            None => first.append(badge),
+        }
+    }
 }
 
 /// AST pass: wrap every GFM table in a `<div class="table-wrap">` so wide
@@ -187,15 +264,43 @@ fn wrap_tables<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>) {
     }
 }
 
-/// Allocate a raw-HTML block node holding `html`. Line 0 marks it as synthetic
-/// (the table-wrap scroll containers): [`annotate_html_block_lines`] skips it, so
-/// a wrapper never inherits a bogus source line.
-fn html_block<'a>(arena: &'a Arena<'a>, html: &str) -> &'a AstNode<'a> {
+/// Allocate a *synthetic* raw-HTML block node holding `html`: line 0, which
+/// [`annotate_html_block_lines`] skips, so a wrapper never inherits a bogus
+/// source line (the table-wrap scroll containers, and every closing tag).
+pub(super) fn html_block<'a>(arena: &'a Arena<'a>, html: &str) -> &'a AstNode<'a> {
+    html_block_at(arena, html, 0)
+}
+
+/// Allocate a raw-HTML block node holding `html` and standing in for source
+/// `line`. A wrapper that *replaces* a real block (a callout's opening tag)
+/// carries that block's line so `annotate_html_block_lines` gives it a
+/// `data-sourcepos` and D7 reverse click still lands on the right source.
+pub(super) fn html_block_at<'a>(arena: &'a Arena<'a>, html: &str, line: usize) -> &'a AstNode<'a> {
     let ast = Ast::new(
         NodeValue::HtmlBlock(NodeHtmlBlock {
             block_type: 0,
             literal: html.to_string(),
         }),
+        LineColumn { line, column: 0 },
+    );
+    arena.alloc(AstNode::new(RefCell::new(ast)))
+}
+
+/// Allocate a raw-HTML *inline* node holding `html`. Inline nodes carry no
+/// `data-sourcepos` of their own here (line 0): reverse click walks up to the
+/// enclosing block, whose position is untouched — D11's inline-passes rule.
+pub(super) fn html_inline<'a>(arena: &'a Arena<'a>, html: &str) -> &'a AstNode<'a> {
+    let ast = Ast::new(
+        NodeValue::HtmlInline(html.to_string()),
+        LineColumn { line: 0, column: 0 },
+    );
+    arena.alloc(AstNode::new(RefCell::new(ast)))
+}
+
+/// Allocate a plain `Text` inline node holding `text`.
+pub(super) fn text_inline<'a>(arena: &'a Arena<'a>, text: &str) -> &'a AstNode<'a> {
+    let ast = Ast::new(
+        NodeValue::Text(text.to_string().into()),
         LineColumn { line: 0, column: 0 },
     );
     arena.alloc(AstNode::new(RefCell::new(ast)))
@@ -309,10 +414,22 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options, has_math: bool) -> Stri
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
+    /// A vault rooted at a directory that does not exist: the scan finds
+    /// nothing, so every `[[…]]` is unresolved — which is exactly what a
+    /// pipeline-*shape* test wants, and it keeps these tests from reaching into
+    /// whatever directory `cargo test` happens to run in. Resolution itself is
+    /// `core::vault`'s business and is tested there.
+    fn test_vault() -> Vault {
+        let root = Path::new("/jumanji-pipeline-tests-have-no-vault");
+        Vault::rooted(root, &root.join("test.md"))
+    }
+
     fn render_str(md: &str) -> String {
-        render(md, &Options::default()).html
+        render(md, &Options::default(), &test_vault()).html
     }
 
     #[test]
@@ -333,6 +450,7 @@ mod tests {
                 page_width_px: 999,
                 ..Options::default()
             },
+            &test_vault(),
         )
         .html;
         assert!(html.contains("--content-width:999px"));
@@ -346,6 +464,7 @@ mod tests {
                 font_size_px: 21,
                 ..Options::default()
             },
+            &test_vault(),
         )
         .html;
         assert!(html.contains("--font-size:21px"));
@@ -366,6 +485,7 @@ mod tests {
                 font_mono: "JetBrains Mono".to_string(),
                 ..Options::default()
             },
+            &test_vault(),
         )
         .html;
         assert!(html.contains("--font-body:\"Source Serif 4\""));
@@ -431,6 +551,7 @@ mod tests {
                 renderers,
                 ..Options::default()
             },
+            &test_vault(),
         )
         .html
     }
@@ -576,33 +697,133 @@ mod tests {
 
     #[test]
     fn heading_anchor_matches_toc() {
-        let doc = render("## Getting Started\n", &Options::default());
+        let doc = render("## Getting Started\n", &Options::default(), &test_vault());
         assert_eq!(doc.toc[0].anchor, "#getting-started");
         assert!(doc.html.contains("id=\"getting-started\""));
     }
 
+    // --- Obsidian dialect: the four comrak flags (DESIGN D11) --------------
+
     #[test]
-    fn gfm_alert_renders_with_expected_classes() {
-        let html = render_str("> [!NOTE]\n> Heads up.\n");
-        // comrak 0.53 emits `<div class="markdown-alert markdown-alert-note">`
-        // with a `<p class="markdown-alert-title">` heading.
-        assert!(html.contains("markdown-alert markdown-alert-note"));
-        assert!(html.contains("markdown-alert-title"));
-        assert!(html.contains("Heads up."));
+    fn highlight_extension_renders_mark() {
+        let html = render_str("Some ==highlighted== text.\n");
+        assert!(html.contains("<mark"));
+        assert!(html.contains("highlighted"));
+        assert!(!html.contains("==highlighted=="));
     }
 
     #[test]
-    fn all_alert_kinds_get_their_class() {
-        for (kw, class) in [
-            ("NOTE", "markdown-alert-note"),
-            ("TIP", "markdown-alert-tip"),
-            ("IMPORTANT", "markdown-alert-important"),
-            ("WARNING", "markdown-alert-warning"),
-            ("CAUTION", "markdown-alert-caution"),
-        ] {
-            let html = render_str(&format!("> [!{kw}]\n> body\n"));
-            assert!(html.contains(class), "missing {class} for [!{kw}]");
+    fn inline_footnote_folds_into_the_footnote_list() {
+        let html = render_str("A claim.^[The supporting note.]\n");
+        assert!(html.contains("class=\"footnotes\""));
+        assert!(html.contains("The supporting note."));
+        assert!(!html.contains("^["), "the inline marker must not survive");
+    }
+
+    #[test]
+    fn relaxed_task_markers_render_the_character_not_a_checked_box() {
+        for marker in ["-", "?"] {
+            let html = render_str(&format!("- [{marker}] partial\n"));
+            assert!(
+                html.contains("type=\"checkbox\""),
+                "[{marker}] should parse as a task item"
+            );
+            assert!(!html.contains(&format!("[{marker}] partial")));
+            // Not done — comrak would have emitted `checked` for any symbol.
+            assert!(
+                !html.contains("checked=\"\""),
+                "[{marker}] must not be checked"
+            );
+            assert!(html.contains(&format!("<span class=\"task-marker\">{marker}</span>")));
         }
+    }
+
+    #[test]
+    fn standard_task_markers_are_left_alone() {
+        // (Match the element, not the bare class name — the embedded
+        // stylesheet mentions `.task-marker` too.)
+        let done = render_str("- [x] done\n");
+        assert!(done.contains("checked=\"\""));
+        assert!(!done.contains("<span class=\"task-marker\">"));
+
+        let todo = render_str("- [ ] todo\n");
+        assert!(!todo.contains("checked=\"\""));
+        assert!(!todo.contains("<span class=\"task-marker\">"));
+    }
+
+    // --- Obsidian dialect: the passes interacting (DESIGN D11 pass order) ---
+
+    #[test]
+    fn a_callout_hosts_a_wikilink_an_embed_and_a_fence() {
+        let html = render_str(
+            "> [!tip]+ Everything\n\
+             > See [[Nowhere]] and ![[missing.png]].\n\
+             >\n\
+             > ```rust\n\
+             > fn f() {}\n\
+             > ```\n",
+        );
+        assert!(
+            html.contains("<details class=\"callout callout-tip\""),
+            "{html}"
+        );
+        assert!(html.contains("is-unresolved"));
+        assert!(html.contains("embed-card"));
+        assert!(html.contains("<pre class=\"code\""));
+        assert!(html.contains("</details>"));
+    }
+
+    #[test]
+    fn a_commented_out_mermaid_fence_never_runs_the_renderer() {
+        // Proves comments strip *before* any renderer sees the fence.
+        let html = render_str("%%\n\n```mermaid\nflowchart TD\nA --> B\n```\n\n%%\n\nAfter.\n");
+        assert!(!html.contains("<svg"), "{html}");
+        assert!(!html.contains("flowchart"));
+        assert!(html.contains("After."));
+    }
+
+    #[test]
+    fn every_construct_at_once_keeps_source_lines_non_decreasing() {
+        let md = "---\ntitle: x\n---\n\n\
+                  # Title\n\n\
+                  > [!warning]- Folded\n> body with [[Nowhere]]\n\n\
+                  Prose with ==mark==, a %%comment%% and an embed ![[missing.png]]. ^abc123\n\n\
+                  - [x] done\n- [?] partial\n\n\
+                  | a | b |\n|---|---|\n| 1 | 2 |\n\n\
+                  ```rust\nfn f() {}\n```\n\n\
+                  Final.\n";
+        let lines = source_lines(&render_str(md));
+        assert!(
+            lines.len() > 5,
+            "expected many annotated elements: {lines:?}"
+        );
+        for pair in lines.windows(2) {
+            assert!(
+                pair[0] <= pair[1],
+                "source lines must be non-decreasing in document order: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_anchor_carries_no_source_line() {
+        // Synthetic (line 0), so `annotate_html_block_lines` skips it and the
+        // monotonic invariant above is untouched.
+        let html = render_str("A happier place. ^37066d\n");
+        assert!(
+            html.contains("<span class=\"block-anchor\" id=\"^37066d\">"),
+            "{html}"
+        );
+        assert!(!html.contains("block-anchor\" id=\"^37066d\" data-sourcepos"));
+    }
+
+    #[test]
+    fn front_matter_is_hidden_not_rendered() {
+        let html = render_str("---\ntitle: x\naliases: [y]\n---\n\n# Real heading\n");
+        assert!(!html.contains("title: x"));
+        assert!(!html.contains("<h2"), "no setext heading from the fences");
+        assert!(!html.contains("<hr"), "no thematic break from the fences");
+        assert!(html.contains("<h1"));
     }
 
     #[test]
@@ -614,6 +835,7 @@ mod tests {
                 extra_css: vec![marker.to_string()],
                 ..Options::default()
             },
+            &test_vault(),
         )
         .html;
         assert!(html.contains(marker));
@@ -634,6 +856,7 @@ mod tests {
                 extra_css: vec!["/*first*/".to_string(), "/*second*/".to_string()],
                 ..Options::default()
             },
+            &test_vault(),
         )
         .html;
         let first = html.find("/*first*/").unwrap();
@@ -729,6 +952,18 @@ mod tests {
                 "source lines must be non-decreasing in document order: {lines:?}"
             );
         }
+    }
+
+    #[test]
+    fn callout_wrapper_carries_the_blockquotes_source_line() {
+        // The opening wrapper stands in for a real block, so it must be
+        // addressable for D7 reverse click; the closing tag is synthetic.
+        let html = render_str("intro\n\n> [!tip] Hint\n> body\n");
+        assert!(
+            html.contains("<div class=\"callout callout-tip\" data-callout=\"tip\" data-sourcepos=\"3:1-3:1\">"),
+            "{html}"
+        );
+        assert!(!html.contains("</div data-sourcepos"));
     }
 
     #[test]

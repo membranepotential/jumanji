@@ -483,6 +483,235 @@ per-file saved scroll position in `history.toml`. This closes that gap.
   One document-aware jumplist serves both keys; vim's jumplist already carries a
   buffer per entry, so this is the idiomatic shape.
 
+### D11: Obsidian dialect & vault resolution (post-1.0; implemented)
+
+Obsidian is the largest population of markdown jumanji renders badly today:
+frontmatter shows as garbage, `[[wikilinks]]` as literal text, 22 of the 27
+callout spellings as `[!question]`, and `%%comments%%`/`^block-ids` leak into
+the prose. `docs/research/04-obsidian.md` is the ground truth for the dialect
+and for comrak 0.53's behaviour; where these decisions differ from its §6
+proposal, these win.
+
+- **Always on, and zero new config options.** The dialect is not gated on
+  detecting anything: one document must render the same wherever it sits, and a
+  plain folder of notes (Zettelkasten, Foam, Dendron, a docs tree) is exactly
+  the case a gate would break. Taken to its conclusion this is why there is no
+  vault *detection* at all — see the `core::vault` bullet below. The cost is
+  that a literal `[[x]]` outside a notes collection renders as inert
+  unresolved-link text; inline code
+  and fences are untouched (comrak parses those first), so the realistic blast
+  radius is unfenced shell `[[ -z "$x" ]]` in prose. Accepted. *Rejected:* a
+  `obsidian = true/false` option — it is the "config option with one caller"
+  the conventions forbid, and it makes rendering depend on invisible state.
+- **Four constructs are comrak flags, not code.** Turn on
+  `extension.highlight` (`==x==` → `<mark>`, exactly Obsidian's semantics),
+  `extension.inline_footnotes` (`^[…]`, folded into the existing footnote
+  numbering — better than the parenthetical degradation the research assumed),
+  `parse.relaxed_tasklist_matching` (`- [-]`/`- [?]` stop rendering as literal
+  text) and `extension.front_matter_delimiter = Some("---")` (YAML properties
+  stop rendering as a setext heading + thematic-break mess). `extension.alerts`
+  is turned **off** — the callout pass below subsumes it. Enabling front matter
+  changes one non-Obsidian case too: a document opening with a thematic break
+  and containing a later `---` line loses that span. Obsidian and every static
+  site generator have the same behaviour; accepted.
+- **`core::vault` — one `Vault`, rooted at the process CWD, rebuilt per
+  document load.** *(Supersedes this section's earlier `.obsidian/` discovery rationale.)*
+  jumanji borrows Obsidian's **syntax** and depends on none of its machinery:
+  there is no marker directory to find, no application to have installed, and
+  no second resolution mode to reason about. **A directory of notes is a vault
+  because you opened jumanji in it.** This is the agnosticism the "always on,
+  zero new config" decision above already argued for — the "plain folder of
+  notes" case (Zettelkasten, Foam, Dendron, a docs tree, a git repo) is no
+  longer the fallback, it is the *only* case. `Vault::rooted(root, source)`
+  scans `root` into a case-folded map of *filename* → path (plus full relative
+  paths) and a map of frontmatter `aliases` → path; the shell always passes the
+  CWD. Resolution follows Obsidian: vault-wide by name, **root outranks a
+  sibling folder**, the source path is only a tiebreaker, matching is
+  case-insensitive, aliases participate. It is a table lookup, never a path
+  join — so `[[../secrets]]` and `[[/etc/passwd]]` are simply not keys, and a
+  wikilink cannot address anything outside the root. *Rejected:* the
+  `.obsidian/` walk-up — it made rendering depend on a competitor's private
+  directory, gave the same document two different meanings depending on
+  invisible state, and left a `Loose` variant carrying a whole second
+  resolution algorithm for the majority case.
+  - **Accepted consequences.** A document opened from *outside* the CWD tree
+    resolves only against the CWD index, so a bare `[[x]]` in it may come out
+    `Unresolved` — correct, not a bug: the reader was not launched in that
+    note's collection. It still renders, and its same-file `[[#Heading]]` /
+    `[[#^id]]` references still work, because those never consult the index.
+    stdin is unaffected: D9 already hands it a `<cwd>/stdin.md` sentinel, so
+    its "document directory" and the vault root were always the same place.
+  - **Freshness:** built in `load_document`, reused by every live-reload
+    re-render (editing a note cannot rename another one), rebuilt by `r` and by
+    following any link. No vault-wide watcher, no cache layer — it is fresh at
+    exactly the moment resolution happens. The depth (32) and file (50 000)
+    caps now carry more weight, since the root is whatever directory the user
+    launched from rather than a deliberately-marked one. Measured on this
+    machine: a repo root of 18 662 files walks in ~145 ms; a `$HOME` large
+    enough to hit the 50 000-file cap takes ~1.0 s, which is a visible stall on
+    the UI thread. If that becomes a real complaint the fix is still
+    measurement first — a narrower cap, or moving the walk off-thread — not a
+    speculative cache.
+  - `aliases` is read by a ~40-line targeted parser, not a YAML crate: one key
+    in three documented shapes (`aliases: x`, `[a, b]`, a `- ` block), and a
+    malformed value degrades to "no aliases". The walk is local filesystem I/O
+    inside the core on the `core::fence` (D6.2) precedent — `Result`-shaped, no
+    display, injectable, so `VaultIndex::build` takes scanned entries and
+    resolution is unit-tested without a fixture tree.
+- **Wikilinks: comrak's parser, our resolution.** `wikilinks_title_after_pipe`
+  is the only correct switch (Obsidian is url-first). An AST pass over
+  `NodeValue::WikiLink` **percent-decodes** `NodeWikiLink.url` (comrak stores it
+  `clean_url`-encoded, so `#^id` arrives as `#%5Eid`), parses it into `WikiRef`,
+  resolves, and rewrites the node. Heading fragments are translated to slugs
+  with the *same* `comrak::Anchorizer` `core::toc` uses — no target document is
+  read, because the naive slug is also the right answer for Obsidian's
+  "duplicate headings resolve to the first" rule (the first occurrence is the
+  one that gets the unsuffixed slug). It is wrong only when two *differently
+  spelled* headings slugify identically; noted, not chased.
+  - **Emitted as three nodes, not one:** `HtmlInline("<a …>")`, a `Text` node
+    holding the label, `HtmlInline("</a>")`. Folding the label into the raw HTML
+    would hide it from `comrak::html::collect_text`, which both `toc::extract`
+    and comrak's own heading-id renderer use — a heading containing a wikilink
+    would silently get a truncated anchor. The `Text` node keeps TOC, emitted
+    id, and Obsidian's own slug in agreement.
+  - **Label:** the alias when given; otherwise the note name with fragment
+    components joined by ` > ` (`Note > Heading`), Obsidian's display, not
+    comrak's raw-target default. Aliases are rendered as plain text — Obsidian
+    does not parse markdown inside link text.
+  - **Unresolved links carry no `href`:** `<a class="internal-link
+    is-unresolved" data-href="<raw>" title="unresolved: <raw>">label</a>`. No
+    href means not clickable, not focusable, and invisible to the `f` hint
+    overlay (which selects `a[href]`) — dead by construction rather than by a
+    guard in the router, and never note creation (jumanji is a reader). The
+    native tooltip is the feedback channel. *Rejected:* a `jumanji-unresolved:`
+    pseudo-scheme routed to a statusbar notice — it invents a URI scheme and
+    fills the hint list with dead entries.
+- **Embeds `![[…]]` are an inline-`Text` pass, because comrak never sees them.**
+  `!` consumes the following `[` as an image bracket, so the wikilink parser
+  never fires and the construct survives as literal text nodes. The pass joins
+  each block's consecutive `Text` siblings, scans that run, and splices the
+  match — fence- and inline-code-safe by construction (those are `CodeBlock` /
+  `Code` nodes, never `Text`). *Rejected:* a pre-pass over the source, which
+  would have to re-implement fence and code-span lexing to know where not to
+  look. The same scanner also carries `%%comments%%` and `^block-ids` (below):
+  one scanner, a small `enum Construct`, separate handlers — the text-run
+  splicing is the tricky part and is written once.
+  - Image targets → `<img class="internal-embed" src="file://…">` with the
+    `|W`/`|WxH` dimensions as attributes, capped by `max-width:100%` so a huge
+    declared width scrolls nothing (D5a). The CSP already permits `img-src
+    file:`.
+  - **Note/heading/block transclusion is deferred** — it needs recursive
+    rendering with cycle detection — and degrades to an honest **link-card**:
+    `<a class="internal-embed embed-card" data-embed="note" …>` showing the
+    target's display name. A real link, so click, `f` hints and the jumplist all
+    work, and it visibly says "a door, not the content". PDF/audio/video/canvas
+    embeds get the same card (`data-embed="pdf"`, …) and open via the system
+    handler; `#page=`/`#height=` are parsed and ignored.
+- **Callouts: one pass, all 27 spellings, `<details>` for folding.** A pass
+  over `BlockQuote` nodes matches `[!type]` + optional `+`/`-` + optional title
+  on the first line, drops that line, and wraps the quote the way `wrap_tables`
+  does (`HtmlBlock` siblings, but carrying the blockquote's source line so D7
+  reverse click still lands). A fold marker emits `<details class="callout"
+  …><summary class="callout-title">`, open for `+`, closed for `-`; **no marker
+  emits a plain `<div>`** — Obsidian shows no disclosure affordance there, and
+  `<details open>` would invent one. Folding therefore costs no JavaScript (D3).
+  Emission is `data-callout="<literal lowercased type>"` (Obsidian's own, so
+  themes keying off it work) *plus* `class="callout callout-<canonical>"`,
+  keeping the 27 → 13 alias table in typed Rust rather than a CSS selector list.
+  An unknown type keeps its literal `data-callout` and falls back to
+  `callout-note`, matching Obsidian. Nesting falls out of the recursive pass.
+  Per-type icons are deferred; the existing `.markdown-alert` colour language is
+  reused.
+- **Comments and block ids.** Inline `%%…%%` is deleted by the text-run scanner;
+  the block form (`%%` alone on a line) is matched between *sibling* blocks and
+  the span removed — a comment region straddling a list boundary is not handled,
+  which is the honest limit of an AST-level treatment. A trailing `^block-id` is
+  stripped from display and replaced by `<span class="block-anchor"
+  id="^37066d"></span>` inserted **before** the owning block (a standalone `^id`
+  paragraph attaches to its preceding sibling), so `[[Note#^37066d]]` has
+  somewhere to land. The `^` is kept in the id: heading slugs never contain one,
+  so the two anchor namespaces cannot collide. The shell must **percent-decode
+  the fragment** before `getElementById` — WebKit hands back `%5E`.
+- **Pass order** (extends D3/D6.2): strip comments → callouts →
+  `fence` → `mermaid` → `highlight` → `math` → embeds → wikilinks → block ids →
+  task markers → `wrap_tables` → `annotate_html_block_lines` → `toc::extract` →
+  format. Comments go first so a commented-out fence never runs a renderer.
+  Every new pass either preserves the node's `.sourcepos` (block passes, which
+  `annotate_html_block_lines` then picks up) or works inside a block whose own
+  `data-sourcepos` is untouched (inline passes) — D7 holds. Inline sourcepos is
+  lost on the rewritten inlines themselves; reverse click walks up to the
+  enclosing block, so this is invisible.
+- **Routing (D10, extended).** `pipeline::render` takes the `Vault` as a third
+  argument (`render(md, opts, vault)`) — it is per-document state, not
+  config-derived render options. A resolved wikilink is an ordinary `file://`
+  link, so `open_uri` → `open_file` handles it with the jumplist push D10
+  already gives `.md` links, and `f` hints pick it up with no change. One real
+  gap this **supersedes**: `open_uri` today drops the fragment of a
+  *cross-document* link (`other.md#section` opens the file and ignores the
+  anchor) — it only honours a fragment when the base is the current document.
+  D11 adds a `pending_anchor: Option<String>` applied in the load-finished
+  handler exactly as `pending_forward` is, overriding the restored history
+  scroll. This fixes plain markdown fragment links too.
+
+Types, sketched (illegal states unrepresentable; "unresolved" is a variant, not
+a dangling href):
+
+```rust
+// core::obsidian — a parsed, percent-decoded `[[…]]` / `![[…]]`.
+pub struct WikiRef { note: Option<String>,   // None => same file, `[[#H]]`
+                     fragment: Option<Fragment>,
+                     pipe: Option<String>,   // alias | embed dimensions
+                     kind: RefKind }         // Link | Embed
+pub enum Fragment { Heading(Vec<String>), Block(BlockId) }  // `#A#B` | `#^id`
+
+// core::vault — resolution.
+pub enum Vault { Loose { dir: PathBuf }, Indexed(VaultIndex) }
+pub enum Target { Note { path: PathBuf, anchor: Option<String> },  // slugified
+                  Asset { path: PathBuf, kind: AssetKind },  // Image|Pdf|Av|…
+                  Unresolved }
+impl Vault { pub fn resolve(&self, r: &WikiRef, source: &Path) -> Target }
+```
+
+**Amendment (settled during implementation).** Three points the sketch above
+left underspecified:
+
+- **`Vault` binds the document path**, so `render(md, opts, vault)` stays
+  three-argument. The sketch's `Vault::resolve(&self, r, source)` and a
+  three-argument `render` cannot both hold — `render` would need a fourth
+  argument for the source. Since the `Vault` is already per-document state,
+  it carries the source: `struct Vault { source: PathBuf, index: VaultIndex }`.
+  With the root fixed at the CWD there is exactly one state, so there is no
+  `VaultKind` — a variant nothing constructs is a Tar Pit invitation.
+  `VaultIndex::resolve(&self, r, source)` keeps the sketch's signature at the
+  layer that must be unit-testable without a fixture tree; `Vault::resolve(&self,
+  r)` delegates to it, including the `note: None` same-file case, so that rule
+  lives in one place. `Vault::rooted` takes the root as an argument rather than
+  reading `current_dir()` itself — the core stays free of ambient state, and a
+  test can root a vault anywhere.
+- **Callout titles are plain text**, and only the parts of them comrak
+  reports as text survive. `> [!tip] **Bold** title` titles as `Bold title`
+  (emphasis markers dropped, text kept), but a construct comrak turns into a
+  node with no text of its own — raw inline HTML, and a wikilink, which this
+  pass runs before — is dropped **entirely, text and all**: `> [!note] a <c> b`
+  titles as `a  b`. Obsidian does parse markdown in a title; matching it would
+  mean re-parsing the title fragment as inlines and re-hosting them inside a
+  raw-HTML wrapper, which the `HtmlBlock` sandwich shape cannot express.
+  Accepted limitation — a callout title is a label, not prose.
+- **Non-`x` task markers.** `relaxed_tasklist_matching` makes comrak *parse*
+  `- [-]`/`- [?]`, but `render_task_item` emits `checked` for any non-empty
+  symbol — so they render as done, which is wrong (Obsidian shows the
+  character). A `mark_task_symbols` pass sets `symbol = None` (honest: not
+  done) and prepends `<span class="task-marker">?</span>` to the item's first
+  paragraph. `x`/`X` are left alone.
+
+**Deliberately out of scope:** transclusion (link-card instead), `#tag` pills
+(no search index behind them, so a pill is decoration), a rendered properties
+table (frontmatter is hidden, not shown), Templater, Bases/`.base`, Canvas
+rendering, Publish-only properties, and the `internal-link` mermaid node class.
+Dataview/dataviewjs/tasks/query fences need no work — `highlight_code_blocks`
+already falls back to plain-text syntect for unknown languages, so they render
+as code blocks today.
+
 ## Non-goals
 
 - Editing. Ever. Pair with an editor instead (D7).
@@ -505,6 +734,13 @@ per-file saved scroll position in `history.toml`. This closes that gap.
   degradation)**; **math (done — D8: pulldown-latex → MathML Core, no JS)**;
   **stdin streaming (done — D9: `jumanji -` / piped, reader thread + debounced
   re-render, scroll preserved, history/watch/`--forward` skipped)**; AUR package.
+- **M4 (post-1.0):** cross-document jumplist (done — D10: `Location`-valued
+  entries, `Backspace`); **Obsidian dialect & vault resolution (done —
+  D11)** — wikilinks + vault-wide resolution (filenames, `aliases`, heading→slug,
+  `#^block` anchors), image embeds, the full 27-spelling callout set with
+  `<details>` folding, `==highlight==` / `%%comments%%` / frontmatter /
+  inline footnotes / relaxed task markers, link-cards for deferred
+  transclusion and media embeds, and cross-document fragment scroll.
 
 ## Keybinding spec (M1 + M2)
 

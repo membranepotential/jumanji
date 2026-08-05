@@ -3,8 +3,9 @@
 Two layers:
 
 - **Unit tests** (`src/core/**`) — the pure functional core (pipeline, TOC,
-  config, keymap). Run everywhere, need no display: `cargo test --lib` (or the
-  full `cargo test`).
+  config, keymap, Obsidian dialect). Run everywhere, need no display:
+  `cargo test --bin jumanji` (jumanji is a binary crate — there is no `--lib`
+  target), or just the full `cargo test`.
 - **Headless end-to-end** (`tests/e2e.rs`) — drives the *real* application: a
   real (virtual) X server, real GTK key events, real WebKit, asserting on state
   read back over D-Bus. This document is about that layer.
@@ -19,11 +20,32 @@ cargo test                     # core unit tests + e2e
 Each test is fully isolated (its own `Xvfb` display + its own private session
 bus) and cleans up after itself even on panic, so the suite never touches your
 live desktop or session bus. The tests are **serialized** behind a process-wide
-mutex — seven concurrent WebKit instances thrash a loaded machine and make
+mutex — concurrent WebKit instances thrash a loaded machine and make
 timing flaky — so `--test-threads` has no effect on them.
 
-Typical wall-clock: ~9–10 s for all seven on a fast machine (each spins up and
+Typical wall-clock: ~50 s for all 39 on a fast machine (each spins up and
 tears down a WebKit instance).
+
+## Fixtures
+
+- `demo/demo.md` — the general fixture the bare `setup()` harness launches.
+- `demo/links.md` — one internal link, for deterministic hint-follow testing.
+- **`demo/vault/`** — the D11 dialect fixture: `Welcome.md`,
+  `Concepts/Callouts.md`, an `Aliased Note.md` whose filename has a space, and
+  `attachments/diagram.png`. There is no marker file — a vault is just a
+  directory of notes.
+
+**Wikilink tests must set the child's working directory.** The vault index is
+rooted at the process CWD (DESIGN D11), so a test that launches the reader from
+the repo root indexes the repo, not the fixture, and `[[Concepts/Callouts]]`
+comes out unresolved. Use `Harness::launch_file_in_dir(file, Some(dir))`, which
+sets `Command::current_dir`. Tests that also need to control link *ordering*
+(which link gets the `a` hint label) build a throwaway vault under the temp dir
+— see `temp_vault`.
+
+Note that `Welcome.md` puts its link list immediately under the title **on
+purpose**: the hint overlay only labels links inside the viewport, so a link
+pushed below the fold takes no label and the test would see "no links in view".
 
 ## System requirements & the skip gate
 
@@ -56,6 +78,9 @@ state):
 | `execute_action_scrolls_without_keys` | `ExecuteAction("scroll down", 3)` — pure D-Bus, no key injection |
 | `external_reads_do_not_storm_reload` | scroll, `fs::read` the file ×5, wait 1.5 s → scroll unchanged (reload-loop regression) |
 | `live_reload_grows_toc_and_preserves_dark` | append a heading to a temp-dir copy → TOC grows and dark mode survives the reload |
+| `wikilink_follows_across_vault_notes` | launched *inside* `demo/vault`, `f`+`a` on `Welcome.md` opens `Concepts/Callouts.md` — CWD rooting, indexing and `[[…]]` routing end to end |
+| `wikilink_heading_fragment_scrolls_target_document` | `[[Target#Folding]]` opens the target **and** scrolls to the anchor (the `pending_anchor` path) |
+| `unresolved_wikilink_is_not_hintable` | an unresolved `[[…]]` carries no `href`, so the hint overlay skips it and `a` lands on the resolvable link |
 
 ## The D-Bus interface is the automation / editor-sync surface
 

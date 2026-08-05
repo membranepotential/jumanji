@@ -9,14 +9,19 @@ pub mod history;
 pub mod jumplist;
 pub mod keymap;
 pub mod marks;
+pub mod obsidian;
 pub mod pipeline;
 pub mod source;
 pub mod toc;
+pub mod vault;
 
+mod callout;
 mod diagram;
 mod fence;
 mod highlight;
 mod math;
+mod textscan;
+mod wikilink;
 
 /// A heading in the document, used for the TOC and section navigation.
 #[derive(Debug, Clone, PartialEq, Eq)]
