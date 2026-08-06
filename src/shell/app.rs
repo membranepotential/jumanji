@@ -144,8 +144,15 @@ struct Shell {
     /// level; the webview is driven to match. Kept in the shell (rather than read
     /// back from `zoom_level()`) because anchored zoom sets the native level in an
     /// async callback, so `zoom_level()` briefly lags the intent.
+    ///
+    /// **Session-scoped, not per-document** (D5a): seeded once from `history` when
+    /// the window is built — the only cold start there is — and thereafter owned
+    /// by the session, so it carries unchanged across every document switch. The
+    /// per-file value in `history` is the *default on open*, consulted only at
+    /// that cold start.
     zoom: f64,
-    /// Current text-zoom factor (1.0 = 100%).
+    /// Current text-zoom factor (1.0 = 100%). Session-scoped exactly like
+    /// [`Shell::zoom`].
     text_zoom: f64,
     /// Last pointer position in *window* coordinates (from the motion
     /// controller), translated to the webview at wheel-zoom time to anchor at
@@ -355,6 +362,10 @@ fn build_ui(
     // the initial load itself. Read the value out before taking the mutable
     // borrow (avoid a reentrant borrow). Skipped for stdin: a stream has no
     // stable identity to key history on.
+    //
+    // This is the *only* place the saved zoom is read: the window's cold start,
+    // where there is no live session zoom to inherit. Every later document switch
+    // carries the session's zoom instead (D5a, `load_document`).
     let saved = if is_stdin {
         None
     } else {
@@ -1763,10 +1774,15 @@ fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf, anchor: Option<String>) 
 }
 
 /// Load `path` into this window, opening it at `at`: persist the *outgoing*
-/// file's position, reset per-document state, re-point the watcher, restore the
-/// new file's saved zoom, and render. The jumplist is deliberately **not**
-/// reset — it spans documents, so `Ctrl-o` can walk back into the previous
-/// file. Callers own all jumplist bookkeeping.
+/// file's position, reset per-document state, re-point the watcher, and render.
+/// The jumplist is deliberately **not** reset — it spans documents, so `Ctrl-o`
+/// can walk back into the previous file. Callers own all jumplist bookkeeping.
+///
+/// Zoom is deliberately **not** touched either: it is a live session setting
+/// that carries across navigation (D5a), so following a link out of a document
+/// you are reading at 130% keeps you at 130% even when the target has never been
+/// opened. The per-file zoom in `history` is the *default on open* and is read
+/// only at the window's cold start, where there is no session zoom to inherit.
 fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, at: InitialPosition) {
     {
         let mut s = shell.borrow_mut();
@@ -1798,20 +1814,12 @@ fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, at: InitialPosition)
         s.marks = Marks::new();
         s.section = 0;
         s.loaded = false;
-        // Restore the new file's saved zoom (or defaults); the caller decides
-        // the opening position.
-        match s.history.get(&path) {
-            Some(st) => {
-                s.text_zoom = st.text_zoom;
-                s.zoom = st.zoom;
-                s.view.set_zoom(st.zoom);
-            }
-            None => {
-                s.text_zoom = 1.0;
-                s.zoom = 1.0;
-                s.view.set_zoom(1.0);
-            }
-        }
+        // Zoom carries over untouched (see the fn doc). Geometric zoom needs no
+        // call at all — the native `zoom_level` is a WebView property that
+        // survives a document load — and `s.text_zoom` is left as-is so
+        // `do_render_and_load` below inlines the session's font size into the
+        // HTML and the new document's first frame is already at the right size
+        // (D12). The caller decides the opening position.
         s.pending_position = at;
     }
     restart_watch(shell, &path);

@@ -10,9 +10,18 @@ dialect support. Linux-first (Arch, X11/i3wm).
 
 ## Now
 
-Shipped **v1.6.0** (tag + GitHub release + AUR PKGBUILD pointed at it); working
-tree clean on `main`. No workstream in flight — next move is the two open bugs
-below.
+Shipped **v1.6.0** (tag + GitHub release + AUR PKGBUILD pointed at it). Two
+workstreams in flight on the open bugs below:
+
+- **flash-diagnosis** — re-diagnose the document-switch flash (Next 1) from a
+  fresh frame capture of a link-follow. Read-only; returns a root cause + fix
+  proposal. State: running. Next: hand its proposal to an implementer.
+- **zoom-sticky** — make zoom a session-level setting that carries across
+  navigation (Next 2). Owns `src/shell/app.rs`. State: running. Next: review,
+  then commit.
+
+Sequencing: both bugs live in `src/shell/app.rs`, so the flash *fix* only starts
+after zoom-sticky lands.
 
 ## Done (recent)
 
@@ -45,10 +54,12 @@ below.
 
 ## Open questions
 
-- Should per-file zoom in `history` survive at all once zoom becomes sticky
-  across navigation — or does the session value always win, with history keeping
-  only the scroll offset? (Decide before touching `load_document`; check
-  `docs/research/02-zathura.md` for the zathura precedent.)
+- ~~Should per-file zoom in `history` survive once zoom becomes sticky?~~
+  **Decided 2026-08-07:** yes, it survives — but it is the *default on open*,
+  consulted only when there is no live session zoom to inherit (cold start of a
+  window). Once the session has a zoom, it wins on every document switch. Follows
+  `docs/research/02-zathura.md:162-166` ("separate default-on-open from current
+  live setting"); no `history.toml` format change.
 - Is the two-frame background flash during a restore (the hide gate's known
   cost, noted as "next" in DEVLOG 2026-08-07) the same thing the user is seeing
   on document switch, or a separate defect? Answering this scopes item 1.

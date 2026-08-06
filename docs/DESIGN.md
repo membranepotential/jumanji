@@ -208,6 +208,21 @@ Zoom has two independent axes, both count-multiplied and reset together by `=`:
   captured before the change and scrolled back into view after — text zoom
   keeps the reading position anchored.
 
+**Both axes are session-scoped, not per-document.** Zoom is a live *view*
+setting: once set it carries unchanged across every document switch — following
+a wikilink, `:open`, `Ctrl-o`/`Ctrl-i` — including into files that have never
+been opened. The per-file `zoom`/`text_zoom` in `history.toml` is the
+*default on open*, read only at a window's **cold start** (the initial document,
+`build_ui`), where there is no session zoom to inherit; `load_document` never
+touches zoom. This is zathura's own split between "default on open" and "current
+live setting" (`adjust-open` vs live zoom — `docs/research/02-zathura.md`).
+Because the cold start is the sole reader, the distinction needs no extra state:
+the `Shell.zoom` / `Shell.text_zoom` fields *are* the session value, seeded once
+and thereafter owned by the session. Recording stays per-file and unchanged, so
+reopening a note in a fresh window still lands at the zoom you last read it at.
+Text zoom rides into the switch through the inlined `--font-size` (D12), so the
+new document's first painted frame is already at the inherited size.
+
 The statusbar shows `{geometric}%/{text}%T` on the right whenever either axis is
 off 100%, and nothing when both are 100%. `GetState` exposes both as `zoom` and
 `text_zoom`. The wheel controller lives on the **toplevel window** in capture

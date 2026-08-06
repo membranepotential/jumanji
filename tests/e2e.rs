@@ -1562,6 +1562,189 @@ fn jumping_back_paints_no_unscrolled_frame() {
 }
 
 #[test]
+fn zoom_carries_across_document_switches() {
+    // DESIGN D5a: zoom is a live *session* view setting, not a per-document one.
+    // Following a link out of a document you were reading at 130% used to land
+    // you at 100% — `load_document` restored the *target's* saved zoom, and hard
+    // reset when the target had never been opened. Both axes now carry over
+    // untouched, across a link follow, `Ctrl-o` and `:open` alike.
+    let Some(_g) = setup_guard() else { return };
+
+    let dir = std::env::temp_dir().join(format!("jumanji-e2e-zoomstick-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let a = dir.join("a.md");
+    let b = dir.join("b.md");
+    // Identical filler in both, so the two documents are the same height at the
+    // same zoom — that equivalence is what lets a.md's base height below serve
+    // as the baseline the *rendered* size of b.md is judged against.
+    let filler = filler();
+    std::fs::write(&a, format!("# Doc A\n\n{filler}[open b](b.md)\n")).expect("write a.md");
+    std::fs::write(&b, format!("# Doc B\n\n{filler}")).expect("write b.md");
+
+    // A fresh XDG data home: neither file has any history, so nothing but the
+    // session could supply the zoom b.md ends up rendering at.
+    let h = Harness::launch_file(a.clone());
+    assert_eq!(h.get_state().zoom, 1.0, "starts at geometric 100%");
+    assert_eq!(h.get_state().text_zoom, 1.0, "starts at text 100%");
+
+    // The base-font height of the shared filler, measured on a.md.
+    h.key(&["shift+g"]);
+    let base_bottom = h
+        .wait_for_state("scrolled to the bottom of a.md", SETTLE, |s| {
+            s.scroll_y > 200.0
+        })
+        .scroll_y;
+
+    h.execute_action("text zoom in", 4);
+    h.execute_action("zoom in", 3);
+    let zoomed = h.wait_for_state("both axes raised", SETTLE, |s| {
+        s.text_zoom > 1.0 && s.zoom > 1.0
+    });
+
+    // Follow the link into a document that has never been opened.
+    h.key(&["shift+g"]);
+    h.wait_for_state("link back in view after the zoom", SETTLE, |s| {
+        s.scroll_y > base_bottom
+    });
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    let switched = h.wait_for_state("link opens b.md", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("b.md") && s.loaded
+    });
+    assert!(
+        (switched.zoom - zoomed.zoom).abs() < 1e-9,
+        "geometric zoom must survive a link follow: was {}, got {}",
+        zoomed.zoom,
+        switched.zoom
+    );
+    assert!(
+        (switched.text_zoom - zoomed.text_zoom).abs() < 1e-9,
+        "text zoom must survive a link follow: was {}, got {}",
+        zoomed.text_zoom,
+        switched.text_zoom
+    );
+
+    // …and the zoom is genuinely *rendered*, from the first painted frame. The
+    // load-finished path deliberately re-applies neither axis (the native
+    // `zoom_level` survives the load; the text axis is inlined as `--font-size`
+    // when the HTML is generated), so a b.md that measures taller than the same
+    // filler at base size can only have been built with the session's zoom
+    // already in it — which is exactly what the first frame paints. Reached by
+    // over-scrolling rather than `G`: a goto is a *jump*, and the jumplist entry
+    // it would push inside b.md is one the `Ctrl-o` below would consume first.
+    h.execute_action("scroll down", 500);
+    let b_bottom = h
+        .wait_for_state("scrolled to the bottom of b.md", SETTLE, |s| {
+            s.scroll_y > 200.0
+        })
+        .scroll_y;
+    assert!(
+        b_bottom > base_bottom * 1.05,
+        "b.md must be laid out at the inherited zoom from its first frame: \
+         bottom {b_bottom} should exceed the base-size height {base_bottom}"
+    );
+
+    // `Ctrl-o` back across the file boundary keeps it too.
+    h.key(&["ctrl+o"]);
+    let back = h.wait_for_state("Ctrl-o returns to a.md", SETTLE, |s| {
+        s.file.ends_with("a.md") && s.loaded && s.scroll_y > 1.0
+    });
+    assert!(
+        (back.zoom - zoomed.zoom).abs() < 1e-9 && (back.text_zoom - zoomed.text_zoom).abs() < 1e-9,
+        "zoom must survive jumplist navigation: was {}/{}, got {}/{}",
+        zoomed.zoom,
+        zoomed.text_zoom,
+        back.zoom,
+        back.text_zoom
+    );
+
+    // As does `Ctrl-i` forward again.
+    h.key(&["ctrl+i"]);
+    let forward = h.wait_for_state("Ctrl-i returns to b.md", SETTLE, |s| {
+        s.file.ends_with("b.md") && s.loaded
+    });
+    assert!(
+        (forward.zoom - zoomed.zoom).abs() < 1e-9
+            && (forward.text_zoom - zoomed.text_zoom).abs() < 1e-9,
+        "zoom must survive a forward jump: was {}/{}, got {}/{}",
+        zoomed.zoom,
+        zoomed.text_zoom,
+        forward.zoom,
+        forward.text_zoom
+    );
+
+    // And so does `:open`.
+    h.key(&["colon"]);
+    h.wait_for_state("command line open", SETTLE, |s| s.mode == "command");
+    h.type_text("open a.md");
+    h.key(&["Return"]);
+    let opened = h.wait_for_state("`:open a.md` switches document", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("a.md") && s.loaded
+    });
+    assert!(
+        (opened.zoom - zoomed.zoom).abs() < 1e-9
+            && (opened.text_zoom - zoomed.text_zoom).abs() < 1e-9,
+        "zoom must survive `:open`: was {}/{}, got {}/{}",
+        zoomed.zoom,
+        zoomed.text_zoom,
+        opened.zoom,
+        opened.text_zoom
+    );
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn history_restores_zoom_on_a_cold_start() {
+    // The other half of D5a's split: the per-file zoom in `history.toml` is the
+    // *default on open*, and a window's first document is the one place with no
+    // live session zoom to inherit. Reopening a note in a fresh window must
+    // therefore still land at the zoom you last read it at.
+    let Some(_g) = setup_guard() else { return };
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest).join("demo").join("demo.md");
+    let dir = std::env::temp_dir().join(format!("jumanji-e2e-histzoom-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let doc = dir.join("doc.md");
+    std::fs::copy(&src, &doc).expect("copy demo");
+    let config_home = dir.join("cfg");
+    let data_home = dir.join("data");
+
+    let marked = {
+        let mut h = Harness::launch_in(doc.clone(), config_home.clone(), data_home.clone());
+        h.execute_action("zoom in", 3);
+        h.execute_action("text zoom in", 4);
+        let st = h.wait_for_state("both axes raised before quit", SETTLE, |s| {
+            s.zoom > 1.0 && s.text_zoom > 1.0
+        });
+        h.clean_quit();
+        drop(h);
+        (st.zoom, st.text_zoom)
+    };
+
+    let h = Harness::launch_in(doc, config_home, data_home);
+    let restored = h.wait_for_state("zoom restored on relaunch", SETTLE, |s| s.zoom > 1.0);
+    assert!(
+        (restored.zoom - marked.0).abs() < 1e-9,
+        "restored geometric zoom {} should match saved {}",
+        restored.zoom,
+        marked.0
+    );
+    assert!(
+        (restored.text_zoom - marked.1).abs() < 1e-9,
+        "restored text zoom {} should match saved {}",
+        restored.text_zoom,
+        marked.1
+    );
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn history_persists_scroll_across_relaunch() {
     let Some(_g) = setup_guard() else { return };
 

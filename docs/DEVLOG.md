@@ -2,6 +2,47 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-08-07 — zoom sticks across navigation
+
+**Reported:** reading at 130% and clicking a wikilink drops you back to 100%.
+
+**Cause.** `load_document` treated zoom as document state: on every switch it
+restored the *target* file's saved zoom, and hard-reset both axes to 1.0 when the
+target had never been opened. The reset was the common case — you follow links
+into notes you have not read before.
+
+**Decided: zoom is a session-level live view setting.** It carries unchanged
+across every document switch; the per-file `zoom`/`text_zoom` in `history.toml`
+is the *default on open*, read only at a window's cold start — the one moment
+with no live session zoom to inherit. That is zathura's own split between
+`adjust-open` and the live zoom (`docs/research/02-zathura.md`). Recorded in
+DESIGN D5a.
+
+**The change is a deletion.** `Shell.zoom` / `Shell.text_zoom` already *were* the
+session value; the only thing making them look per-document was `load_document`
+overwriting them. Removing that block leaves `build_ui` as the sole reader of the
+saved zoom, so the "cold start vs. session" distinction needs no flag and no
+state to keep honest — it is just which function runs. Nothing else moved:
+history still records per-file, the format is unchanged, and reopening a note in
+a fresh window still lands at the zoom you last read it at.
+
+Two things the deletion depends on, both pre-existing and now load-bearing:
+geometric zoom needs no re-apply because the native `zoom_level` is a WebView
+property that survives a document load, and text zoom rides into the generated
+HTML as the inline `--font-size` (D12) — read from `s.text_zoom` at render time,
+which is now the inherited session value, so the new document's *first painted
+frame* is already at the right size.
+
+**Tests.** Two e2e cases: `zoom_carries_across_document_switches` (both axes
+survive a hint follow into a never-opened file, `Ctrl-o`, `Ctrl-i` and `:open`,
+and the target measures taller than the same filler at base size — proof the zoom
+was in the HTML, not re-applied after paint) and
+`history_restores_zoom_on_a_cold_start` (the other half of the split). 48 e2e +
+300 unit tests pass.
+
+**Next:** the flash on document switch is still open (STATUS item 1) and is being
+diagnosed separately; this change does not touch the load/paint path.
+
 ## 2026-08-07 — the unscrolled page stops flashing; `background = true`
 
 **Reported:** walking the jumplist between documents flashes the top of the
