@@ -91,9 +91,6 @@ struct Shell {
     /// document). The reader thread appends bytes; renders snapshot it. `None`
     /// for a file document.
     stdin_buffer: Option<Arc<Mutex<Vec<u8>>>>,
-    /// The document's basename (or `stdin`), restored to the statusbar's left
-    /// field after a transient message or mode label clears it.
-    filename: String,
     /// Live options, mutated by `:set`; the source of truth the derived render
     /// options and step fields are re-synced from.
     options: Options,
@@ -280,8 +277,7 @@ fn build_ui(
         .child(&layout)
         .build();
 
-    let filename = source.display_name();
-    bar.set_filename(&filename);
+    bar.set_trail(vec![source.display_name()]);
 
     let config_dir = config::xdg_config_dir();
     let data_dir = xdg_data_dir();
@@ -294,7 +290,6 @@ fn build_ui(
     let shell = Rc::new(RefCell::new(Shell {
         file: file.clone(),
         stdin_buffer: None,
-        filename,
         options: options.clone(),
         render_opts: RenderOptions {
             page_width_px: options.page_width_px,
@@ -915,7 +910,9 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
     let get_state = {
         let shell = shell.clone();
         Rc::new(move |invocation: gtk::gio::DBusMethodInvocation| {
-            let (view, file, dark, zoom, text_zoom, section, toc_len, loaded, mode, vault_files) = {
+            #[rustfmt::skip]
+            let (view, file, trail, dark, zoom, text_zoom, section, toc_len, loaded, mode,
+                 vault_files) = {
                 let s = shell.borrow();
                 // Report `stdin` for a stream, not its CWD sentinel path: it is
                 // honest, and it keeps the D-Bus forward-search (which matches on
@@ -928,6 +925,7 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
                 (
                     s.view.clone(),
                     file,
+                    trail_string(&s),
                     s.dark,
                     s.zoom,
                     s.text_zoom,
@@ -941,6 +939,7 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
             view.scroll_state(move |vs| {
                 let json = state_json(
                     &file,
+                    &trail,
                     &vs,
                     dark,
                     zoom,
@@ -1051,6 +1050,7 @@ fn expand_env_token(token: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 fn state_json(
     file: &str,
+    trail: &str,
     vs: &ViewportState,
     dark: bool,
     zoom: f64,
@@ -1062,7 +1062,8 @@ fn state_json(
     vault_files: usize,
 ) -> String {
     format!(
-        "{{\"file\":{file},\"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
+        "{{\"file\":{file},\"trail\":{trail},\
+         \"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
          \"content_width\":{content_width},\"viewport_width\":{viewport_width},\
          \"doc_scroll_width\":{doc_scroll_width},\"diagram_width\":{diagram_width},\
          \"math_width\":{math_width},\"msup_shift_ratio\":{msup_shift_ratio},\
@@ -1072,6 +1073,7 @@ fn state_json(
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded},\
          \"vault_files\":{vault_files}}}",
         file = json_string(file),
+        trail = json_string(trail),
         scroll_y = vs.scroll_y,
         scroll_percent = vs.scroll_percent,
         content_width = vs.content_width,
@@ -1314,8 +1316,10 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             view.scroll_position(move |cur| {
                 let current = current_location(&sh.borrow(), cur);
                 let target = sh.borrow_mut().jumplist.back(current);
-                if let Some(loc) = target {
-                    navigate_to_location(&sh, loc);
+                // Stepping back shortens the breadcrumb even when the hop stays
+                // inside the current document (no reload to repaint it).
+                if target.is_some_and(|loc| navigate_to_location(&sh, loc)) {
+                    show_trail(&sh.borrow());
                 }
                 refresh_status(&sh);
             });
@@ -1323,8 +1327,8 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
         Action::JumpForward => {
             let target = s.jumplist.forward();
             drop(s);
-            if let Some(loc) = target {
-                navigate_to_location(shell, loc);
+            if target.is_some_and(|loc| navigate_to_location(shell, loc)) {
+                show_trail(&shell.borrow());
             }
         }
         Action::TocNext => s.toc_view.move_selection(count_i as i32),
@@ -1353,7 +1357,7 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             // (highlights + `n`/`N` state) and clears any transient statusbar
             // notice, returning the chrome to its resting state.
             s.view.find_clear();
-            s.bar.set_filename(&s.filename);
+            show_trail(&s);
             s.completion = None;
         }
         Action::Quit => {
@@ -1372,6 +1376,9 @@ fn refresh_status(shell: &Rc<RefCell<Shell>>) {
     let sh = shell.clone();
     let (view, bar, pending, zoom) = {
         let s = shell.borrow();
+        // The bar may have been resized since the breadcrumb was last laid out;
+        // re-fitting here is idempotent and costs a string compare.
+        s.bar.refit_trail();
         (
             s.view.clone(),
             s.bar.clone(),
@@ -1425,7 +1432,7 @@ fn leave_toc(s: &mut Shell) {
     s.mode = Mode::Normal;
     s.matcher.set_mode(Mode::Normal);
     s.stack.set_visible_child_name("content");
-    s.bar.set_filename(&s.filename);
+    show_trail(s);
     s.view.widget().grab_focus();
 }
 
@@ -1568,7 +1575,7 @@ fn hint_resolve(shell: &Rc<RefCell<Shell>>) -> Option<HintAction> {
         let href = link.href.clone();
         s.input = Input::None;
         s.view.clear_hints();
-        s.bar.set_filename(&s.filename);
+        show_trail(&s);
         return Some(match kind {
             HintKind::Follow => HintAction::Follow(href),
             HintKind::Show => HintAction::Show(href),
@@ -1597,7 +1604,7 @@ fn cancel_hints(shell: &Rc<RefCell<Shell>>) {
     let mut s = shell.borrow_mut();
     s.view.clear_hints();
     s.input = Input::None;
-    s.bar.set_filename(&s.filename);
+    show_trail(&s);
 }
 
 /// Parse the overlay's `label\thref` lines into typed [`HintLink`]s.
@@ -1738,12 +1745,9 @@ fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, restore_scroll: f64)
         // current index never saw); watch-driven live reload deliberately does
         // not rescan — editing a note cannot rename another one (D11).
         s.vault.rebind(&path);
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string_lossy().into_owned());
-        s.filename = name.clone();
-        s.bar.set_filename(&name);
+        // The breadcrumb ends at the new document; the callers' jumplist
+        // bookkeeping (below) has already recorded how we got here.
+        show_trail(&s);
         // Per-document navigation state resets on a document switch; the
         // jumplist persists (it spans documents — see the fn doc).
         s.marks = Marks::new();
@@ -1864,6 +1868,9 @@ fn do_completion(shell: &Rc<RefCell<Shell>>) {
         return;
     }
     let current = s.bar.input_query();
+    // Taken before the completion borrow below: the echo is laid out to fit the
+    // bar, so it pages through *all* candidates instead of listing a prefix.
+    let cols = s.bar.status_columns();
 
     // Cycle when the shown text is the current candidate and there are more.
     if let Some(comp) = s.completion.as_mut() {
@@ -1875,9 +1882,9 @@ fn do_completion(shell: &Rc<RefCell<Shell>>) {
         if showing_current && comp.candidates.len() > 1 {
             comp.index = (comp.index + 1) % comp.candidates.len();
             let next = comp.candidates[comp.index].clone();
-            let status = completion_status(comp);
+            let line = command::completion_line(&comp.candidates, comp.index, cols);
             s.bar.set_input_query(&next);
-            s.bar.set_message(&status);
+            s.bar.set_message(&line);
             return;
         }
     }
@@ -1890,25 +1897,13 @@ fn do_completion(shell: &Rc<RefCell<Shell>>) {
         return;
     }
     let first = candidates[0].clone();
+    let line = command::completion_line(&candidates, 0, cols);
     s.bar.set_input_query(&first);
-    let comp = Completion {
+    s.bar.set_message(&line);
+    s.completion = Some(Completion {
         candidates,
         index: 0,
-    };
-    let status = completion_status(&comp);
-    s.bar.set_message(&status);
-    s.completion = Some(comp);
-}
-
-/// A compact completion echo: `[i/n] cand  cand  …`.
-fn completion_status(comp: &Completion) -> String {
-    let shown: Vec<&str> = comp.candidates.iter().map(String::as_str).take(8).collect();
-    format!(
-        "[{}/{}] {}",
-        comp.index + 1,
-        comp.candidates.len(),
-        shown.join("  ")
-    )
+    });
 }
 
 /// Full completion candidate lines (without the leading `:`).
@@ -1994,6 +1989,41 @@ fn expand_tilde(s: &str) -> PathBuf {
 // Jumplist, history, themes
 // ---------------------------------------------------------------------------
 
+/// Repaint the statusbar's left field with the jumplist breadcrumb: the route
+/// to the current document (`index.md > topic.md > note.md`). Called after a
+/// document switch, a jumplist hop, and whenever a transient message clears.
+fn show_trail(s: &Shell) {
+    s.bar.set_trail(trail_segments(s));
+}
+
+/// The breadcrumb segments: the jumplist's route to the live document, as
+/// display names, oldest first.
+fn trail_segments(s: &Shell) -> Vec<String> {
+    let current = (!s.is_stdin()).then_some(s.file.as_path());
+    s.jumplist
+        .trail(current)
+        .into_iter()
+        .map(doc_label)
+        .collect()
+}
+
+/// The untruncated breadcrumb, for `GetState`: what the statusbar shows when
+/// the window is wide enough for all of it.
+fn trail_string(s: &Shell) -> String {
+    trail_segments(s).join(" > ")
+}
+
+/// A document's statusbar name: its basename, or `stdin` for the stream.
+fn doc_label(doc: Option<&Path>) -> String {
+    match doc {
+        Some(p) => p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.to_string_lossy().into_owned()),
+        None => "stdin".to_string(),
+    }
+}
+
 /// The current reading position as a jumplist [`Location`]: the live document
 /// (a file, or `None` for the stdin stream) at scroll offset `scroll_y`.
 fn current_location(s: &Shell, scroll_y: f64) -> Location {
@@ -2010,7 +2040,10 @@ fn current_location(s: &Shell, scroll_y: f64) -> Location {
 /// Restore a jumplist [`Location`]: scroll in place when it names the current
 /// document, otherwise open its file at the recorded offset. A `None` document
 /// is the stdin stream we've since replaced — unreturnable.
-fn navigate_to_location(shell: &Rc<RefCell<Shell>>, loc: Location) {
+///
+/// Returns whether we actually landed there; a refused hop leaves a statusbar
+/// notice the caller must not paint over.
+fn navigate_to_location(shell: &Rc<RefCell<Shell>>, loc: Location) -> bool {
     let same_doc = {
         let s = shell.borrow();
         match (&loc.doc, s.is_stdin()) {
@@ -2021,18 +2054,27 @@ fn navigate_to_location(shell: &Rc<RefCell<Shell>>, loc: Location) {
     };
     if same_doc {
         shell.borrow().view.restore_scroll(loc.scroll_y);
-        return;
+        return true;
     }
     match loc.doc {
-        Some(path) if path.exists() => load_document(shell, path, loc.scroll_y),
-        Some(path) => shell
-            .borrow()
-            .bar
-            .set_message(&format!("no such file: {}", path.display())),
-        None => shell
-            .borrow()
-            .bar
-            .set_message("cannot return to piped input"),
+        Some(path) if path.exists() => {
+            load_document(shell, path, loc.scroll_y);
+            true
+        }
+        Some(path) => {
+            shell
+                .borrow()
+                .bar
+                .set_message(&format!("no such file: {}", path.display()));
+            false
+        }
+        None => {
+            shell
+                .borrow()
+                .bar
+                .set_message("cannot return to piped input");
+            false
+        }
     }
 }
 

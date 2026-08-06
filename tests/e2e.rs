@@ -85,6 +85,10 @@ fn should_skip() -> bool {
 struct State {
     #[allow(dead_code)]
     file: String,
+    /// The statusbar breadcrumb: the jumplist's route to the current document
+    /// (`a.md > b.md`), untruncated — the fitting to the bar's width is unit
+    /// tested in `core::jumplist`.
+    trail: String,
     scroll_y: f64,
     scroll_percent: u32,
     /// Layout width of the content column in CSS px. Reflows with geometric
@@ -134,6 +138,7 @@ impl State {
     fn parse(json: &str) -> Option<Self> {
         Some(State {
             file: field_str(json, "file")?,
+            trail: field_str(json, "trail")?,
             scroll_y: field(json, "scroll_y")?.parse().ok()?,
             scroll_percent: field(json, "scroll_percent")?.parse().ok()?,
             content_width: field(json, "content_width")?.parse().ok()?,
@@ -1355,15 +1360,19 @@ fn back_and_forward_cross_documents_after_following_a_link() {
     std::fs::write(&b, format!("# Doc B\n\n{filler}## Bottom of B\n")).expect("write b.md");
 
     let h = Harness::launch_file(a.clone());
-    assert!(h.get_state().file.ends_with("a.md"), "starts on a.md");
+    let start = h.get_state();
+    assert!(start.file.ends_with("a.md"), "starts on a.md");
+    assert_eq!(start.trail, "a.md", "breadcrumb starts at the opened file");
 
     // Follow the single visible link (hint label `a`) → opens b.md at its top.
     h.key(&["f"]);
     h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
     h.key(&["a"]);
-    h.wait_for_state("link opens b.md", SETTLE, |s| {
+    let opened = h.wait_for_state("link opens b.md", SETTLE, |s| {
         s.mode == "normal" && s.file.ends_with("b.md")
     });
+    // The statusbar breadcrumb grows with the route taken to get here.
+    assert_eq!(opened.trail, "a.md > b.md");
 
     // Scroll down inside b.md so the live position we walk back from is real.
     h.execute_action("scroll down", 12);
@@ -1371,15 +1380,17 @@ fn back_and_forward_cross_documents_after_following_a_link() {
 
     // `Backspace` walks the jumplist back into a.md at the departure (the top).
     h.key(&["BackSpace"]);
-    h.wait_for_state("Backspace returns to a.md at the top", SETTLE, |s| {
+    let back = h.wait_for_state("Backspace returns to a.md at the top", SETTLE, |s| {
         s.file.ends_with("a.md") && s.scroll_y == 0.0
     });
+    assert_eq!(back.trail, "a.md", "walking back shortens the breadcrumb");
 
     // `Ctrl-i` walks forward again into b.md.
     h.key(&["ctrl+i"]);
-    h.wait_for_state("Ctrl-i returns forward to b.md", SETTLE, |s| {
+    let forward = h.wait_for_state("Ctrl-i returns forward to b.md", SETTLE, |s| {
         s.file.ends_with("b.md")
     });
+    assert_eq!(forward.trail, "a.md > b.md", "and forward re-extends it");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

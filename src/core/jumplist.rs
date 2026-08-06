@@ -15,10 +15,15 @@
 //! a jump and discards any forward history; [`back`](Jumplist::back) walks
 //! toward older entries, saving the live position on the first step so
 //! [`forward`](Jumplist::forward) can return to it.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Maximum retained entries (vim's default `'jumplist'` size).
 const CAPACITY: usize = 100;
+
+/// Separator between breadcrumb segments.
+const SEP: &str = " > ";
+/// Stands in for the segments dropped off the left of a breadcrumb.
+const ELLIPSIS: &str = "…";
 
 /// A reading position: which document, and the scroll offset within it.
 ///
@@ -90,6 +95,26 @@ impl Jumplist {
         }
     }
 
+    /// The documents on the path to `current`, oldest first and ending at
+    /// `current` — the route that got us here (`index.md > topic.md > note.md`).
+    ///
+    /// Only the entries *behind* the cursor count, so walking back with
+    /// `Ctrl-o` shortens the trail and `Ctrl-i` re-extends it. Consecutive jumps
+    /// within one document collapse to a single segment: a breadcrumb answers
+    /// "which files", not "how many jumps".
+    pub fn trail<'a>(&'a self, current: Option<&'a Path>) -> Vec<Option<&'a Path>> {
+        let behind = self.entries[..self.pos.min(self.entries.len())]
+            .iter()
+            .map(|loc| loc.doc.as_deref());
+        let mut out: Vec<Option<&Path>> = Vec::new();
+        for doc in behind.chain(std::iter::once(current)) {
+            if out.last() != Some(&doc) {
+                out.push(doc);
+            }
+        }
+        out
+    }
+
     /// Trim to [`CAPACITY`] by dropping the oldest entries, keeping `pos`
     /// pointing at the same logical entry.
     fn enforce_cap(&mut self) {
@@ -99,6 +124,47 @@ impl Jumplist {
             self.pos = self.pos.saturating_sub(over);
         }
     }
+}
+
+/// Render a [`trail`](Jumplist::trail) of display names as `a > b > c`, fitted
+/// to `max_cols` monospace columns.
+///
+/// Overflow is cut from the **left** — whole segments are dropped oldest-first
+/// and replaced by a leading `…`, so the current document (the last segment) is
+/// always visible. A last segment too long for `max_cols` on its own is left
+/// over-long rather than mangled; the statusbar label ellipsizes the remainder.
+pub fn breadcrumb(segments: &[String], max_cols: usize) -> String {
+    let Some((last, older)) = segments.split_last() else {
+        return String::new();
+    };
+    let sep = SEP.chars().count();
+    // What a leading `… > ` costs, reserved while anything is still to the left.
+    let marker = ELLIPSIS.chars().count() + sep;
+
+    let mut cols = last.chars().count();
+    let mut kept = 0;
+    for (i, seg) in older.iter().enumerate().rev() {
+        let more_left = i > 0;
+        let width = cols + sep + seg.chars().count() + if more_left { marker } else { 0 };
+        if width > max_cols {
+            break;
+        }
+        cols = width - if more_left { marker } else { 0 };
+        kept += 1;
+    }
+
+    let dropped = older.len() - kept;
+    let mut out = String::new();
+    if dropped > 0 {
+        out.push_str(ELLIPSIS);
+        out.push_str(SEP);
+    }
+    for seg in &older[dropped..] {
+        out.push_str(seg);
+        out.push_str(SEP);
+    }
+    out.push_str(last);
+    out
 }
 
 #[cfg(test)]
@@ -176,6 +242,122 @@ mod tests {
         let mut j = Jumplist::new();
         j.push(at(1.0));
         assert_eq!(j.forward(), None);
+    }
+
+    /// The three-document reading route `a.md → b.md → c.md`, as the shell
+    /// records it: each link follow pushes the departure, then the file changes.
+    fn route() -> (Jumplist, PathBuf, PathBuf, PathBuf) {
+        let (a, b, c) = (
+            PathBuf::from("/v/a.md"),
+            PathBuf::from("/v/b.md"),
+            PathBuf::from("/v/c.md"),
+        );
+        let mut j = Jumplist::new();
+        j.push(Location {
+            doc: Some(a.clone()),
+            scroll_y: 100.0,
+        });
+        j.push(Location {
+            doc: Some(b.clone()),
+            scroll_y: 10.0,
+        });
+        (j, a, b, c)
+    }
+
+    #[test]
+    fn trail_is_the_route_to_the_current_document() {
+        let (j, a, b, c) = route();
+        assert_eq!(
+            j.trail(Some(&c)),
+            vec![Some(a.as_path()), Some(b.as_path()), Some(c.as_path())]
+        );
+    }
+
+    #[test]
+    fn trail_collapses_consecutive_jumps_within_one_document() {
+        let a = PathBuf::from("/v/a.md");
+        let mut j = Jumplist::new();
+        // Section jumps inside one document: many entries, one breadcrumb segment.
+        j.push(Location {
+            doc: Some(a.clone()),
+            scroll_y: 0.0,
+        });
+        j.push(Location {
+            doc: Some(a.clone()),
+            scroll_y: 400.0,
+        });
+        assert_eq!(j.trail(Some(&a)), vec![Some(a.as_path())]);
+    }
+
+    #[test]
+    fn trail_shrinks_walking_back_and_regrows_forward() {
+        let (mut j, a, b, c) = route();
+        // Ctrl-o from c.md lands on b.md: the trail is now just a.md > b.md.
+        j.back(Location {
+            doc: Some(c.clone()),
+            scroll_y: 0.0,
+        });
+        assert_eq!(
+            j.trail(Some(&b)),
+            vec![Some(a.as_path()), Some(b.as_path())]
+        );
+        // Ctrl-i returns to c.md and the full route with it.
+        j.forward();
+        assert_eq!(
+            j.trail(Some(&c)),
+            vec![Some(a.as_path()), Some(b.as_path()), Some(c.as_path())]
+        );
+    }
+
+    #[test]
+    fn trail_of_a_fresh_jumplist_is_just_the_current_document() {
+        let j = Jumplist::new();
+        let a = PathBuf::from("/v/a.md");
+        assert_eq!(j.trail(Some(&a)), vec![Some(a.as_path())]);
+        // The stdin stream has no path, and still occupies a segment.
+        assert_eq!(j.trail(None), vec![None]);
+    }
+
+    /// `["index.md", "topic.md", "note.md"]` — the doc-comment example.
+    fn segments() -> Vec<String> {
+        ["index.md", "topic.md", "note.md"]
+            .map(String::from)
+            .to_vec()
+    }
+
+    #[test]
+    fn breadcrumb_joins_segments_when_it_fits() {
+        assert_eq!(breadcrumb(&segments(), 80), "index.md > topic.md > note.md");
+        assert_eq!(breadcrumb(&[], 80), "");
+    }
+
+    #[test]
+    fn breadcrumb_drops_oldest_segments_from_the_left() {
+        // One column short of the full trail: the oldest segment goes first.
+        assert_eq!(breadcrumb(&segments(), 28), "… > topic.md > note.md");
+        assert_eq!(breadcrumb(&segments(), 21), "… > note.md");
+    }
+
+    #[test]
+    fn breadcrumb_never_drops_the_current_document() {
+        // Narrower than even the current filename: it survives anyway (the label
+        // ellipsizes), because losing it would leave the reader with nothing.
+        assert_eq!(breadcrumb(&segments(), 3), "… > note.md");
+        assert_eq!(breadcrumb(&["note.md".to_string()], 3), "note.md");
+    }
+
+    #[test]
+    fn breadcrumb_fits_its_budget_whenever_the_last_segment_does() {
+        let segs = segments();
+        // From the narrowest budget that holds `… > note.md` upward.
+        for cols in 11..40 {
+            let out = breadcrumb(&segs, cols);
+            assert!(
+                out.chars().count() <= cols,
+                "{cols} cols overflowed with {out:?}"
+            );
+            assert!(out.ends_with("note.md"), "{cols} cols lost the current doc");
+        }
     }
 
     #[test]

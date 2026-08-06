@@ -213,6 +213,24 @@ when the rounded percent changes) pings Rust to re-query and repaint the percent
 clears any active search (highlight + `n`/`N` state) and any transient statusbar
 notice, returning the chrome to its resting state.
 
+The statusbar's **left** field is the jumplist breadcrumb — the route to the
+document you are reading, not just its name: `index.md > topic.md > note.md`.
+It is derived, never stored: `Jumplist::trail` walks the entries *behind* the
+cursor and appends the live document, collapsing consecutive jumps within one
+file, so following a link extends the trail and `Ctrl-o`/`Ctrl-i` shorten and
+re-extend it. Overflow is cut on the **left** — whole segments are dropped
+oldest-first behind a leading `…` (`core::jumplist::breadcrumb`, fitted to the
+label's monospace column count), so the current filename is always visible; the
+label also ellipsizes `Start` as a fallback between re-fits. `GetState` reports
+the untruncated trail as `trail`, which is how the e2e suite asserts it.
+
+Tab-completion on the `:` line **paginates** rather than truncating: candidates
+are packed into pages that fit the bar (`core::command::completion_line`), the
+echo shows the page holding the selection with `▸` on it, and repeated `Tab`
+walks the pages in order — so every candidate is reachable, not just the first
+few. The header is `[candidate/total] (page/pages)`; the page counter is
+omitted when everything fits on one page.
+
 ### D6: Extensibility — pipeline seams, not a plugin ABI
 
 Zathura's C-ABI plugin system is overkill for one format. The extensibility
@@ -430,9 +448,10 @@ machinery wholesale rather than inventing a parallel path.
     replaces it).
   - *per-file history* — skipped (zathura does not persist stdin documents
     either); a stream has no stable identity to key `history.toml` on.
-  - *statusbar / `GetState` file* — the label is `stdin`; `GetState.file` reports
-    `stdin` too, which keeps the D-Bus forward-search (D7, matches on that field)
-    from ever mistaking a stream for a file.
+  - *statusbar / `GetState` file* — the label is `stdin` (and so is the stream's
+    breadcrumb segment); `GetState.file` reports `stdin` too, which keeps the
+    D-Bus forward-search (D7, matches on that field) from ever mistaking a
+    stream for a file.
   - *reverse editor sync (`%f`)* — suppressed with a statusbar notice (no file to
     open the editor at). `--forward` for a stream is rejected in the CLI up front
     (it targets a saved source line and can hand off to an instance holding that

@@ -4,6 +4,8 @@
 //! into a typed [`Command`]; [`complete`] powers tab completion. Side effects
 //! — opening files, applying `:set`, running actions — belong to the shell,
 //! which matches on the returned [`Command`].
+use std::ops::Range;
+
 use super::Action;
 use super::config::{self, action_names, option_keys};
 
@@ -108,6 +110,66 @@ pub fn complete(input: &str) -> Completions {
             }
         }
     }
+}
+
+/// Marks the selected candidate. Every candidate reserves the column, so page
+/// boundaries do not shift as the selection moves through them.
+const SELECTED: char = '▸';
+
+/// One statusbar line of tab-completion candidates: the page that holds
+/// `index`, with the selection marked, prefixed by `[i/n]` and — when there is
+/// more than one — the page counter.
+///
+/// Candidates are packed into pages from the start of the list, so repeated
+/// `Tab` walks the pages in order and *every* candidate is eventually shown,
+/// rather than the line always echoing the same first few.
+pub fn completion_line(candidates: &[String], index: usize, max_cols: usize) -> String {
+    if candidates.is_empty() {
+        return String::new();
+    }
+    let n = candidates.len();
+    // The header is written with the real numbers below; reserve its widest
+    // possible form here so the packed page always fits beside it.
+    let reserve = format!("[{n}/{n}] ({n}/{n}) ").chars().count();
+    let pages = paginate(candidates, max_cols.saturating_sub(reserve).max(1));
+    let page = pages.iter().position(|p| p.contains(&index)).unwrap_or(0);
+
+    let shown: Vec<String> = pages[page]
+        .clone()
+        .map(|i| {
+            let marker = if i == index { SELECTED } else { ' ' };
+            format!("{marker}{}", candidates[i])
+        })
+        .collect();
+    let counter = if pages.len() > 1 {
+        format!("({}/{}) ", page + 1, pages.len())
+    } else {
+        String::new()
+    };
+    format!("[{}/{n}] {counter}{}", index + 1, shown.join(" "))
+}
+
+/// Pack candidate indices into pages of at most `budget` columns — always at
+/// least one candidate per page, however narrow the window.
+fn paginate(candidates: &[String], budget: usize) -> Vec<Range<usize>> {
+    let mut pages = Vec::new();
+    let mut start = 0;
+    while start < candidates.len() {
+        let mut end = start;
+        let mut cols = 0;
+        while end < candidates.len() {
+            // Each candidate carries its marker column; a space joins them.
+            let width = cols + candidates[end].chars().count() + if end == start { 1 } else { 2 };
+            if end > start && width > budget {
+                break;
+            }
+            cols = width;
+            end += 1;
+        }
+        pages.push(start..end);
+        start = end;
+    }
+    pages
 }
 
 /// The full set of first-word completions: the built-in commands plus every
@@ -262,6 +324,59 @@ mod tests {
                 prefix: String::new()
             }
         );
+    }
+
+    /// Twelve five-column candidates (`aaa00` … `aaa11`).
+    fn many() -> Vec<String> {
+        (0..12).map(|i| format!("aaa{i:02}")).collect()
+    }
+
+    #[test]
+    fn completion_line_marks_the_selection_and_counts_candidates() {
+        let line = completion_line(&many(), 2, 200);
+        assert!(line.starts_with("[3/12] "), "{line}");
+        assert!(line.contains("▸aaa02"), "{line}");
+        // One page at this width, so no page counter.
+        assert!(!line.contains("(1/"), "{line}");
+    }
+
+    #[test]
+    fn completion_line_pages_and_follows_the_selection() {
+        // Room for the header plus three 6-column entries (marker + 5) per page.
+        let cands = many();
+        let cols = format!("[{n}/{n}] ({n}/{n}) ", n = cands.len()).len() + 20;
+        let first = completion_line(&cands, 0, cols);
+        assert!(first.contains("(1/4) ▸aaa00  aaa01  aaa02"), "{first}");
+        assert!(!first.contains("aaa03"), "{first}");
+        // Tabbing past the page boundary turns the page instead of cutting off.
+        let second = completion_line(&cands, 3, cols);
+        assert!(second.contains("(2/4) ▸aaa03  aaa04  aaa05"), "{second}");
+        assert!(second.starts_with("[4/12] "), "{second}");
+    }
+
+    #[test]
+    fn completion_line_pages_cover_every_candidate() {
+        let cands = many();
+        let cols = 60;
+        let mut seen: Vec<&String> = Vec::new();
+        for (i, cand) in cands.iter().enumerate() {
+            let line = completion_line(&cands, i, cols);
+            assert!(line.chars().count() <= cols, "overflow at {i}: {line}");
+            assert!(
+                line.contains(&format!("▸{cand}")),
+                "{cand} unreachable: {line}"
+            );
+            seen.push(cand);
+        }
+        assert_eq!(seen.len(), cands.len());
+    }
+
+    #[test]
+    fn completion_line_shows_one_candidate_even_when_absurdly_narrow() {
+        let line = completion_line(&many(), 5, 1);
+        assert!(line.contains("▸aaa05"), "{line}");
+        assert!(!line.contains("aaa04"), "{line}");
+        assert_eq!(completion_line(&[], 0, 80), "");
     }
 
     #[test]

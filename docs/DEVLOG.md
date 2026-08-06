@@ -2,6 +2,52 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-08-06 — the statusbar says how you got here; completion pages
+
+Two chrome complaints, both about the bottom bar not telling the whole truth.
+
+**The left field is a breadcrumb now**, not a filename: `index.md > topic.md >
+note.md`. The data was already there — the jumplist spans documents — so this is
+`Jumplist::trail`, which walks the entries *behind* the cursor, appends the live
+document, and collapses consecutive jumps within one file (a breadcrumb answers
+"which files", not "how many jumps"). Following a link extends it; `Ctrl-o`
+shortens it and `Ctrl-i` re-extends it, which falls out of the existing `pos`
+without any new state. The `Shell::filename` field went away in the process: it
+was the last segment of something derivable, and now it is derived.
+
+Overflow is cut on the **left**, as asked: `core::jumplist::breadcrumb` drops
+whole segments oldest-first behind a leading `…` until the line fits, and never
+drops the last one, so the current filename is always visible. Fitting needs a
+width, which is the one genuinely shell-side part: `Bar::status_columns`
+measures a run of monospace glyphs against the label's allocated width, and
+`refresh_status` re-fits (idempotent, string-compare) so a resize reflows on the
+next interaction. `EllipsizeMode::Start` on the label covers the gap in between
+— and stops a long trail from forcing a window minimum width.
+
+That measurement is also why `status_left` is now `halign: Fill` rather than
+`Start`. A `Start`-aligned label is allocated only its natural width, so
+`width()` reported *what it already showed*, not the space available — a budget
+that shrank on every re-fit until the breadcrumb collapsed to `… > note.md` in a
+1000 px window. Caught in the Xvfb screenshot pass, not by the tests: the e2e
+suite asserts the untruncated trail (new `GetState.trail`), which was correct
+the whole time. Worth remembering that a headless assertion on the *model* says
+nothing about the *layout*.
+
+**Tab completion paginates** instead of showing the first eight candidates and
+silently dropping the rest. `core::command::completion_line` packs candidates
+into pages that fit the bar and renders the page holding the selection with `▸`
+on it; repeated `Tab` walks the pages in order, so all 37 command names are
+reachable rather than the same five being echoed forever. Pages are packed from
+the start of the list (stable boundaries, so tabbing back and forth doesn't
+reshuffle), every candidate reserves the marker column (so the boundaries don't
+shift with the selection), and the `(page/pages)` counter is omitted when there
+is only one page.
+
+Next: nothing outstanding on the chrome. If the completion echo turns out to be
+cramped on narrow windows, the zathura-idiomatic answer is a multi-row list
+above the inputbar — deliberately not built here, because pagination was the ask
+and a popup list is a widget, not a formatting function.
+
 ## 2026-08-06 — the vault index gets small, and gets off the main thread
 
 Follow-up to the entry below, which shipped marker-based rooting and then

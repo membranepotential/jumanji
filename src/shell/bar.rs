@@ -1,11 +1,14 @@
 //! Girara-style bottom chrome: a status line plus an input entry that appears
 //! for `/` search and `:` commands. Flat, minimal, monospace — no toolbars.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use gtk::pango::EllipsizeMode;
 use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, CssProvider, Entry, Label, Orientation};
+
+use crate::core::jumplist::breadcrumb;
 
 /// Which kind of input the bar is currently collecting. The prompt character
 /// and how `Enter` is interpreted (search vs command) both follow from this.
@@ -36,14 +39,29 @@ pub struct Bar {
     entry: Entry,
     /// The prompt kind while the input bar is open; `None` when it is hidden.
     prompt: Rc<Cell<Option<Prompt>>>,
+    /// The jumplist breadcrumb the left label shows at rest, as display names
+    /// (oldest first, current document last). Kept whole so the line can be
+    /// re-fitted whenever the available width changes.
+    trail: Rc<RefCell<Vec<String>>>,
+    /// Whether the left label currently holds a transient message rather than
+    /// the breadcrumb — a re-fit must not clobber it.
+    message_shown: Rc<Cell<bool>>,
 }
 
 impl Bar {
     pub fn new() -> Self {
         let status_left = Label::new(None);
-        status_left.set_halign(Align::Start);
+        // Fill (not Start) so the label is *allocated* the free space rather
+        // than shrinking to its text: its width is the fitting budget, and a
+        // Start-aligned label would report only what it already shows — a
+        // budget that shrinks with every re-fit. `xalign` keeps the text left.
+        status_left.set_halign(Align::Fill);
         status_left.set_hexpand(true);
         status_left.set_xalign(0.0);
+        // Cut from the left, so the current document stays readable when the
+        // breadcrumb outgrows the bar between re-fits (and keeps a long trail
+        // from forcing a window minimum width).
+        status_left.set_ellipsize(EllipsizeMode::Start);
         status_left.add_css_class("status-left");
 
         let status_right = Label::new(None);
@@ -72,6 +90,8 @@ impl Bar {
             status_right,
             entry,
             prompt: Rc::new(Cell::new(None)),
+            trail: Rc::new(RefCell::new(Vec::new())),
+            message_shown: Rc::new(Cell::new(false)),
         }
     }
 
@@ -83,8 +103,48 @@ impl Bar {
         &self.entry
     }
 
-    pub fn set_filename(&self, name: &str) {
-        self.status_left.set_text(name);
+    /// Show the jumplist breadcrumb — the route to the current document, e.g.
+    /// `index.md > topic.md > note.md` — on the left, fitted to the bar.
+    pub fn set_trail(&self, segments: Vec<String>) {
+        *self.trail.borrow_mut() = segments;
+        self.message_shown.set(false);
+        self.refit_trail();
+    }
+
+    /// Re-render the breadcrumb for the current width. Cheap and idempotent, so
+    /// the status refresh can call it unconditionally; a transient message wins
+    /// until something replaces it.
+    pub fn refit_trail(&self) {
+        if self.message_shown.get() {
+            return;
+        }
+        let text = breadcrumb(&self.trail.borrow(), self.status_columns());
+        if self.status_left.text() != text {
+            self.status_left.set_text(&text);
+        }
+    }
+
+    /// How many monospace columns the left status label currently spans — the
+    /// budget for anything laid out to fit it. [`usize::MAX`] before the first
+    /// allocation: nothing is known not to fit, and the ellipsize keeps that
+    /// honest until the next re-fit.
+    pub fn status_columns(&self) -> usize {
+        let width = self.status_left.width();
+        if width <= 0 {
+            return usize::MAX;
+        }
+        // Monospace (see the CSS below): one glyph's advance is every glyph's.
+        // Measured over a run of them, so the per-column rounding averages out.
+        const SAMPLE: &str = "0000000000";
+        let run = self
+            .status_left
+            .create_pango_layout(Some(SAMPLE))
+            .pixel_size()
+            .0;
+        if run <= 0 {
+            return usize::MAX;
+        }
+        (width as usize * SAMPLE.len()) / run as usize
     }
 
     /// Right-hand status: any pending count/key indicator, a zoom indicator when
@@ -103,8 +163,10 @@ impl Bar {
         self.status_right.set_text(&text);
     }
 
-    /// Transient hint shown on the left (e.g. "not implemented", errors).
+    /// Transient hint shown on the left (e.g. "not implemented", errors). It
+    /// holds the label until the breadcrumb is set again.
     pub fn set_message(&self, msg: &str) {
+        self.message_shown.set(true);
         self.status_left.set_text(msg);
     }
 
