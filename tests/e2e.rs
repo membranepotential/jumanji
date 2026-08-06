@@ -116,6 +116,18 @@ struct State {
     /// Rendered width of the `.frontmatter` panel in CSS px (0 when hidden,
     /// which is the default). The `:frontmatter` toggle's observable.
     frontmatter_width: f64,
+    /// The scroll offset the **first painted frame** of the current document
+    /// was placed at, recorded from inside the page before that frame went out
+    /// (`-1` when this load opened at the top and installed no restore script).
+    ///
+    /// The one observable that can distinguish "ends up in the right place"
+    /// from "gets there without flashing the top first" — the old,
+    /// load-finished restore passed the former and failed the latter.
+    first_frame_scroll_y: f64,
+    /// Whether the body is still hidden waiting for its opening position. Must
+    /// be false on any settled document — the guard on the hide-until-restored
+    /// gate's one catastrophic failure mode, a permanently blank page.
+    restoring: bool,
     /// Computed `color` of the first python function-name span, as a CSS
     /// `rgb(...)` string ("" if the document has no python). In dark mode it must
     /// not be `InspiredGithub`'s near-black light colour (`rgb(50, 50, 50)`).
@@ -149,6 +161,8 @@ impl State {
             msup_shift_ratio: field(json, "msup_shift_ratio")?.parse().ok()?,
             fence_width: field(json, "fence_width")?.parse().ok()?,
             frontmatter_width: field(json, "frontmatter_width")?.parse().ok()?,
+            first_frame_scroll_y: field(json, "first_frame_scroll_y")?.parse().ok()?,
+            restoring: field(json, "restoring")? == "true",
             fn_color: field_str(json, "fn_color")?,
             dark: field(json, "dark")? == "true",
             zoom: field(json, "zoom")?.parse().ok()?,
@@ -1183,6 +1197,79 @@ fn live_reload_grows_toc_and_preserves_dark() {
 }
 
 #[test]
+fn live_reload_keeps_text_zoom_and_position_from_the_first_frame() {
+    // Saving the file you are reading is the most-seen instance of the flash:
+    // every write re-renders and reloads, and the position and the text zoom
+    // both used to be re-applied *after* `LoadEvent::Finished` — one painted
+    // frame of the base-size, unscrolled top each time. Both now ride into the
+    // load, so the first frame is already right.
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let src = Path::new(manifest).join("demo").join("demo.md");
+    let dir = std::env::temp_dir().join(format!("jumanji-e2e-tzreload-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let copy = dir.join("live.md");
+    std::fs::copy(&src, &copy).expect("copy demo");
+
+    let Some((_g, h)) = setup_file(copy.clone()) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+
+    // The maximum scroll offset is a direct proxy for the document's height, and
+    // therefore for the font size actually in effect — unlike `text_zoom`, which
+    // reports the shell's *intent* and survives a reload either way.
+    h.key(&["shift+g"]);
+    let base_bottom = h
+        .wait_for_state("scrolled to the bottom", SETTLE, |s| s.scroll_y > 100.0)
+        .scroll_y;
+
+    h.execute_action("text zoom in", 4);
+    h.wait_for_state("text zoom raises the factor", SETTLE, |s| s.text_zoom > 1.0);
+    h.key(&["shift+g"]);
+    let zoomed_bottom = h
+        .wait_for_state("larger prose pushes the bottom down", SETTLE, |s| {
+            s.scroll_y > base_bottom * 1.05
+        })
+        .scroll_y;
+
+    // Touch the file — a trailing newline changes nothing about the render, so
+    // any height difference below is the font size, not the content.
+    let content = std::fs::read_to_string(&copy).expect("read copy");
+    std::fs::write(&copy, format!("{content}\n")).expect("touch copy");
+
+    // The reload announces itself through the restore script it installs: a
+    // position-preserving reload records the offset its first frame painted at,
+    // and a fresh document (this one, at launch) records nothing (-1).
+    let reloaded = h.wait_for_state(
+        "live reload restores through the load",
+        Duration::from_secs(10),
+        |s| s.first_frame_scroll_y > 0.0,
+    );
+    assert!(
+        (reloaded.first_frame_scroll_y - zoomed_bottom).abs() < 20.0,
+        "the first painted frame of a live reload must already be at the \
+         preserved offset {zoomed_bottom}, got {}",
+        reloaded.first_frame_scroll_y
+    );
+    // Had the text zoom not been pre-applied into the HTML, the reloaded
+    // document would be base-sized: shorter, so the restore would clamp to
+    // `base_bottom` and this would fail — which is exactly what makes the
+    // dropped load-finished re-apply safe to drop.
+    assert!(
+        reloaded.first_frame_scroll_y > base_bottom * 1.05,
+        "text zoom must be in effect from the first frame: first-frame offset \
+         {} should exceed the base-font document height {base_bottom}",
+        reloaded.first_frame_scroll_y
+    );
+    h.wait_for_state("body revealed after the live reload", SETTLE, |s| {
+        !s.restoring
+    });
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn tab_enters_and_leaves_toc_mode() {
     let Some((_g, h)) = setup() else { return };
     assert_eq!(h.get_state().mode, "normal", "starts in normal mode");
@@ -1396,6 +1483,85 @@ fn back_and_forward_cross_documents_after_following_a_link() {
 }
 
 #[test]
+fn jumping_back_paints_no_unscrolled_frame() {
+    // The no-flash property, which is *not* the same as "ends up in the right
+    // place": the reading position now rides into the load as a document-start
+    // user-script, so the first frame WebKit paints of the returned-to document
+    // is already at the restored offset. The old load-finished restore painted
+    // the top first and snapped afterwards — visible as a flash when walking the
+    // jumplist, and here as a `first_frame_scroll_y` of 0.
+    let Some(_g) = setup_guard() else { return };
+
+    let dir = std::env::temp_dir().join(format!("jumanji-e2e-flash-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let filler: String = (1..=80)
+        .map(|i| format!("Filler paragraph {i} padding the document past the fold.\n\n"))
+        .collect();
+    let a = dir.join("a.md");
+    let b = dir.join("b.md");
+    // The link sits at the *bottom* of a.md, so following it departs from a real
+    // scroll offset — a departure at the top would make the assertion vacuous.
+    std::fs::write(&a, format!("# Doc A\n\n{filler}[open b](b.md)\n")).expect("write a.md");
+    std::fs::write(&b, format!("# Doc B\n\n{filler}")).expect("write b.md");
+
+    let h = Harness::launch_file(a.clone());
+    // A fresh document opens at the top, so no restore script runs at all.
+    assert_eq!(
+        h.get_state().first_frame_scroll_y,
+        -1.0,
+        "an unread document installs no restore script"
+    );
+
+    h.key(&["shift+g"]);
+    let departed = h
+        .wait_for_state("scrolled to the bottom of a.md", SETTLE, |s| {
+            s.scroll_y > 200.0
+        })
+        .scroll_y;
+
+    // Follow the now-visible link out of a.md.
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    h.wait_for_state("link opens b.md", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("b.md") && s.loaded
+    });
+
+    // Back into a.md at the departure offset — the load under test.
+    h.key(&["ctrl+o"]);
+    let back = h.wait_for_state("Ctrl-o returns to a.md", SETTLE, |s| {
+        s.file.ends_with("a.md") && s.loaded && s.scroll_y > 1.0
+    });
+    assert!(
+        (back.scroll_y - departed).abs() < 5.0,
+        "returns to the departure offset {departed}, got {}",
+        back.scroll_y
+    );
+    // The assertion this test exists for.
+    assert!(
+        back.first_frame_scroll_y > 0.0,
+        "the first painted frame of the returned-to document must not be the \
+         unscrolled top; got first_frame_scroll_y = {} (departure was {departed})",
+        back.first_frame_scroll_y
+    );
+    assert!(
+        (back.first_frame_scroll_y - departed).abs() < 5.0,
+        "the first painted frame must already be at the restored offset \
+         {departed}, got {}",
+        back.first_frame_scroll_y
+    );
+    // The hide-until-restored gate must let go again — a page stuck hidden would
+    // be a far worse bug than the flash it prevents. A bounded wait rather than
+    // a bare assert on the snapshot above: the reveal is paced by the page's own
+    // `requestAnimationFrame`, so it can legitimately land a frame after the
+    // `loaded` flag this test waited on. What must hold is that it lands at all,
+    // which the script's unconditional failsafe timer guarantees.
+    h.wait_for_state("body revealed after the restore", SETTLE, |s| !s.restoring);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn history_persists_scroll_across_relaunch() {
     let Some(_g) = setup_guard() else { return };
 
@@ -1436,6 +1602,18 @@ fn history_persists_scroll_across_relaunch() {
             "restored scroll {} should match saved {marked}",
             restored.scroll_y
         );
+        // And without flashing the top on the way: opening a file you had read
+        // before restores through the load, not after it (see
+        // `jumping_back_paints_no_unscrolled_frame`).
+        assert!(
+            (restored.first_frame_scroll_y - marked).abs() < 5.0,
+            "the first painted frame of a relaunch must already be at the saved \
+             offset {marked}, got {}",
+            restored.first_frame_scroll_y
+        );
+        h.wait_for_state("body revealed after the relaunch restore", SETTLE, |s| {
+            !s.restoring
+        });
     }
 
     let _ = std::fs::remove_dir_all(&dir);

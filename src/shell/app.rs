@@ -38,7 +38,7 @@ use super::bar::{Bar, Prompt};
 use super::dbus;
 use super::stdin::StdinReader;
 use super::toc::TocView;
-use super::view::{View, ViewportState, ZoomAnchor};
+use super::view::{InitialPosition, View, ViewportState, ZoomAnchor};
 use super::watch::{FileEvent, Watch};
 
 const APP_ID: &str = "org.membranepotential.jumanji";
@@ -117,15 +117,18 @@ struct Shell {
     /// Reverse editor-sync template (DESIGN D7): spawned on Ctrl+click with
     /// `%l`/`%f` substituted. Config-only (copied from options at construction).
     editor_command: EditorCommand,
-    /// A fragment to scroll to once the *next* load finishes — how a
-    /// cross-document link (`other.md#section`, or a resolved `[[Note#H]]`)
-    /// keeps its anchor (DESIGN D11). Applied after `pending_restore`, so it
-    /// overrides the restored history scroll; one-shot, so a stale anchor
-    /// cannot leak into the following document.
-    pending_anchor: Option<String>,
-    /// A `--forward <line>` requested on the command line, applied once the
-    /// initial load finishes (DESIGN D7 forward sync on a fresh launch).
-    pending_forward: Option<u32>,
+    /// Where the load now in flight opens: a remembered offset, a link fragment
+    /// (`other.md#section`, a resolved `[[Note#H]]`, DESIGN D11), or a
+    /// `--forward <line>` (DESIGN D7). Armed by whoever initiates the load —
+    /// which is where the precedence between the three is resolved, once — and
+    /// carried *into* [`View::load_document`], which lands it before the first
+    /// painted frame rather than after `LoadEvent::Finished`.
+    ///
+    /// It stays armed until that load finishes rather than being consumed at
+    /// initiation, because until then it is the only record of where the reader
+    /// asked to be: a re-render that lands mid-flight (a vault rescan) must
+    /// carry the same position rather than capture the pre-restore live scroll.
+    pending_position: InitialPosition,
     /// XDG config base (`…/.config`); themes live under `<it>/jumanji/themes`.
     config_dir: Option<PathBuf>,
     /// Data dir (`…/.local/share/jumanji`); holds `history.toml`.
@@ -170,8 +173,6 @@ struct Shell {
     /// are no-ops before this; the D-Bus `loaded` flag lets clients (tests,
     /// editor integrations) wait for a driveable window.
     loaded: bool,
-    /// Scroll offset to restore once the next load finishes.
-    pending_restore: Option<f64>,
     /// Last observed scroll offset, refreshed on every status update. Read
     /// synchronously on window-close to flush history without an async query.
     last_scroll: f64,
@@ -313,8 +314,8 @@ fn build_ui(
         vault_scanning: false,
         doc_uses_vault: false,
         editor_command: options.editor_command.clone(),
-        pending_forward: forward,
-        pending_anchor: None,
+        // Resolved just below, once the saved window-state has been read.
+        pending_position: InitialPosition::Top,
         config_dir: config_dir.clone(),
         data_dir,
         scroll_step: options.scroll_step_px as i64,
@@ -337,7 +338,6 @@ fn build_ui(
         section: 0,
         dark: options.default_recolor,
         loaded: false,
-        pending_restore: None,
         last_scroll: 0.0,
         input: Input::None,
         completion: None,
@@ -351,20 +351,30 @@ fn build_ui(
     }));
 
     // Restore any saved window-state for this file so the first painted frame is
-    // already at the right place. Scroll is deferred to load-finished. Read the
-    // value out before taking the mutable borrow (avoid a reentrant borrow).
-    // Skipped for stdin: a stream has no stable identity to key history on.
+    // already at the right place — zoom natively, scroll and text zoom through
+    // the initial load itself. Read the value out before taking the mutable
+    // borrow (avoid a reentrant borrow). Skipped for stdin: a stream has no
+    // stable identity to key history on.
     let saved = if is_stdin {
         None
     } else {
         shell.borrow().history.get(&file)
     };
-    if let Some(st) = saved {
+    {
         let mut s = shell.borrow_mut();
-        s.text_zoom = st.text_zoom;
-        s.zoom = st.zoom;
-        s.view.set_zoom(st.zoom);
-        s.pending_restore = Some(st.scroll_y);
+        if let Some(st) = &saved {
+            s.text_zoom = st.text_zoom;
+            s.zoom = st.zoom;
+            s.view.set_zoom(st.zoom);
+        }
+        // The launch's opening position, precedence resolved once: an editor
+        // that said `--forward <line>` pointed at that line deliberately, so it
+        // outranks wherever this file was last left off.
+        s.pending_position = match (forward, &saved) {
+            (Some(line), _) => InitialPosition::SourceLine(line),
+            (None, Some(st)) => InitialPosition::Offset(st.scroll_y),
+            (None, None) => InitialPosition::Top,
+        };
     }
 
     // First, so the walk overlaps everything below it — controller wiring, the
@@ -424,13 +434,15 @@ fn install_view_handlers(shell: &Rc<RefCell<Shell>>) {
 }
 
 /// Read the file, render it, and load the HTML. When `preserve_scroll`, capture
-/// the current scroll offset first so it can be restored after the load.
+/// the current scroll offset first and open the re-rendered document there —
+/// so a live reload of the file being read stays put from its first frame
+/// instead of flashing back to the top.
 fn render_and_load(shell: &Rc<RefCell<Shell>>, preserve_scroll: bool) {
     if preserve_scroll {
         let shell = shell.clone();
         let view = shell.borrow().view.clone();
         view.scroll_position(move |y| {
-            shell.borrow_mut().pending_restore = Some(y);
+            shell.borrow_mut().pending_position = InitialPosition::Offset(y);
             do_render_and_load(&shell);
         });
     } else {
@@ -481,11 +493,11 @@ fn rescan_vault(shell: &Rc<RefCell<Shell>>) {
         if !s.doc_uses_vault {
             return;
         }
-        // A restore already queued (a history position, a jumplist hop) is the
-        // offset the reader asked for, and the load that would apply it has not
-        // finished yet. Re-reading the live scroll here would capture the
-        // pre-restore 0.0 and overwrite it; keep the queued one instead.
-        let preserve_scroll = s.pending_restore.is_none();
+        // A position already armed (a history offset, a jumplist hop, a link
+        // fragment) is the place the reader asked for, and the load that would
+        // land it has not finished yet. Re-reading the live scroll here would
+        // capture the pre-restore 0.0 and overwrite it; keep the armed one.
+        let preserve_scroll = matches!(s.pending_position, InitialPosition::Top);
         drop(s);
         render_and_load(&shell, preserve_scroll);
     });
@@ -514,18 +526,31 @@ fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
             // pre-applies the `dark` class and paints dark from the first frame.
             let dark = s.dark;
             s.view.set_dark(dark);
-            s.view.load_document(&doc, &path);
+            // Text zoom rides into the HTML the same way, so the first frames
+            // are already at the right size; `None` keeps the stylesheet's base.
+            let font_size_px = (s.text_zoom != 1.0).then(|| s.font_base_px * s.text_zoom);
+            let at = s.pending_position.clone();
+            s.view.load_document(&doc, &path, &at, font_size_px);
         }
         Err(msg) => {
-            // No load will finish, so nothing would consume a pending anchor.
-            s.pending_anchor = None;
+            // No load will finish, so nothing would ever consume the armed
+            // position — disarm it rather than let it leak into a later load of
+            // some other document.
+            s.pending_position = InitialPosition::Top;
             s.bar.set_message(&msg);
         }
     }
 }
 
-/// On load completion, apply recolor state, restore any pending scroll offset,
-/// re-apply both zoom axes, and refresh the percentage indicator.
+/// On load completion, settle the reading position, re-assert recolor, and mark
+/// the reader driveable.
+///
+/// No longer where the position is *established* — that rides into the load
+/// itself ([`View::load_document`]), because anything issued here reaches a
+/// document WebKit has already parsed, laid out and composited, and needs a
+/// further IPC hop to take effect. This is only the late-layout correction, and
+/// the ordering below matters: the settle goes out **first**, ahead of the
+/// recolor eval, rather than queueing behind other work on the same channel.
 fn connect_load_finished(shell: &Rc<RefCell<Shell>>) {
     let webview = shell.borrow().view.widget().clone();
     let shell = shell.clone();
@@ -534,33 +559,25 @@ fn connect_load_finished(shell: &Rc<RefCell<Shell>>) {
             return;
         }
         {
-            let s = shell.borrow();
-            s.view.set_dark(s.dark);
-            // Re-apply text zoom: the inline `--font-size` custom property is
-            // lost on reload. Geometric zoom needs no re-apply — the native
-            // `zoom_level` is a WebView property that survives a document reload
-            // (verified by the live-reload e2e). No anchoring here — the scroll
-            // offset is restored explicitly below.
-            if s.text_zoom != 1.0 {
-                s.view.set_text_zoom_px(s.font_base_px * s.text_zoom);
-            }
-            if let Some(y) = s.pending_restore {
-                s.view.restore_scroll(y);
-            }
-        }
-        let (forward, anchor) = {
             let mut s = shell.borrow_mut();
-            s.pending_restore = None;
+            // The final authority on where the document sits: subresources are
+            // in by now, so an offset that clamped against a shorter,
+            // still-loading document lands properly here. Idempotent, and a
+            // no-op for a document that opened at the top.
+            s.view.settle_initial_position();
+            // Idempotent, and it covers the one case the pre-applied `dark`
+            // class cannot: a recolor toggled *while* this load was in flight,
+            // which the HTML was built too early to know about. It also
+            // re-asserts the native background colour.
+            let dark = s.dark;
+            s.view.set_dark(dark);
+            // Text zoom needs nothing here — `load_document` writes the
+            // `--font-size` into the HTML, so re-applying it would only reflow
+            // the settled page again. Geometric zoom needs nothing either: the
+            // native `zoom_level` is a WebView property that survives a document
+            // reload (verified by the live-reload e2e).
+            s.pending_position = InitialPosition::Top;
             s.loaded = true;
-            // Both override the restored scroll, and both are one-shot.
-            (s.pending_forward.take(), s.pending_anchor.take())
-        };
-        // A `--forward <line>` wins over a link fragment: the editor explicitly
-        // pointed the reader at this line.
-        if let Some(line) = forward {
-            goto_source_line(&shell, line);
-        } else if let Some(anchor) = anchor {
-            shell.borrow().view.scroll_to_anchor(&anchor);
         }
         refresh_status(&shell);
     });
@@ -1046,7 +1063,9 @@ fn expand_env_token(token: &str) -> String {
 /// The viewport widths (`viewport_width`, `doc_scroll_width`, `diagram_width`,
 /// `math_width`) let e2e tests assert the reflow invariants and that MathML laid
 /// out with nonzero geometry; `fn_color` lets e2e assert the dark-mode
-/// syntax-highlight scoping fix; the rest are unchanged.
+/// syntax-highlight scoping fix; `first_frame_scroll_y` lets e2e assert the
+/// no-flash property (the *first* painted frame's offset, not just the final
+/// one); the rest are unchanged.
 #[allow(clippy::too_many_arguments)]
 fn state_json(
     file: &str,
@@ -1068,6 +1087,7 @@ fn state_json(
          \"doc_scroll_width\":{doc_scroll_width},\"diagram_width\":{diagram_width},\
          \"math_width\":{math_width},\"msup_shift_ratio\":{msup_shift_ratio},\
          \"fence_width\":{fence_width},\"frontmatter_width\":{frontmatter_width},\
+         \"first_frame_scroll_y\":{first_frame_scroll_y},\"restoring\":{restoring},\
          \"fn_color\":{fn_color},\
          \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded},\
@@ -1084,6 +1104,8 @@ fn state_json(
         msup_shift_ratio = vs.msup_shift_ratio,
         fence_width = vs.fence_width,
         frontmatter_width = vs.frontmatter_width,
+        first_frame_scroll_y = vs.first_frame_scroll_y,
+        restoring = vs.restoring,
         fn_color = json_string(&vs.fn_color),
         mode = json_string(mode),
     )
@@ -1299,8 +1321,19 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
                             let mut s = sh.borrow_mut();
                             let loc = current_location(&s, cur);
                             s.jumplist.push(loc);
-                            s.zoom = p.zoom;
-                            s.view.set_zoom(p.zoom);
+                            // `set_zoom` is a native call that reflows the page
+                            // at once, while the scroll is an async eval — so
+                            // when the two differ a frame can land at the new
+                            // zoom and the old offset. Both are already issued
+                            // in one turn from this eval's completion callback
+                            // (the sequencing `View::zoom_to` uses), and the
+                            // remaining gap is closed for the common case by
+                            // simply not touching zoom when the mark was set at
+                            // the level already in effect.
+                            if (p.zoom - s.zoom).abs() > f64::EPSILON {
+                                s.zoom = p.zoom;
+                                s.view.set_zoom(p.zoom);
+                            }
                             s.view.restore_scroll(p.scroll_y);
                         }
                         refresh_status(&sh);
@@ -1694,35 +1727,47 @@ fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf, anchor: Option<String>) 
             .set_message(&format!("no such file: {}", path.display()));
         return;
     }
-    {
-        let mut s = shell.borrow_mut();
-        // Arm the anchor only once the open is certain. Setting it before the
-        // existence check above left it armed on a dead link, ready to override
-        // the *next* document's restored scroll. Assigning unconditionally also
-        // clears a stale one on an anchor-less open.
-        s.pending_anchor = anchor;
-        // Record the departure so the jumplist can return here. A stdin stream
-        // has no reopenable identity, so leaving one records nothing.
-        if !s.is_stdin() {
-            let loc = current_location(&s, s.last_scroll);
-            s.jumplist.push(loc);
+    // Query the departure offset live rather than reading the cached
+    // `last_scroll`, matching what [`Action::JumpBackward`] already does. The
+    // cache is only refreshed by `refresh_status`, and the in-page scroll
+    // listener pings it only when the *rounded percent* changes — so a small
+    // wheel scroll followed straight away by a link click would otherwise record
+    // a stale departure and land `Ctrl-o` a little off.
+    let sh = shell.clone();
+    let view = shell.borrow().view.clone();
+    view.scroll_position(move |cur| {
+        {
+            let mut s = sh.borrow_mut();
+            // Record the departure so the jumplist can return here. A stdin
+            // stream has no reopenable identity, so leaving one records nothing.
+            if !s.is_stdin() {
+                let loc = current_location(&s, cur);
+                s.jumplist.push(loc);
+            }
         }
-    }
-    let restore = shell
-        .borrow()
-        .history
-        .get(&path)
-        .map(|st| st.scroll_y)
-        .unwrap_or(0.0);
-    load_document(shell, path, restore);
+        // Precedence, resolved here rather than left to two fields racing at
+        // load-finished time: a link that named a fragment named a place in the
+        // target document, and that beats wherever the reader last left it.
+        let at = match anchor {
+            Some(anchor) => InitialPosition::Anchor(anchor),
+            None => InitialPosition::Offset(
+                sh.borrow()
+                    .history
+                    .get(&path)
+                    .map(|st| st.scroll_y)
+                    .unwrap_or(0.0),
+            ),
+        };
+        load_document(&sh, path, at);
+    });
 }
 
-/// Load `path` into this window at `restore_scroll`: persist the *outgoing*
+/// Load `path` into this window, opening it at `at`: persist the *outgoing*
 /// file's position, reset per-document state, re-point the watcher, restore the
 /// new file's saved zoom, and render. The jumplist is deliberately **not**
 /// reset — it spans documents, so `Ctrl-o` can walk back into the previous
 /// file. Callers own all jumplist bookkeeping.
-fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, restore_scroll: f64) {
+fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, at: InitialPosition) {
     {
         let mut s = shell.borrow_mut();
         // Opening a file ends any stdin stream and starts a normal file document
@@ -1754,7 +1799,7 @@ fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, restore_scroll: f64)
         s.section = 0;
         s.loaded = false;
         // Restore the new file's saved zoom (or defaults); the caller decides
-        // the scroll position.
+        // the opening position.
         match s.history.get(&path) {
             Some(st) => {
                 s.text_zoom = st.text_zoom;
@@ -1767,7 +1812,7 @@ fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, restore_scroll: f64)
                 s.view.set_zoom(1.0);
             }
         }
-        s.pending_restore = Some(restore_scroll);
+        s.pending_position = at;
     }
     restart_watch(shell, &path);
     rescan_vault(shell);
@@ -2058,7 +2103,7 @@ fn navigate_to_location(shell: &Rc<RefCell<Shell>>, loc: Location) -> bool {
     }
     match loc.doc {
         Some(path) if path.exists() => {
-            load_document(shell, path, loc.scroll_y);
+            load_document(shell, path, InitialPosition::Offset(loc.scroll_y));
             true
         }
         Some(path) => {

@@ -1,10 +1,11 @@
 //! The WebKit content view: a thin, typed wrapper around `WebView`.
 //!
 //! All document interaction the shell needs — loading, scrolling, anchor
-//! jumps, zoom, find, recolor, scroll-position round-tripping for reload — is
-//! exposed as small methods that translate to `webkit6` calls and `window.*`
-//! JavaScript snippets. Content itself is rendered 100% in Rust (see
-//! `core::pipeline`); JS here only drives the viewport.
+//! jumps, zoom, find, recolor, placing a freshly loaded document at the
+//! reading position it should open at — is exposed as small methods that
+//! translate to `webkit6` calls and `window.*` JavaScript snippets. Content
+//! itself is rendered 100% in Rust (see `core::pipeline`); JS here only drives
+//! the viewport.
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
@@ -43,6 +44,48 @@ pub enum ZoomAnchor {
     Point { x: f64, y: f64 },
 }
 
+/// Where a document opens: the reading position a load must land on *before*
+/// its first painted frame.
+///
+/// One value per load, resolved by the shell where the load is initiated, so
+/// the precedence between the three ways a position can be asked for is decided
+/// exactly once instead of by the order of three `Option` fields: a `--forward`
+/// line (the editor pointed at it explicitly) beats a link fragment, which
+/// beats a remembered scroll offset. [`Top`](Self::Top) is not "no position" —
+/// it is the position, and it needs no work, which is why it carries no data.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InitialPosition {
+    /// The top of the document — a first read, or a jump that asked for it.
+    Top,
+    /// An absolute scroll offset in CSS px (history, jumplist, live reload).
+    Offset(f64),
+    /// A heading id from a link fragment (`other.md#section`, `[[Note#H]]`).
+    Anchor(String),
+    /// A source line (`--forward`), resolved to the nearest block at-or-above.
+    SourceLine(u32),
+}
+
+impl InitialPosition {
+    /// Serialize into the `data-jmnj-open` attribute value the restore script
+    /// parses, or `None` when the document needs no placing at all.
+    ///
+    /// One tagged attribute rather than one attribute per variant, so the
+    /// markup cannot express two positions at once any more than the enum can.
+    /// The value is split on its *first* colon, so an anchor id containing one
+    /// survives; [`Top`](Self::Top) and a non-positive offset both emit
+    /// nothing, because scroll 0 is where a document already opens and hiding
+    /// the page to "restore" it would be pure cost.
+    fn open_attribute(&self) -> Option<String> {
+        match self {
+            InitialPosition::Top => None,
+            InitialPosition::Offset(y) if *y > 0.0 => Some(format!("offset:{y}")),
+            InitialPosition::Offset(_) => None,
+            InitialPosition::Anchor(id) => Some(format!("anchor:{}", id.trim_start_matches('#'))),
+            InitialPosition::SourceLine(line) => Some(format!("line:{line}")),
+        }
+    }
+}
+
 /// A single, consistent viewport snapshot read by `GetState` and the statusbar.
 /// All widths are CSS px.
 #[derive(Debug, Clone)]
@@ -79,6 +122,25 @@ pub struct ViewportState {
     /// the document has none *or* it is hidden — which is the default. Lets e2e
     /// assert the `:frontmatter` toggle from outside the page (DESIGN D11).
     pub frontmatter_width: f64,
+    /// The scroll offset the *first painted frame* of the current document was
+    /// placed at, as recorded from inside the page by the restore user-script
+    /// (see [`scroll_restore_js`]); `-1` when the document carried no opening
+    /// position ([`InitialPosition::Top`]) or nothing has been painted yet.
+    ///
+    /// The cheap in-process observable for the no-flash property — the final
+    /// offset was always right, the bug was the frame before it — so an e2e
+    /// reading back `0` here after returning to a document last read half-way
+    /// down is watching the page place its top first. It measures placement,
+    /// not visibility: the `jmnj-restoring` gate means that frame was hidden
+    /// anyway, which is exactly why the *visual* proof is the frame-capture
+    /// harness and this is the regression sentinel.
+    pub first_frame_scroll_y: f64,
+    /// Whether `<html>` still carries `jmnj-restoring`, i.e. the body is still
+    /// hidden waiting for its opening position. Transient by design — it must
+    /// be `false` on any settled document, and an e2e that finds it `true` has
+    /// caught the one failure mode the hide-until-restored gate can introduce:
+    /// a page left permanently blank.
+    pub restoring: bool,
     /// Computed `color` of the first python function-name span
     /// (`.entity.name.function.python`), as a CSS `rgb(...)` string ("" if the
     /// document has no python code). Lets e2e assert the dark-mode syntax-CSS
@@ -128,6 +190,180 @@ const RESTORE_ANCHOR_JS: &str = "(() => { const a = window.__jmnj_anchor; \
     if (a && a.el) { const nt = a.el.getBoundingClientRect().top; \
       window.scrollBy({ top: nt - a.top, left: 0, behavior: 'instant' }); } \
     window.__jmnj_anchor = null; })();";
+
+/// The nearest-`data-sourcepos` search, as a JS *expression* yielding the
+/// element whose source line is the greatest at-or-before the line `line_expr`
+/// evaluates to, or `null`.
+///
+/// `data-sourcepos` (comrak's, plus the pipeline's injected ones) opens with
+/// `startLine:…`, so `parseInt` reads the start line directly; document order
+/// makes those lines non-decreasing, so the last match ≤ the target is the
+/// nearest block at-or-above it. Factored out because forward editor sync needs
+/// it twice — once for a jump inside the loaded document
+/// ([`View::goto_source_line`]) and once from [`scroll_restore_js`], before the
+/// document has ever painted — and two copies of a rule this fiddly would drift.
+fn nearest_source_element_js(line_expr: &str) -> String {
+    format!(
+        "(t => {{ let best = null; \
+           for (const el of document.querySelectorAll('[data-sourcepos]')) {{ \
+             const l = parseInt(el.getAttribute('data-sourcepos'), 10); \
+             if (!Number.isNaN(l) && l <= t) best = el; }} \
+           return best; }})({line_expr})"
+    )
+}
+
+/// The `<html>` attribute [`View::load_document`] writes the opening position
+/// into, and [`scroll_restore_js`] reads it back out of.
+const OPEN_ATTRIBUTE: &str = "data-jmnj-open";
+
+/// The class that hides the body until the opening position has landed; the
+/// rule lives in `core/assets/style.css` beside `html.dark`, the other
+/// shell-toggled class.
+const RESTORING_CLASS: &str = "jmnj-restoring";
+
+/// The page global the restore script records its first painted offset in; read
+/// back by [`View::scroll_state`] into
+/// [`ViewportState::first_frame_scroll_y`]. A load gets a fresh JS context, so
+/// it is `undefined` again on every document.
+const FIRST_FRAME_GLOBAL: &str = "window.__jmnj_first_frame";
+
+/// The page global the restore script parks its `apply` on, so the shell can
+/// re-run *the same* placement once the load has fully finished (see
+/// [`View::settle_initial_position`]) without a second copy of the rules.
+const APPLY_GLOBAL: &str = "window.__jmnj_apply_open";
+
+/// The permanent document-start user-script that places every freshly loaded
+/// document at the position [`View::load_document`] wrote into
+/// [`OPEN_ATTRIBUTE`]. Installed once, in [`View::new`], beside the other four.
+///
+/// This is the whole no-flash mechanism, and it is deliberately split in two:
+/// the *position* travels as an inert `data-` attribute in the HTML, and the
+/// *behaviour* is a shell user-script that never changes. Applying the position
+/// from Rust after `LoadEvent::Finished` is inherently too late — the document
+/// has been parsed, laid out and composited at scroll 0 by then, and the
+/// correction needs a further UI→web IPC hop, so the unscrolled top is on
+/// screen for the whole of that window. That is the flash the reader reports
+/// when walking the jumplist.
+///
+/// Why an attribute rather than an inline `<script>`: DESIGN D3 makes the
+/// webview a *"dumb, static renderer … the same pipeline can later feed an
+/// export path (PDF/HTML) or a different front end"*. A `data-` attribute is
+/// inert markup that survives such an export untouched; a `<script>` would
+/// break D3 *and* the page CSP (`default-src 'none'`, `core::pipeline`), which
+/// has no `script-src`. WebKit user scripts are exempt from the page CSP —
+/// which is precisely the sanctioned category `install_drag_select_reset` below
+/// already names: shell viewport glue, not content-pipeline JS.
+///
+/// The rest is timing. `requestAnimationFrame` callbacks run *before* the frame
+/// they belong to is painted, so applying there means the first frame that
+/// shows content already shows it at the right offset; the loop re-arms on
+/// `DOMContentLoaded` and `load` for a document still growing (late-laid-out
+/// images have no intrinsic size until then, so the document is shorter and
+/// `scrollTo` clamps). It is bounded: it stops when the target is reached, or
+/// after one final attempt once `readyState === 'complete'` — a document too
+/// short to honour the offset must not leave an rAF chain spinning forever.
+///
+/// Belt and braces on top of the timing, [`RESTORING_CLASS`] hides the body
+/// until the position lands, so *no* frame can show the wrong one even if a
+/// paint sneaks in. The reveal is unconditional: it runs when the loop
+/// finishes, and on a timer regardless, because a page left permanently blank
+/// would be a far worse bug than the flash (CLAUDE.md: rendering failures
+/// degrade gracefully, never a blank page). The hidden interval is normally a
+/// single frame and shows the page's own `--bg`, so it is invisible.
+fn scroll_restore_js() -> String {
+    format!(
+        "(function () {{\n\
+           const root = document.documentElement;\n\
+           // Injection is at document-start, which is after the document\n\
+           // element exists — so the attribute the loader wrote is already\n\
+           // readable here. No position, nothing to hide, nothing to do.\n\
+           const spec = root.getAttribute('{attr}');\n\
+           if (!spec) return;\n\
+           const sep = spec.indexOf(':');\n\
+           const kind = spec.slice(0, sep), arg = spec.slice(sep + 1);\n\
+           root.classList.add('{cls}');\n\
+           let revealed = false;\n\
+           const reveal = () => {{ if (revealed) return; \
+             revealed = true; root.classList.remove('{cls}'); }};\n\
+           // The failsafe, and the reason the gate is safe to have at all: it\n\
+           // is not conditional on anything above working.\n\
+           setTimeout(reveal, 400);\n\
+           // Returns whether the position is now actually reached; anything\n\
+           // short of that keeps the loop running.\n\
+           const apply = () => {{\n\
+             if (kind === 'offset') {{\n\
+               const y = parseFloat(arg);\n\
+               window.scrollTo(0, y);\n\
+               return Math.abs(window.scrollY - y) < 0.5;\n\
+             }}\n\
+             if (kind === 'anchor') {{\n\
+               const e = document.getElementById(arg);\n\
+               if (!e) return false;\n\
+               e.scrollIntoView();\n\
+               return true;\n\
+             }}\n\
+             if (kind === 'line') {{\n\
+               const best = {nearest};\n\
+               if (!best) return false;\n\
+               best.scrollIntoView({{behavior: 'instant', block: 'start'}});\n\
+               return true;\n\
+             }}\n\
+             return true;\n\
+           }};\n\
+           // Parked for the shell's post-load settle, so the late-layout\n\
+           // correction and the pre-paint placement are the same code.\n\
+           {apply_global} = apply;\n\
+           let done = false, pending = false, lastChance = false;\n\
+           const schedule = () => {{ if (done || pending) return; \
+             pending = true; requestAnimationFrame(tick); }};\n\
+           function tick() {{\n\
+             pending = false;\n\
+             if (done) return;\n\
+             // A body with no layout paints nothing, so such a frame is neither\n\
+             // a chance to place the position nor one the reader could see it in.\n\
+             const laidOut = document.body && document.body.getBoundingClientRect().height > 0;\n\
+             let reached = false;\n\
+             if (laidOut) {{\n\
+               reached = apply();\n\
+               // Read *after* applying: this is the offset this frame would\n\
+               // paint with, and the first one is what the e2e asserts on.\n\
+               if ({first} === undefined) {first} = window.scrollY;\n\
+             }}\n\
+             if (reached || (document.readyState === 'complete' && lastChance)) {{\n\
+               done = true;\n\
+               // Next frame, so the frame that lands the position is still the\n\
+               // hidden one and the first visible frame is already correct.\n\
+               requestAnimationFrame(reveal);\n\
+               return;\n\
+             }}\n\
+             if (document.readyState === 'complete') lastChance = true;\n\
+             schedule();\n\
+           }}\n\
+           schedule();\n\
+           document.addEventListener('DOMContentLoaded', schedule);\n\
+           window.addEventListener('load', schedule);\n\
+         }})();",
+        attr = OPEN_ATTRIBUTE,
+        cls = RESTORING_CLASS,
+        nearest = nearest_source_element_js("parseInt(arg, 10)"),
+        apply_global = APPLY_GLOBAL,
+        first = FIRST_FRAME_GLOBAL,
+    )
+}
+
+/// Install [`scroll_restore_js`] as a permanent document-start user-script. One
+/// script for the process, not one per load: the *position* varies per document
+/// and rides in the HTML, so nothing about the behaviour does.
+fn install_scroll_restore(ucm: &UserContentManager) {
+    let script = UserScript::new(
+        &scroll_restore_js(),
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::Start,
+        &[],
+        &[],
+    );
+    ucm.add_script(&script);
+}
 
 /// Native WebView background painted behind the document, matched to the theme
 /// so unpainted regions never flash a mismatched colour (light `#ffffff`,
@@ -180,6 +416,7 @@ impl View {
         install_editor_sync(&ucm, editor_sync_cb.clone());
         let scroll_cb: Sink = Rc::new(RefCell::new(None));
         install_scroll_notify(&ucm, scroll_cb.clone());
+        install_scroll_restore(&ucm);
 
         let webview = WebView::builder().user_content_manager(&ucm).build();
         // WebKitGTK copies the find match into PRIMARY as it selects it. `found-text`
@@ -259,36 +496,87 @@ impl View {
         *self.scroll_cb.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Forward editor sync (DESIGN D7): scroll to the element whose source line
-    /// is the greatest at-or-before `line`. `data-sourcepos` (comrak's, plus the
-    /// pipeline's injected ones) opens with `startLine:…`, so `parseInt` reads
-    /// the start line directly; document order makes those lines non-decreasing,
-    /// so the last match ≤ `line` is the nearest block at-or-above the target.
+    /// Forward editor sync (DESIGN D7) *within the loaded document*: scroll to
+    /// the element nearest at-or-before `line` (see
+    /// [`nearest_source_element_js`] for how "nearest" is decided), falling back
+    /// to the top when the document has no source positions at all. A line the
+    /// document must *open* at is not this — that is
+    /// [`InitialPosition::SourceLine`], applied before the first frame.
     pub fn goto_source_line(&self, line: u32) {
         self.run_js(&format!(
-            "(t => {{ let best = null; \
-               for (const el of document.querySelectorAll('[data-sourcepos]')) {{ \
-                 const l = parseInt(el.getAttribute('data-sourcepos'), 10); \
-                 if (!Number.isNaN(l) && l <= t) best = el; }} \
+            "{{ const best = {}; \
                if (best) best.scrollIntoView({{behavior: 'instant', block: 'start'}}); \
-               else window.scrollTo(0, 0); }})({line});"
+               else window.scrollTo(0, 0); }}",
+            nearest_source_element_js(&line.to_string())
         ));
     }
 
-    /// Load a rendered document. `base` is the source file; its URI becomes the
-    /// base against which document-relative images resolve. When dark mode is
-    /// desired the `dark` class is pre-applied to `<html>` so the very first
-    /// painted frame is already dark — no light flash on reloads or a
-    /// `default-recolor = true` start.
-    pub fn load_document(&self, doc: &RenderedDocument, base: &Path) {
+    /// Load a rendered document, opening it at `at`. `base` is the source file;
+    /// its URI becomes the base against which document-relative images resolve.
+    /// `font_size_px` is the effective body font size when text zoom is off its
+    /// 100% base, and `None` when it is not.
+    ///
+    /// Everything that decides what the first painted frame looks like rides
+    /// *into* the load as markup on `<html>`, never after it: the `dark` class,
+    /// the text-zoom `--font-size` (an inline style, which beats the
+    /// stylesheet's `:root` rule exactly as [`View::set_text_zoom_px`]'s
+    /// `style.setProperty` does), and the reading position (as
+    /// [`OPEN_ATTRIBUTE`], which [`scroll_restore_js`] acts on before the first
+    /// paint). Applying any of them from Rust once the load has finished is too
+    /// late, and that window is what the reader sees as a flash of the
+    /// unscrolled, base-size top of the page.
+    ///
+    /// All three go in one `replacen` on the opening tag — the same one-shot
+    /// rewrite the `dark` class has always used. The position belongs *here*,
+    /// in the shell, and not in `core::pipeline`: a viewport offset is not part
+    /// of a document's rendering, and putting it in the pure core would breach
+    /// the functional-core boundary.
+    pub fn load_document(
+        &self,
+        doc: &RenderedDocument,
+        base: &Path,
+        at: &InitialPosition,
+        font_size_px: Option<f64>,
+    ) {
         let base_uri = gtk::gio::File::for_path(base).uri();
-        let html = if self.dark.get() {
-            doc.html
-                .replacen("<html lang=\"en\">", "<html lang=\"en\" class=\"dark\">", 1)
-        } else {
+        let mut attrs = String::new();
+        if self.dark.get() {
+            attrs.push_str(" class=\"dark\"");
+        }
+        if let Some(px) = font_size_px {
+            attrs.push_str(&format!(" style=\"--font-size: {px}px\""));
+        }
+        if let Some(open) = at.open_attribute() {
+            // An anchor id is document-supplied, so it is escaped like any other
+            // attribute value; it can no more break out of the quotes than a
+            // heading's text can.
+            attrs.push_str(&format!(" {OPEN_ATTRIBUTE}=\"{}\"", html_attribute(&open)));
+        }
+        let html = if attrs.is_empty() {
             doc.html.clone()
+        } else {
+            doc.html.replacen(
+                "<html lang=\"en\">",
+                &format!("<html lang=\"en\"{attrs}>"),
+                1,
+            )
         };
         self.webview.load_html(&html, Some(base_uri.as_str()));
+    }
+
+    /// Re-run the opening placement once the load has fully finished — the final
+    /// authority on where the document sits.
+    ///
+    /// The pre-paint pass runs while images without intrinsic dimensions have
+    /// not laid out yet, so the document is shorter than it will be and a deep
+    /// offset clamps. This corrects that. It reads as a small settle rather than
+    /// a jump from the top precisely because the content was already revealed
+    /// near the right place. It re-runs the script's *own* `apply`
+    /// ([`APPLY_GLOBAL`]) rather than a second copy of the rules, is idempotent
+    /// by construction, and no-ops on a document that opened at the top (no
+    /// attribute ⇒ the script returned early and never parked anything).
+    pub fn settle_initial_position(&self) {
+        self.run_js(&format!("{APPLY_GLOBAL} && {APPLY_GLOBAL}();"));
     }
 
     fn run_js(&self, script: &str) {
@@ -432,8 +720,12 @@ impl View {
     }
 
     /// Text zoom: set the effective body font size (px) via the `--font-size`
-    /// custom property on `<html>`, reflowing prose. Re-applied after each load
-    /// (the inline style is lost when the document reloads).
+    /// custom property on `<html>`, reflowing prose. This is the *interactive*
+    /// path only; the inline style is lost when the document reloads, and
+    /// [`View::load_document`] writes it back into the HTML rather than
+    /// re-applying it afterwards (which would reflow the first painted frames
+    /// from the base size up to the real one — a visible size jump on every
+    /// reload).
     ///
     /// Reflow moves content, so the top-of-viewport anchor is captured before the
     /// change and the position restored after. Pure JS (no native call), so
@@ -514,7 +806,10 @@ impl View {
     /// tests assert the reflow invariants: `doc_scroll_width ≤ viewport_width`
     /// (no page h-scroll) and diagram device growth (`diagram_width × zoom`).
     pub fn scroll_state<F: FnOnce(ViewportState) + 'static>(&self, callback: F) {
-        let script = "(() => { const d = document.documentElement, b = document.body; \
+        // Split so the first-frame global has a single spelling: everything up
+        // to `fc` is fixed text, and the last field interpolates the name the
+        // restore script writes.
+        const HEAD: &str = "(() => { const d = document.documentElement, b = document.body; \
              const max = (b.scrollHeight || d.scrollHeight) - window.innerHeight; \
              const p = max > 0 ? Math.round((window.scrollY / max) * 100) : 0; \
              const m = document.querySelector('main') || b; \
@@ -537,9 +832,14 @@ impl View {
                       ms: ms, \
                       rw: rf ? rf.getBoundingClientRect().width : 0, \
                       fw: fm ? fm.getBoundingClientRect().width : 0, \
-                      fc: fn ? getComputedStyle(fn).color : '' }; })()";
+                      fc: fn ? getComputedStyle(fn).color : ''";
+        let script = format!(
+            "{HEAD}, ff: typeof {FIRST_FRAME_GLOBAL} === 'number' \
+             ? {FIRST_FRAME_GLOBAL} : -1, \
+             rs: d.classList.contains('{RESTORING_CLASS}') }}; }})()"
+        );
         self.webview.evaluate_javascript(
-            script,
+            &script,
             None,
             None,
             None::<&gtk::gio::Cancellable>,
@@ -561,6 +861,8 @@ impl View {
                         msup_shift_ratio: num("ms"),
                         fence_width: num("rw"),
                         frontmatter_width: num("fw"),
+                        first_frame_scroll_y: num("ff"),
+                        restoring: v.object_get_property("rs").is_some_and(|b| b.to_boolean()),
                         fn_color,
                     });
                 }
@@ -575,13 +877,19 @@ impl View {
                     msup_shift_ratio: 0.0,
                     fence_width: 0.0,
                     frontmatter_width: 0.0,
+                    // Matches the in-page sentinel: nothing was recorded.
+                    first_frame_scroll_y: -1.0,
+                    restoring: false,
                     fn_color: String::new(),
                 }),
             },
         );
     }
 
-    /// Restore a scroll offset (px) after a reload once layout is available.
+    /// Scroll to an absolute offset (px) in the *already loaded* document — a
+    /// quickmark jump, or a jumplist hop that stays inside this document. An
+    /// offset that has to survive a load is [`InitialPosition::Offset`] instead,
+    /// which lands before the first frame rather than after it.
     pub fn restore_scroll(&self, y: f64) {
         self.run_js(&format!("window.scrollTo(0, {y});"));
     }
@@ -849,6 +1157,26 @@ fn install_navigation_policy(webview: &WebView, sink: Sink) {
         }
         true
     });
+}
+
+/// Encode a string as the body of a double-quoted HTML attribute value.
+///
+/// Local rather than borrowed from `core::highlight`: the shell writing an
+/// attribute into the tag it is itself rewriting is shell business, and reaching
+/// into a private core rendering module for eight lines would couple the layers
+/// for nothing. Same reasoning as [`js_string`] below.
+fn html_attribute(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Encode a string as a JS single-quoted string literal.

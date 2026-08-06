@@ -76,6 +76,24 @@ html {
   background: var(--bg);
 }
 
+/* Hide the content until a load has been placed at its opening position.
+ *
+ * A shell-toggled class, exactly the contract `html.dark` above has with
+ * `View::set_dark`: the shell's restore user-script adds it when the document
+ * carries a `data-jmnj-open` position and removes it once that position has
+ * landed, so no frame ever shows the unscrolled top of a document the reader
+ * asked to open half-way down. `visibility` (not `display`) so layout still
+ * happens underneath and the scroll can actually be applied.
+ *
+ * The interval is normally a single frame, and `html { background: var(--bg) }`
+ * above paints the canvas throughout, so what shows is the page's own
+ * background rather than a white flash. The script's reveal is unconditional
+ * and timer-backed, so a document that never reaches its position — or a script
+ * that throws — still ends up visible: never a blank page. */
+html.jmnj-restoring body {
+  visibility: hidden;
+}
+
 body {
   margin: 0;
   background: var(--bg);
