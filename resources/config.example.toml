@@ -31,6 +31,11 @@
 # Ctrl-r / the `recolor` action).
 # default-recolor = false
 
+# Whether a document's YAML frontmatter is shown, as a properties table.
+# Hidden by default, so a note opens as prose; toggle at runtime with
+# `:frontmatter`.
+# show-frontmatter = false
+
 # Body/prose font family. Empty string means "use the stylesheet's default
 # serif stack" (currently Source Serif 4, falling back to the system serif).
 # font-body = ""

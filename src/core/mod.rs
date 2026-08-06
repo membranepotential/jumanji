@@ -5,6 +5,7 @@
 pub mod command;
 pub mod config;
 pub mod editor;
+pub mod frontmatter;
 pub mod history;
 pub mod jumplist;
 pub mod keymap;
@@ -85,6 +86,9 @@ pub enum Action {
     Recolor,
     Reload,
     ToggleToc,
+    /// Show/hide the document's YAML frontmatter, which is hidden by default
+    /// (DESIGN D11). Re-renders; the reading position is preserved.
+    ToggleFrontmatter,
     CommandLine,
     /// Enter link-hint mode and jump to the chosen link (hint interaction and
     /// overlay live in the shell; the keymap only fires the entry action).

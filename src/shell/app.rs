@@ -15,7 +15,8 @@ use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{
     Application, ApplicationWindow, Box as GtkBox, EventControllerKey, EventControllerMotion,
-    EventControllerScroll, EventControllerScrollFlags, Orientation, PropagationPhase, Stack,
+    EventControllerScroll, EventControllerScrollFlags, EventSequenceState, GestureClick,
+    Orientation, PropagationPhase, Stack,
 };
 use webkit6::LoadEvent;
 use webkit6::prelude::*;
@@ -30,7 +31,7 @@ use crate::core::marks::{Marks, Position};
 use crate::core::obsidian;
 use crate::core::pipeline::{self, Options as RenderOptions};
 use crate::core::source::Source;
-use crate::core::vault::Vault;
+use crate::core::vault::{self, Vault, VaultIndex};
 use crate::core::{Action, Direction, Heading, Mode};
 
 use super::bar::{Bar, Prompt};
@@ -97,11 +98,25 @@ struct Shell {
     /// options and step fields are re-synced from.
     options: Options,
     render_opts: RenderOptions,
-    /// Per-document link resolution (DESIGN D11): the vault this document sits
-    /// in, or a `Loose` fallback. Rebuilt on every document load and on `r`,
-    /// never by the watch-driven live reload — editing a note cannot rename
-    /// another one, so a re-render reuses the index it was loaded with.
+    /// The vault root (DESIGN D11), resolved once from the document jumanji was
+    /// launched with and pinned for the process. Pinned rather than recomputed
+    /// so that following a wikilink into a subfolder cannot narrow the vault
+    /// under the reader — you opened a collection, not a directory.
+    vault_root: PathBuf,
+    /// Per-document link resolution (DESIGN D11): the index of
+    /// [`vault_root`](Self::vault_root), bound to this document. Rescanned in
+    /// the background on every document load and on `r`, never by the
+    /// watch-driven live reload — editing a note cannot rename another one, so
+    /// a re-render reuses the index it was loaded with.
     vault: Vault,
+    /// Whether a background scan is in flight. Keeps a burst of document loads
+    /// from piling up redundant scans of the same pinned root, and keeps two
+    /// snapshots from landing out of order.
+    vault_scanning: bool,
+    /// Whether the rendered document contains any `[[…]]` at all. A landed
+    /// rescan re-renders only if it does — which is what keeps the pipeline off
+    /// the hot path for the ordinary markdown file that names nothing.
+    doc_uses_vault: bool,
     /// Reverse editor-sync template (DESIGN D7): spawned on Ctrl+click with
     /// `%l`/`%f` substituted. Config-only (copied from options at construction).
     editor_command: EditorCommand,
@@ -222,17 +237,6 @@ pub fn run(source: Source, config: Config, forward: Option<u32>) -> glib::ExitCo
     app.run_with_args::<&str>(&[])
 }
 
-/// The vault for `source`, rooted at the **process working directory** (DESIGN
-/// D11). There is no marker directory to discover: jumanji borrows Obsidian's
-/// syntax and none of its machinery, so "the vault" is simply wherever you
-/// launched the reader. jumanji never `chdir`s, so this is constant for the
-/// process; it is recomputed per load rather than cached because the index
-/// behind it must be fresh, and one `getcwd` is free next to the directory walk.
-fn vault_for(source: &Path) -> Vault {
-    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    Vault::rooted(&root, source)
-}
-
 /// The document base path for `source`: the real file, or a sentinel under the
 /// current directory for stdin so relative images/links resolve against the CWD.
 fn base_path(source: &Source) -> PathBuf {
@@ -283,6 +287,10 @@ fn build_ui(
     let data_dir = xdg_data_dir();
     let history = load_history(&data_dir);
 
+    // Resolved once, from the document we were launched with, and pinned for
+    // the process (DESIGN D11).
+    let vault_root = vault::root_for(&file);
+
     let shell = Rc::new(RefCell::new(Shell {
         file: file.clone(),
         stdin_buffer: None,
@@ -290,6 +298,7 @@ fn build_ui(
         options: options.clone(),
         render_opts: RenderOptions {
             page_width_px: options.page_width_px,
+            show_frontmatter: options.show_frontmatter,
             font_body: options.font_body.clone(),
             font_mono: options.font_mono.clone(),
             font_size_px: options.font_size_px,
@@ -300,7 +309,14 @@ fn build_ui(
             // the renderers) for free.
             renderers: options.renderers.clone(),
         },
-        vault: vault_for(&file),
+        // Empty until the first background scan lands (kicked off below). A
+        // launch never blocks on the walk: the window and the WebKit process
+        // come up while it runs, and for a vault big enough for the difference
+        // to be visible that is the whole point.
+        vault: Vault::new(VaultIndex::build(vault_root.clone(), Vec::new()), &file),
+        vault_root,
+        vault_scanning: false,
+        doc_uses_vault: false,
         editor_command: options.editor_command.clone(),
         pending_forward: forward,
         pending_anchor: None,
@@ -356,11 +372,18 @@ fn build_ui(
         s.pending_restore = Some(st.scroll_y);
     }
 
+    // First, so the walk overlaps everything below it — controller wiring, the
+    // window going up, and WebKit spawning its processes. On any vault the scan
+    // lands well before the initial load finishes; on a pathological one the
+    // reader is usable meanwhile.
+    rescan_vault(&shell);
+
     install_view_handlers(&shell);
     connect_toc_activate(&shell);
     connect_load_finished(&shell);
     connect_keys(&shell, keymap);
     connect_scroll(&shell);
+    connect_buttons(&shell);
     connect_motion(&shell);
     connect_input_entry(&shell);
     connect_close(&shell);
@@ -420,6 +443,59 @@ fn render_and_load(shell: &Rc<RefCell<Shell>>, preserve_scroll: bool) {
     }
 }
 
+/// Rebuild the vault index on a worker thread and swap it in when it lands
+/// (DESIGN D11).
+///
+/// The walk is the one piece of per-load work whose cost is set by the *tree*
+/// rather than by the document, so it is the one piece that must not run on the
+/// main loop: a vault behind a slow mount, or a `.git/`-rooted tree, would
+/// otherwise stall every `:open` for as long as the filesystem took to answer.
+///
+/// Landing is deliberately quiet. The index almost always comes back identical
+/// to the one already in hand — nothing was created or renamed in the second
+/// since the last scan — and an identical index cannot change a single
+/// resolution, so the common case re-renders nothing at all.
+fn rescan_vault(shell: &Rc<RefCell<Shell>>) {
+    {
+        let mut s = shell.borrow_mut();
+        if s.vault_scanning {
+            return;
+        }
+        s.vault_scanning = true;
+    }
+    let root = shell.borrow().vault_root.clone();
+    // Weak: a scan outliving its window must not keep the shell alive.
+    let weak = Rc::downgrade(shell);
+    glib::spawn_future_local(async move {
+        let scanned =
+            gio::spawn_blocking(move || VaultIndex::build(root.clone(), vault::scan(&root))).await;
+        let Some(shell) = weak.upgrade() else {
+            return;
+        };
+        let mut s = shell.borrow_mut();
+        s.vault_scanning = false;
+        // `Err` is a panic in the walk. Keeping the previous index costs some
+        // links their targets; taking down the reader would cost the document.
+        let Ok(index) = scanned else {
+            return;
+        };
+        if *s.vault.index() == index {
+            return;
+        }
+        s.vault.set_index(index);
+        if !s.doc_uses_vault {
+            return;
+        }
+        // A restore already queued (a history position, a jumplist hop) is the
+        // offset the reader asked for, and the load that would apply it has not
+        // finished yet. Re-reading the live scroll here would capture the
+        // pre-restore 0.0 and overwrite it; keep the queued one instead.
+        let preserve_scroll = s.pending_restore.is_none();
+        drop(s);
+        render_and_load(&shell, preserve_scroll);
+    });
+}
+
 fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
     let mut s = shell.borrow_mut();
     // User CSS themes are reloaded on every render so edits hot-swap in.
@@ -435,6 +511,7 @@ fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
     };
     match md {
         Ok(md) => {
+            s.doc_uses_vault = vault::may_reference_vault(&md);
             let doc = pipeline::render(&md, &s.render_opts, &s.vault);
             s.toc = doc.toc.clone();
             s.section = 0;
@@ -582,6 +659,44 @@ fn connect_scroll(shell: &Rc<RefCell<Shell>>) {
             accumulate_wheel_zoom(&shell, dy);
         }
         glib::Propagation::Stop
+    });
+
+    window.add_controller(controller);
+}
+
+/// X11/evdev numbering for the two side buttons every mouse with a thumb rest
+/// reports. GDK has named constants only for the primary three, so these are
+/// spelled out here rather than guessed at the call site.
+const BUTTON_BACK: u32 = 8;
+const BUTTON_FORWARD: u32 = 9;
+
+/// Bind the mouse's back/forward side buttons to the cross-document jumplist
+/// (DESIGN D10), which is jumanji's browser-history analogue: they do exactly
+/// what `Ctrl-o` / `Ctrl-i` do, so a thumb click and a keystroke cannot
+/// disagree about where "back" goes.
+///
+/// Capture phase on the toplevel, like the key/scroll controllers — both
+/// because a controller on the WebView never sees these events (D5a), and
+/// because WebKit would otherwise walk its *own* session history, which is not
+/// the history the reader navigates: jumanji loads each document itself.
+fn connect_buttons(shell: &Rc<RefCell<Shell>>) {
+    let controller = GestureClick::new();
+    // GestureSingle listens to the primary button only until told otherwise;
+    // 0 means "any button", which is the only way to hear buttons 8 and 9.
+    controller.set_button(0);
+    controller.set_propagation_phase(PropagationPhase::Capture);
+    let window = shell.borrow().window.clone();
+
+    let shell = shell.clone();
+    controller.connect_pressed(move |ctrl, _n_press, _x, _y| {
+        let action = match ctrl.current_button() {
+            BUTTON_BACK => Action::JumpBackward,
+            BUTTON_FORWARD => Action::JumpForward,
+            _ => return,
+        };
+        ctrl.set_state(EventSequenceState::Claimed);
+        execute(&shell, action, 1);
+        refresh_status(&shell);
     });
 
     window.add_controller(controller);
@@ -800,7 +915,7 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
     let get_state = {
         let shell = shell.clone();
         Rc::new(move |invocation: gtk::gio::DBusMethodInvocation| {
-            let (view, file, dark, zoom, text_zoom, section, toc_len, loaded, mode) = {
+            let (view, file, dark, zoom, text_zoom, section, toc_len, loaded, mode, vault_files) = {
                 let s = shell.borrow();
                 // Report `stdin` for a stream, not its CWD sentinel path: it is
                 // honest, and it keeps the D-Bus forward-search (which matches on
@@ -820,11 +935,21 @@ fn serve_dbus(shell: &Rc<RefCell<Shell>>) {
                     s.toc.len(),
                     s.loaded,
                     mode_str(&s).to_string(),
+                    s.vault.index().file_count(),
                 )
             };
             view.scroll_state(move |vs| {
                 let json = state_json(
-                    &file, &vs, dark, zoom, text_zoom, section, toc_len, loaded, &mode,
+                    &file,
+                    &vs,
+                    dark,
+                    zoom,
+                    text_zoom,
+                    section,
+                    toc_len,
+                    loaded,
+                    &mode,
+                    vault_files,
                 );
                 invocation.return_value(Some(&(json,).to_variant()));
             });
@@ -934,15 +1059,18 @@ fn state_json(
     toc_len: usize,
     loaded: bool,
     mode: &str,
+    vault_files: usize,
 ) -> String {
     format!(
         "{{\"file\":{file},\"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
          \"content_width\":{content_width},\"viewport_width\":{viewport_width},\
          \"doc_scroll_width\":{doc_scroll_width},\"diagram_width\":{diagram_width},\
          \"math_width\":{math_width},\"msup_shift_ratio\":{msup_shift_ratio},\
-         \"fence_width\":{fence_width},\"fn_color\":{fn_color},\
+         \"fence_width\":{fence_width},\"frontmatter_width\":{frontmatter_width},\
+         \"fn_color\":{fn_color},\
          \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
-         \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded}}}",
+         \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded},\
+         \"vault_files\":{vault_files}}}",
         file = json_string(file),
         scroll_y = vs.scroll_y,
         scroll_percent = vs.scroll_percent,
@@ -953,6 +1081,7 @@ fn state_json(
         math_width = vs.math_width,
         msup_shift_ratio = vs.msup_shift_ratio,
         fence_width = vs.fence_width,
+        frontmatter_width = vs.frontmatter_width,
         fn_color = json_string(&vs.fn_color),
         mode = json_string(mode),
     )
@@ -1117,10 +1246,18 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             s.toc_view.set_dark(dark);
         }
         Action::Reload => {
+            drop(s);
             // An explicit reload is exactly when the index may have changed
-            // underfoot (a note created or renamed since the last load).
-            let file = s.file.clone();
-            s.vault = vault_for(&file);
+            // underfoot (a note created or renamed since the last load). The
+            // render below does not wait for it: if the rescan does turn up
+            // something new, landing it re-renders again.
+            rescan_vault(shell);
+            render_and_load(shell, true);
+        }
+        Action::ToggleFrontmatter => {
+            let show = !s.options.show_frontmatter;
+            s.options.show_frontmatter = show;
+            s.render_opts.show_frontmatter = show;
             drop(s);
             render_and_load(shell, true);
         }
@@ -1594,11 +1731,13 @@ fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, restore_scroll: f64)
             leave_toc(&mut s);
         }
         s.file = path.clone();
-        // Rebuild the index before the render that follows — the new document
-        // may have arrived alongside notes the old index never saw. Watch-driven
-        // live reload deliberately does not (editing a note cannot rename
-        // another one — D11).
-        s.vault = vault_for(&path);
+        // The root is pinned, so a document switch changes only which note the
+        // index is being consulted *from* — the index itself carries over and
+        // the render below resolves immediately. A rescan is kicked off after
+        // this borrow (the new document may have arrived alongside notes the
+        // current index never saw); watch-driven live reload deliberately does
+        // not rescan — editing a note cannot rename another one (D11).
+        s.vault.rebind(&path);
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1627,6 +1766,7 @@ fn load_document(shell: &Rc<RefCell<Shell>>, path: PathBuf, restore_scroll: f64)
         s.pending_restore = Some(restore_scroll);
     }
     restart_watch(shell, &path);
+    rescan_vault(shell);
     do_render_and_load(shell);
     refresh_status(shell);
 }
@@ -1693,6 +1833,7 @@ fn apply_set(shell: &Rc<RefCell<Shell>>, key: &str, value: &str) {
                 let mut s = shell.borrow_mut();
                 let o = s.options.clone();
                 s.render_opts.page_width_px = o.page_width_px;
+                s.render_opts.show_frontmatter = o.show_frontmatter;
                 s.render_opts.font_body = o.font_body.clone();
                 s.render_opts.font_mono = o.font_mono.clone();
                 s.render_opts.font_size_px = o.font_size_px;

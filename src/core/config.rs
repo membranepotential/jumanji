@@ -49,6 +49,9 @@ pub struct Options {
     pub page_width_px: u32,
     /// Whether dark-mode recoloring is on at startup.
     pub default_recolor: bool,
+    /// Whether a document's YAML frontmatter is shown. Off by default (DESIGN
+    /// D11): a note should open as prose, not as a block of metadata.
+    pub show_frontmatter: bool,
     /// Body/prose font family (empty = the stylesheet's default serif stack).
     pub font_body: String,
     /// Monospace/code font family (empty = the stylesheet's default stack).
@@ -77,6 +80,7 @@ impl Default for Options {
             text_zoom_step: 0.1,
             page_width_px: 960,
             default_recolor: false,
+            show_frontmatter: false,
             font_body: String::new(),
             font_mono: String::new(),
             font_size_px: 18,
@@ -124,6 +128,10 @@ impl Options {
             "default-recolor" => {
                 self.default_recolor = parse_scalar::<bool>(value, "default-recolor")?;
                 Ok(SetEffect::Recolor)
+            }
+            "show-frontmatter" => {
+                self.show_frontmatter = parse_scalar::<bool>(value, "show-frontmatter")?;
+                Ok(SetEffect::Rerender)
             }
             "scroll-step" => {
                 self.scroll_step_px = parse_scalar::<u32>(value, "scroll-step")?;
@@ -236,6 +244,9 @@ impl Config {
             text_zoom_step: raw_opts.text_zoom_step.unwrap_or(defaults.text_zoom_step),
             page_width_px: raw_opts.page_width.unwrap_or(defaults.page_width_px),
             default_recolor: raw_opts.default_recolor.unwrap_or(defaults.default_recolor),
+            show_frontmatter: raw_opts
+                .show_frontmatter
+                .unwrap_or(defaults.show_frontmatter),
             font_body: raw_opts.font_body.unwrap_or(defaults.font_body),
             font_mono: raw_opts.font_mono.unwrap_or(defaults.font_mono),
             font_size_px: raw_opts.font_size.unwrap_or(defaults.font_size_px),
@@ -435,6 +446,7 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
         "recolor" => Recolor,
         "reload" => Reload,
         "toggle toc" | "toc" => ToggleToc,
+        "toggle frontmatter" | "frontmatter" => ToggleFrontmatter,
         "command" | "command line" => CommandLine,
         "follow link" => FollowLink,
         "show link target" => ShowLinkTarget,
@@ -481,6 +493,7 @@ pub fn option_keys() -> &'static [&'static str] {
         "text-zoom-step",
         "page-width",
         "default-recolor",
+        "show-frontmatter",
         "font-body",
         "font-mono",
         "font-size",
@@ -513,6 +526,7 @@ pub fn action_names() -> &'static [&'static str] {
         "recolor",
         "reload",
         "toggle toc",
+        "toggle frontmatter",
         "follow link",
         "show link target",
         "mark set",
@@ -555,6 +569,8 @@ struct RawOptions {
     page_width: Option<u32>,
     #[serde(rename = "default-recolor")]
     default_recolor: Option<bool>,
+    #[serde(rename = "show-frontmatter")]
+    show_frontmatter: Option<bool>,
     #[serde(rename = "font-body")]
     font_body: Option<String>,
     #[serde(rename = "font-mono")]
@@ -973,6 +989,36 @@ mod tests {
         assert_eq!(o.set("zoom-step", "0.25").unwrap(), SetEffect::None);
         assert_eq!(o.zoom_step, 0.25);
         assert_eq!(o.set("text-zoom-step", "0.2").unwrap(), SetEffect::None);
+    }
+
+    #[test]
+    fn show_frontmatter_is_off_by_default_and_settable_at_runtime() {
+        let mut o = Options::default();
+        assert!(!o.show_frontmatter);
+        assert_eq!(
+            o.set("show-frontmatter", "true").unwrap(),
+            SetEffect::Rerender
+        );
+        assert!(o.show_frontmatter);
+        assert!(o.set("show-frontmatter", "yes").is_err());
+    }
+
+    #[test]
+    fn show_frontmatter_reads_from_the_config_file() {
+        let c = Config::parse("[options]\nshow-frontmatter = true\n").unwrap();
+        assert!(c.options.show_frontmatter);
+    }
+
+    #[test]
+    fn toggle_frontmatter_parses_under_both_spellings() {
+        assert_eq!(
+            parse_action("toggle frontmatter").unwrap(),
+            Action::ToggleFrontmatter
+        );
+        assert_eq!(
+            parse_action("frontmatter").unwrap(),
+            Action::ToggleFrontmatter
+        );
     }
 
     #[test]

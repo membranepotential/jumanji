@@ -1,10 +1,10 @@
 //! The vault index and link resolution (DESIGN D11).
 //!
-//! **The vault root is the process working directory, always.** jumanji borrows
-//! Obsidian's *syntax* and depends on none of its machinery: there is no
-//! `.obsidian/` marker to discover, no application to have installed, and no
-//! second resolution mode to reason about. A directory of notes is a vault
-//! because you opened jumanji in it.
+//! **The vault root is derived from the document you opened** — see
+//! [`root_for`]: the nearest ancestor marked `.obsidian/`, else the nearest
+//! marked `.git/`, else the document's own directory. One rule, one resolution
+//! mode, and no dependence on Obsidian being *installed*: the marker is read as
+//! a fact about the directory tree, not as a handshake with another program.
 //!
 //! Resolution semantics are Obsidian's (`docs/research/04-obsidian.md` §1.2):
 //! **vault-wide by filename**, not by path join. The root outranks a sibling
@@ -21,16 +21,20 @@
 //! The directory walk is the only filesystem I/O in the core besides
 //! `core::fence`'s subprocesses (D6.2 precedent): `Result`-shaped, no display,
 //! and injectable — [`VaultIndex::build`] takes already-scanned entries, so
-//! every resolution rule is unit-tested without a fixture tree.
+//! every resolution rule is unit-tested without a fixture tree. That same split
+//! is what lets the shell run [`scan`] on a worker thread and hand the entries
+//! back to the main loop (D11).
 
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use ignore::WalkBuilder;
+
 use super::obsidian::{Fragment, WikiRef, heading_slug};
 
-/// Directory-recursion cap: a pathological (or symlink-looped) tree must not
-/// hang the UI thread. Deeper directories are simply not indexed.
+/// Directory-recursion cap: a pathological tree must not turn the scan into an
+/// unbounded one. Deeper directories are simply not indexed.
 const MAX_DEPTH: usize = 32;
 
 /// Cap on indexed files, for the same reason. A vault this large is already
@@ -67,23 +71,27 @@ pub enum AssetKind {
     /// Audio or video: one card either way, both handed to the system opener.
     Av,
     Canvas,
+    /// An accepted format with no card of its own — today, only `.base`.
     Other,
 }
 
 impl AssetKind {
-    /// Classify by file extension (case-insensitive).
-    pub fn classify(path: &Path) -> Self {
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_ascii_lowercase())
-            .unwrap_or_default();
-        match ext.as_str() {
-            "avif" | "bmp" | "gif" | "jpeg" | "jpg" | "png" | "svg" | "webp" => Self::Image,
-            "pdf" => Self::Pdf,
+    /// Classify by file extension (case-insensitive), or `None` for a format
+    /// Obsidian does not accept.
+    ///
+    /// Totality is the point: this list *is* the set of non-note files a vault
+    /// contains, so "not an accepted format" is a `None` rather than a kind, and
+    /// [`is_indexable`] can be one line over it instead of a second copy of the
+    /// same extensions drifting out of sync.
+    pub fn classify(path: &Path) -> Option<Self> {
+        match extension(path).as_str() {
+            "avif" | "bmp" | "gif" | "jpeg" | "jpg" | "png" | "svg" | "webp" => Some(Self::Image),
+            "pdf" => Some(Self::Pdf),
             "flac" | "m4a" | "mp3" | "ogg" | "wav" | "webm" | "3gp" | "mkv" | "mov" | "mp4"
-            | "ogv" => Self::Av,
-            "canvas" => Self::Canvas,
-            _ => Self::Other,
+            | "ogv" => Some(Self::Av),
+            "canvas" => Some(Self::Canvas),
+            "base" => Some(Self::Other),
+            _ => None,
         }
     }
 
@@ -117,20 +125,77 @@ pub struct Vault {
     index: VaultIndex,
 }
 
+/// Marker directories that identify a vault root, in precedence order: the
+/// explicit Obsidian marker first, then the one nearly every marker-less notes
+/// tree still has. Both are *directories*; a file of the same name is not a
+/// marker.
+const ROOT_MARKERS: [&str; 2] = [".obsidian", ".git"];
+
+/// The vault root for `document`: the nearest ancestor holding `.obsidian/`,
+/// else the nearest holding `.git/`, else the document's own directory
+/// (DESIGN D11).
+///
+/// Each marker is searched over the *whole* ancestor chain before the next is
+/// tried, so an Obsidian vault nested inside a git repo roots at the vault, not
+/// the repo — the explicit marker always wins over the incidental one.
+///
+/// The shell calls this once, for the document it was launched with, and pins
+/// the result: recomputing it per document would let following a wikilink into
+/// a subfolder silently narrow the vault under the reader's feet.
+pub fn root_for(document: &Path) -> PathBuf {
+    let document = absolutize(document);
+    let start = match document.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        // A bare filename with no parent, or the filesystem root itself.
+        _ => Path::new("."),
+    };
+    for marker in ROOT_MARKERS {
+        if let Some(root) = start.ancestors().find(|dir| dir.join(marker).is_dir()) {
+            return root.to_path_buf();
+        }
+    }
+    start.to_path_buf()
+}
+
 impl Vault {
-    /// Index `root` and bind `source` to it. Production always passes the
-    /// process working directory as `root`; taking it as an argument keeps the
-    /// core free of ambient state and lets tests root a vault anywhere.
+    /// Bind `source` to an index built elsewhere — in the shell, by the
+    /// background scan (D11). The index outlives any one document: the root is
+    /// pinned at launch, so switching documents changes only which note "this
+    /// one" is.
+    pub fn new(index: VaultIndex, source: &Path) -> Self {
+        Self {
+            source: absolutize(source),
+            index,
+        }
+    }
+
+    /// Index `root` synchronously and bind `source` to it.
     ///
-    /// Called on every document load and by `r` — never cached, so the index is
-    /// fresh at exactly the moment resolution happens (D11).
+    /// Tests only, and deliberately so: nothing in the running reader may block
+    /// the main loop on a directory walk, so the shell scans off-thread and
+    /// assembles its vault with [`Vault::new`] (D11). Tests want the walk and
+    /// the resolution in one statement, and are welcome to wait.
+    #[cfg(test)]
     pub fn rooted(root: &Path, source: &Path) -> Self {
         let root = absolutize(root);
         let entries = scan(&root);
-        Self {
-            source: absolutize(source),
-            index: VaultIndex::build(root, entries),
-        }
+        Self::new(VaultIndex::build(root, entries), source)
+    }
+
+    /// Point this vault at a different document, keeping the index.
+    pub fn rebind(&mut self, source: &Path) {
+        self.source = absolutize(source);
+    }
+
+    /// Swap in a freshly-scanned index (a background rescan landed).
+    pub fn set_index(&mut self, index: VaultIndex) {
+        self.index = index;
+    }
+
+    /// The current index, for the equality check that decides whether a landed
+    /// rescan is worth re-rendering for.
+    pub fn index(&self) -> &VaultIndex {
+        &self.index
     }
 
     /// Resolve a reference against this vault.
@@ -139,9 +204,28 @@ impl Vault {
     }
 }
 
+/// Whether `md` could name anything in the vault at all — the gate the shell
+/// uses to decide whether a freshly-landed index can change what is on screen.
+///
+/// Deliberately a substring test, not a parse: `[[` opens both a wikilink and
+/// an embed, and every construct that consults the index starts with one. It
+/// over-approximates (a `[[` inside a code fence says yes), which costs at most
+/// one redundant re-render — never a stale one.
+pub fn may_reference_vault(md: &str) -> bool {
+    md.contains("[[")
+}
+
 /// The case-folded lookup tables for one vault.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` so the shell can tell a background rescan that changed nothing
+/// (the overwhelmingly common case) from one that did, and skip the re-render.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultIndex {
+    /// How many files were indexed. Not recoverable from the tables below — a
+    /// note contributes two keys to each and an asset one — and reported over
+    /// D-Bus, where it is the first thing to look at when a `[[…]]` will not
+    /// resolve: it says whether the vault jumanji found is the one you meant.
+    files: usize,
     /// Full vault-relative path, with **and** without the `.md` extension.
     by_path: HashMap<String, PathBuf>,
     /// Bare filename (a note's stem *and* its full name; an asset's full
@@ -188,10 +272,16 @@ impl VaultIndex {
             candidates.sort();
         }
         Self {
+            files: entries.len(),
             by_path,
             by_name,
             aliases,
         }
+    }
+
+    /// How many vault files this index covers.
+    pub fn file_count(&self) -> usize {
+        self.files
     }
 
     /// Resolve `r` against the index; `source` breaks a filename tie. Lookup
@@ -240,18 +330,16 @@ fn best(candidates: &[PathBuf], source: &Path) -> Option<PathBuf> {
 /// A resolved path becomes a `Note` (markdown) or an `Asset`, and a note keeps
 /// its translated fragment.
 fn classify(path: PathBuf, r: &WikiRef) -> Target {
-    let is_md = path
-        .extension()
-        .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
-        .unwrap_or(false);
-    if is_md {
+    if is_note(&path) {
         Target::Note {
             anchor: anchor_for(r),
             path,
         }
     } else {
         Target::Asset {
-            kind: AssetKind::classify(&path),
+            // Every resolved path came out of the index, so it is an accepted
+            // format; the fallback is for total-function's sake, not a case.
+            kind: AssetKind::classify(&path).unwrap_or(AssetKind::Other),
             path,
         }
     }
@@ -286,63 +374,81 @@ fn absolutize(path: &Path) -> PathBuf {
     })
 }
 
-/// Walk `root`, returning every file with its vault-relative path (and, for a
-/// note, its frontmatter aliases). Dot-directories are skipped wholesale
-/// (`.git`, `.trash`, and anything else hidden), directory symlinks are not
-/// followed, and both the depth and the file count are capped so a pathological
-/// tree cannot hang the UI thread — which matters more now that the root is
-/// whatever directory the user happened to launch from. Unreadable directories
+/// Walk `root`, returning every *indexable* file with its vault-relative path
+/// (and, for a note, its frontmatter aliases).
+///
+/// Two filters keep the walk proportional to the vault rather than to the tree
+/// it happens to sit in — which matters because the `.git/` fallback can root at
+/// a source repo:
+///
+/// - **Ignore files are obeyed** (`ignore`, the crate ripgrep walks with):
+///   `.gitignore`, `.ignore`, `.git/info/exclude`, the user's global gitignore,
+///   and the same files in parent directories. `require_git` is off, so a
+///   `.gitignore` in a marker-less or `.obsidian`-rooted vault is honoured too —
+///   the file says "this is not my content" whether or not git is watching.
+///   Hidden entries are skipped as before, which is what keeps `.obsidian/`,
+///   `.git/` and `.trash/` out.
+/// - **Only accepted formats are indexed** ([`is_indexable`]). A build tree's
+///   object files and a repo's source cannot be named by any `[[…]]`, so
+///   walking into them buys nothing and costs an alias read each.
+///
+/// Directory symlinks are not followed, and both depth and file count stay
+/// capped so a pathological tree cannot hang the scan. Unreadable directories
 /// are skipped, not reported: a partial index is strictly better than none.
 pub fn scan(root: &Path) -> Vec<Entry> {
+    let walk = WalkBuilder::new(root)
+        .max_depth(Some(MAX_DEPTH))
+        .require_git(false)
+        .build();
+
     let mut entries = Vec::new();
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
-    while let Some((dir, depth)) = stack.pop() {
-        if depth >= MAX_DEPTH || entries.len() >= MAX_FILES {
+    for item in walk.flatten() {
+        if entries.len() >= MAX_FILES {
+            break;
+        }
+        // `None` is the stdin entry, which a rooted walk never yields.
+        if !item.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
-        let Ok(read) = std::fs::read_dir(&dir) else {
+        let path = item.path();
+        if !is_indexable(path) {
+            continue;
+        }
+        let Ok(rel_path) = path.strip_prefix(root) else {
             continue;
         };
-        for item in read.flatten() {
-            let name = item.file_name();
-            if name.to_string_lossy().starts_with('.') {
-                continue;
-            }
-            // `DirEntry::file_type` does not follow symlinks, so a symlinked
-            // directory is neither descended into nor indexed as a file.
-            let Ok(file_type) = item.file_type() else {
-                continue;
-            };
-            let path = item.path();
-            if file_type.is_dir() {
-                stack.push((path, depth + 1));
-            } else if file_type.is_file() {
-                if entries.len() >= MAX_FILES {
-                    break;
-                }
-                let Ok(rel_path) = path.strip_prefix(root) else {
-                    continue;
-                };
-                let aliases = if is_note(&path) {
-                    parse_aliases(&read_head(&path))
-                } else {
-                    Vec::new()
-                };
-                entries.push(Entry {
-                    rel_path: rel_path.to_path_buf(),
-                    aliases,
-                });
-            }
-        }
+        let aliases = if is_note(path) {
+            parse_aliases(&read_head(path))
+        } else {
+            Vec::new()
+        };
+        entries.push(Entry {
+            rel_path: rel_path.to_path_buf(),
+            aliases,
+        });
     }
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     entries
 }
 
+/// Whether the vault indexes this file: a note, or one of Obsidian's accepted
+/// attachment formats (research §2). Everything else is invisible to `[[…]]`
+/// anyway, so indexing it would only make the tables bigger and the walk slower.
+pub fn is_indexable(path: &Path) -> bool {
+    is_note(path) || AssetKind::classify(path).is_some()
+}
+
+/// A note's extension. `.markdown` is not on Obsidian's list, but jumanji opens
+/// such files, and a document it can open should be one its links can reach.
 fn is_note(path: &Path) -> bool {
+    matches!(extension(path).as_str(), "md" | "markdown")
+}
+
+/// A path's extension, lowercased; `""` when there is none.
+fn extension(path: &Path) -> String {
     path.extension()
-        .map(|e| e.eq_ignore_ascii_case("md"))
-        .unwrap_or(false)
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 /// The first [`HEAD_BYTES`] of `path`, or `""` if it is unreadable or does not
@@ -626,18 +732,32 @@ mod tests {
     #[test]
     fn asset_kinds_cover_the_accepted_formats() {
         for (name, kind) in [
-            ("a.png", AssetKind::Image),
-            ("a.SVG", AssetKind::Image),
-            ("a.avif", AssetKind::Image),
-            ("a.pdf", AssetKind::Pdf),
-            ("a.mp3", AssetKind::Av),
-            ("a.mp4", AssetKind::Av),
-            ("a.webm", AssetKind::Av),
-            ("a.canvas", AssetKind::Canvas),
-            ("a.base", AssetKind::Other),
-            ("a", AssetKind::Other),
+            ("a.png", Some(AssetKind::Image)),
+            ("a.SVG", Some(AssetKind::Image)),
+            ("a.avif", Some(AssetKind::Image)),
+            ("a.pdf", Some(AssetKind::Pdf)),
+            ("a.mp3", Some(AssetKind::Av)),
+            ("a.mp4", Some(AssetKind::Av)),
+            ("a.webm", Some(AssetKind::Av)),
+            ("a.canvas", Some(AssetKind::Canvas)),
+            ("a.base", Some(AssetKind::Other)),
+            // Not an accepted format — and so not indexable either.
+            ("a.rs", None),
+            ("a", None),
         ] {
             assert_eq!(AssetKind::classify(Path::new(name)), kind, "{name}");
+        }
+    }
+
+    #[test]
+    fn only_notes_and_accepted_attachments_are_indexable() {
+        for name in ["A.md", "A.MD", "A.markdown", "pic.png", "doc.pdf", "x.base"] {
+            assert!(is_indexable(Path::new(name)), "{name}");
+        }
+        // The kind of file a `.git/`-rooted vault is full of, and that no
+        // `[[…]]` could ever name.
+        for name in ["main.rs", "lib.o", "Cargo.toml", "README", "a.tar.gz"] {
+            assert!(!is_indexable(Path::new(name)), "{name}");
         }
     }
 
@@ -693,6 +813,14 @@ mod tests {
 
     // --- rooting and scanning (temp fixture tree) --------------------------
 
+    /// The scanned paths, as `/`-joined strings, for assertions.
+    fn scanned(tree: &TempTree) -> Vec<String> {
+        scan(&tree.0)
+            .iter()
+            .map(|e| e.rel_path.to_string_lossy().into_owned())
+            .collect()
+    }
+
     #[test]
     fn scan_skips_dot_directories_and_reads_aliases() {
         let tree = TempTree::new("scan");
@@ -710,6 +838,41 @@ mod tests {
         assert_eq!(paths, vec!["A.md", "Folder/B.md", "Folder/pic.png"]);
         assert_eq!(entries[0].aliases, vec!["Ay".to_string()]);
         assert!(entries[1].aliases.is_empty());
+    }
+
+    #[test]
+    fn scan_indexes_only_accepted_formats() {
+        let tree = TempTree::new("scan-formats");
+        tree.write("Note.md", "hi\n");
+        tree.write("pic.png", "\u{89}PNG");
+        // A source tree's worth of files no wikilink could name.
+        tree.write("src/main.rs", "fn main() {}\n");
+        tree.write("Cargo.toml", "[package]\n");
+        tree.write("build/out.o", "\0");
+        assert_eq!(scanned(&tree), vec!["Note.md", "pic.png"]);
+    }
+
+    #[test]
+    fn scan_obeys_gitignore() {
+        let tree = TempTree::new("scan-gitignore");
+        tree.write(".gitignore", "Drafts/\nSecret.md\n!Drafts/Public.md\n");
+        tree.write("Kept.md", "hi\n");
+        tree.write("Secret.md", "hi\n");
+        tree.write("Drafts/Hidden.md", "hi\n");
+        // There is no `.git/` here: an ignore file is a statement about the
+        // tree, not a git artefact, so it is honoured either way.
+        assert_eq!(scanned(&tree), vec!["Kept.md"]);
+    }
+
+    #[test]
+    fn scan_obeys_a_plain_ignore_file_too() {
+        // The escape hatch for a vault that is not a repo and does not want to
+        // pretend to be one.
+        let tree = TempTree::new("scan-ignore");
+        tree.write(".ignore", "Archive/\n");
+        tree.write("Kept.md", "hi\n");
+        tree.write("Archive/Old.md", "hi\n");
+        assert_eq!(scanned(&tree), vec!["Kept.md"]);
     }
 
     #[test]
@@ -734,9 +897,60 @@ mod tests {
         assert_eq!(vault.resolve(&wiki("nowhere")), Target::Unresolved);
     }
 
+    // --- root resolution ----------------------------------------------------
+
+    #[test]
+    fn an_obsidian_marker_roots_the_vault_at_its_directory() {
+        let tree = TempTree::new("root-obsidian");
+        tree.mkdir(".obsidian");
+        let deep = tree.write("Concepts/Nested/Deep.md", "hi\n");
+        assert_eq!(root_for(&deep), tree.0.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn a_git_marker_roots_the_vault_when_there_is_no_obsidian_one() {
+        let tree = TempTree::new("root-git");
+        tree.mkdir(".git");
+        let deep = tree.write("notes/Deep.md", "hi\n");
+        assert_eq!(root_for(&deep), tree.0.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn an_obsidian_marker_outranks_a_nearer_git_marker() {
+        // Precedence is per *marker*, not per ancestor: `.obsidian` is searched
+        // over the whole chain before `.git` is tried at all. A repo checked out
+        // inside a vault therefore reads as part of that vault, which is what
+        // makes `[[…]]` in it reach the rest of the notes.
+        let tree = TempTree::new("root-nested");
+        tree.mkdir(".obsidian");
+        tree.mkdir("project/.git");
+        let doc = tree.write("project/Notes/Deep.md", "hi\n");
+        assert_eq!(root_for(&doc), tree.0.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn a_marker_less_tree_roots_at_the_documents_own_directory() {
+        let tree = TempTree::new("root-bare");
+        let doc = tree.write("Concepts/Deep.md", "hi\n");
+        assert_eq!(
+            root_for(&doc),
+            tree.0.canonicalize().unwrap().join("Concepts")
+        );
+    }
+
+    #[test]
+    fn a_marker_that_is_a_file_is_not_a_marker() {
+        let tree = TempTree::new("root-file-marker");
+        tree.write(".obsidian", "not a directory\n");
+        // Nested, so a marker wrongly honoured would root at `tree` and be
+        // visibly different from the document-directory fallback.
+        let doc = tree.write("Notes/Deep.md", "hi\n");
+        assert_eq!(root_for(&doc), tree.0.canonicalize().unwrap().join("Notes"));
+    }
+
     #[test]
     fn a_document_outside_the_root_resolves_only_against_the_root() {
-        // The accepted consequence of rooting at the CWD (DESIGN D11): a note
+        // The accepted consequence of pinning one root (DESIGN D11): a note
         // opened from elsewhere still renders, still links within itself, but
         // its bare wikilinks reach only what the root indexes.
         let root = TempTree::new("root-only");

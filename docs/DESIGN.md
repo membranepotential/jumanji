@@ -478,6 +478,17 @@ per-file saved scroll position in `history.toml`. This closes that gap.
 - **`Backspace` is a second default binding for jumplist-back** — the
   discoverable "go back" key after following a link — aliasing the `jump
   backward` action, so it is remappable via `[keys.normal]` like any binding.
+- **The mouse's back/forward side buttons (8/9) are bound to the same two
+  actions.** Every browser makes those buttons mean "back through what I was
+  reading", and after following a wikilink that is exactly the jumplist — so
+  they dispatch `JumpBackward`/`JumpForward` rather than getting a history of
+  their own, and a thumb click and `Ctrl-o` cannot disagree. A capture-phase
+  `GestureClick` on the toplevel with `set_button(0)`, for both the D5a reason
+  (a controller on the WebView never sees these) and because WebKit would
+  otherwise walk its *own* session history — which is not the history the reader
+  navigates, since jumanji loads each document itself. GDK names constants only
+  for the primary three buttons; 8/9 are the X11/evdev numbers, spelled out at
+  the binding.
 - Rejected — a *separate* document back-stack for `Backspace` distinct from the
   scroll jumplist: two overlapping histories is accidental complexity (Tar Pit).
   One document-aware jumplist serves both keys; vim's jumplist already carries a
@@ -495,8 +506,9 @@ proposal, these win.
 - **Always on, and zero new config options.** The dialect is not gated on
   detecting anything: one document must render the same wherever it sits, and a
   plain folder of notes (Zettelkasten, Foam, Dendron, a docs tree) is exactly
-  the case a gate would break. Taken to its conclusion this is why there is no
-  vault *detection* at all — see the `core::vault` bullet below. The cost is
+  the case a gate would break. Markers pick the vault *root* (the `core::vault`
+  bullet below); they never decide whether the dialect is on, and a tree with no
+  marker at all still gets every construct. The cost is
   that a literal `[[x]]` outside a notes collection renders as inert
   unresolved-link text; inline code
   and fences are untouched (comrak parses those first), so the realistic blast
@@ -514,44 +526,110 @@ proposal, these win.
   changes one non-Obsidian case too: a document opening with a thematic break
   and containing a later `---` line loses that span. Obsidian and every static
   site generator have the same behaviour; accepted.
-- **`core::vault` — one `Vault`, rooted at the process CWD, rebuilt per
-  document load.** *(Supersedes this section's earlier `.obsidian/` discovery rationale.)*
-  jumanji borrows Obsidian's **syntax** and depends on none of its machinery:
-  there is no marker directory to find, no application to have installed, and
-  no second resolution mode to reason about. **A directory of notes is a vault
-  because you opened jumanji in it.** This is the agnosticism the "always on,
-  zero new config" decision above already argued for — the "plain folder of
-  notes" case (Zettelkasten, Foam, Dendron, a docs tree, a git repo) is no
-  longer the fallback, it is the *only* case. `Vault::rooted(root, source)`
-  scans `root` into a case-folded map of *filename* → path (plus full relative
-  paths) and a map of frontmatter `aliases` → path; the shell always passes the
-  CWD. Resolution follows Obsidian: vault-wide by name, **root outranks a
-  sibling folder**, the source path is only a tiebreaker, matching is
-  case-insensitive, aliases participate. It is a table lookup, never a path
-  join — so `[[../secrets]]` and `[[/etc/passwd]]` are simply not keys, and a
-  wikilink cannot address anything outside the root. *Rejected:* the
-  `.obsidian/` walk-up — it made rendering depend on a competitor's private
-  directory, gave the same document two different meanings depending on
-  invisible state, and left a `Loose` variant carrying a whole second
-  resolution algorithm for the majority case.
-  - **Accepted consequences.** A document opened from *outside* the CWD tree
-    resolves only against the CWD index, so a bare `[[x]]` in it may come out
-    `Unresolved` — correct, not a bug: the reader was not launched in that
-    note's collection. It still renders, and its same-file `[[#Heading]]` /
-    `[[#^id]]` references still work, because those never consult the index.
-    stdin is unaffected: D9 already hands it a `<cwd>/stdin.md` sentinel, so
-    its "document directory" and the vault root were always the same place.
-  - **Freshness:** built in `load_document`, reused by every live-reload
-    re-render (editing a note cannot rename another one), rebuilt by `r` and by
-    following any link. No vault-wide watcher, no cache layer — it is fresh at
-    exactly the moment resolution happens. The depth (32) and file (50 000)
-    caps now carry more weight, since the root is whatever directory the user
-    launched from rather than a deliberately-marked one. Measured on this
-    machine: a repo root of 18 662 files walks in ~145 ms; a `$HOME` large
-    enough to hit the 50 000-file cap takes ~1.0 s, which is a visible stall on
-    the UI thread. If that becomes a real complaint the fix is still
-    measurement first — a narrower cap, or moving the walk off-thread — not a
-    speculative cache.
+- **Frontmatter is hidden by default, and showing it is a rendering, not a
+  dump.** Hidden is the default because a note should open as prose rather than
+  as a block of machine metadata — and it is also the *free* path: comrak parses
+  frontmatter into a node its formatter already skips, so hiding costs nothing
+  and showing is one AST pass swapping that node for raw HTML (keeping its
+  source position, so D7 reverse click still lands on it). `:frontmatter`
+  toggles it live and `show-frontmatter` sets the startup state. When shown it
+  is a `<dl>` properties table, not the YAML source: the reason to ask for
+  frontmatter is to read the values, and Obsidian shows properties as a table
+  for the same reason. `core::frontmatter` parses it with the same deliberately
+  shallow rules as `parse_aliases` below — one level of `key: value`, both list
+  spellings, and *verbatim* text for anything with structure it does not model
+  (nested maps, `|` scalars), degrading to the whole block verbatim when nothing
+  parses. It never reshapes what it did not understand. *Rejected:* a YAML crate
+  (a dependency to render metadata nobody asked to see), and a `<pre>` of the
+  source (which is what the toggle exists to improve on).
+- **`core::vault` — one `Vault`, rooted by marker walk-up from the opened
+  document, pinned at launch, index rescanned off-thread per document load.**
+  *(Supersedes this section's two earlier rationales: `.obsidian/` discovery
+  with a second `Loose` mode, then the process CWD.)* `vault::root_for(doc)`
+  walks up from the document's directory and takes **the nearest ancestor
+  holding `.obsidian/`, else the nearest holding `.git/`, else the document's
+  own directory.** Each marker is searched over the whole ancestor chain before
+  the next is tried, so an explicit vault marker outranks an incidental repo
+  marker no matter which sits closer.
+  - **Why markers, having once rejected them.** The objection to `.obsidian/`
+    was that it made rendering depend on a competitor's *private directory* and
+    gave one document two meanings depending on invisible state. The first half
+    does not survive scrutiny: a marker directory in the user's own tree is a
+    fact about how those notes are organised, not a handshake with a program —
+    jumanji reads it, it does not require Obsidian to exist. The second half was
+    real but was aimed at the wrong thing: two *resolution modes* were the
+    problem, and there is still only one. What replaced it — the CWD — turned
+    out to be worse in practice. It made resolution depend on state that is not
+    in the tree at all and is invisible in the launcher, desktop entry, or file
+    manager that most opens actually come through: the same file rendered
+    differently depending on which directory the user's shell happened to be in.
+    `.git/` as the second marker covers the marker-less notes tree, which is the
+    common case for anyone keeping notes in a repo.
+  - **Pinned, not recomputed.** The root is resolved once, from the document
+    jumanji was launched with, and held for the process. Recomputing it per load
+    would let following a wikilink into a subfolder silently narrow the vault
+    under the reader — you opened a collection, not a directory. Only the
+    *index* is rebuilt per load, and because the root is pinned the index
+    outlives any one document: a switch only rebinds which note "this one" is.
+    `scan` walks `root` into a case-folded map of *filename* → path (plus full
+    relative paths) and a map of frontmatter `aliases` → path. Resolution
+    follows Obsidian: vault-wide by name, **root outranks a sibling folder**,
+    the source path is only a tiebreaker, matching is case-insensitive, aliases
+    participate. It is a table lookup, never a path join — so `[[../secrets]]`
+    and `[[/etc/passwd]]` are simply not keys, and a wikilink cannot address
+    anything outside the root.
+  - **The index covers the vault, not the tree it sits in.** Two filters, both
+    aimed at the `.git/` fallback rooting at a source repo. **Ignore files are
+    obeyed** — `.gitignore`, `.ignore`, `.git/info/exclude`, the global
+    gitignore, and the same files in parent directories, via the `ignore` crate
+    (ripgrep's; gitignore's negation, `**`, and precedence rules are not worth
+    reimplementing). `require_git` is off, so a `.gitignore` counts in a
+    marker-less or `.obsidian/`-rooted vault too: the file is the user saying
+    "this is not my content", and whether git happens to be watching is beside
+    the point. **Only Obsidian's accepted formats are indexed** (research §2 —
+    notes, images, audio/video, PDF, `.canvas`, `.base`); nothing else can be
+    named by a `[[…]]`, so indexing it buys nothing and costs an alias read
+    each. `AssetKind::classify` returns `Option`, which makes that list the one
+    place the formats are written down. *Rejected:* a hardcoded
+    `target/`/`node_modules/` blocklist — the heuristic guess about which
+    directories "don't count" that the previous revision of this bullet rightly
+    refused. An ignore file is not a guess; it is already in the tree, and the
+    user wrote it.
+  - **Accepted consequences.** A document opened from outside the pinned root
+    resolves only against that root, so a bare `[[x]]` in it may come out
+    `Unresolved` — correct, not a bug: it is not part of the collection you
+    opened. It still renders, and its same-file `[[#Heading]]` / `[[#^id]]`
+    references still work, because those never consult the index. stdin keeps
+    D9's `<cwd>/stdin.md` sentinel, so a pipe roots at the CWD as before. The
+    `.git/` fallback can still root at a large repo, but the filters above mean
+    the *index* is the size of the notes in it, not of the checkout.
+  - **Off the main loop.** The walk is the one piece of per-load work whose cost
+    is set by the tree rather than by the document, so it is the one piece that
+    must not run on the UI thread: a vault behind a slow mount would otherwise
+    stall every `:open` for as long as the filesystem took to answer. The shell
+    runs `scan` + `VaultIndex::build` on `gio::spawn_blocking` and swaps the
+    result in when it lands; that split is exactly what `VaultIndex::build`
+    taking scanned entries was already for. Landing is quiet — the index is
+    compared against the one in hand (`PartialEq`) and an identical one, which
+    is the overwhelmingly common case, re-renders nothing; a changed one
+    re-renders only if the document contains a `[[` at all. Renders never wait:
+    launch starts with an empty index and the scan overlaps window creation and
+    WebKit startup, so it lands well before the first load finishes. Because the
+    only blocking constructor left is test-only, `Vault::rooted` is `#[cfg(test)]`
+    — the type system now enforces that the reader cannot block on a walk.
+    `GetState` reports `vault_files`, which is how the e2e suite waits for a
+    scan to land instead of sleeping, and the first thing to look at when a
+    `[[…]]` will not resolve: it says whether the vault jumanji found is the one
+    you meant.
+  - **Freshness:** rescanned on every document load and on `r`, reused by every
+    live-reload re-render (editing a note cannot rename another one). No
+    vault-wide watcher, no cache layer. Measured on this repo (dev build, warm
+    cache): the previous revision walked 22 966 files in ~23 ms and spent ~126 ms
+    building the tables — the ~150 ms this bullet used to quote, and mostly the
+    *build*, not the walk. With ignore files and the format allowlist it is 16
+    files, ~1.4 ms total, and off-thread besides. The depth (32) and file
+    (50 000) caps stay: they now bound a pathological tree rather than an
+    ordinary repo.
   - `aliases` is read by a ~40-line targeted parser, not a YAML crate: one key
     in three documented shapes (`aliases: x`, `[a, b]`, a `- ` block), and a
     malformed value degrades to "no aliases". The walk is local filesystem I/O
@@ -705,8 +783,7 @@ left underspecified:
   paragraph. `x`/`X` are left alone.
 
 **Deliberately out of scope:** transclusion (link-card instead), `#tag` pills
-(no search index behind them, so a pill is decoration), a rendered properties
-table (frontmatter is hidden, not shown), Templater, Bases/`.base`, Canvas
+(no search index behind them, so a pill is decoration), Templater, Bases/`.base`, Canvas
 rendering, Publish-only properties, and the `internal-link` mermaid node class.
 Dataview/dataviewjs/tasks/query fences need no work — `highlight_code_blocks`
 already falls back to plain-text syntect for unknown languages, so they render

@@ -109,6 +109,9 @@ struct State {
     /// First `.rendered-fence svg` width in CSS px (0 if none). Nonzero proves a
     /// configured external fence renderer (DESIGN D6.2) produced visible output.
     fence_width: f64,
+    /// Rendered width of the `.frontmatter` panel in CSS px (0 when hidden,
+    /// which is the default). The `:frontmatter` toggle's observable.
+    frontmatter_width: f64,
     /// Computed `color` of the first python function-name span, as a CSS
     /// `rgb(...)` string ("" if the document has no python). In dark mode it must
     /// not be `InspiredGithub`'s near-black light colour (`rgb(50, 50, 50)`).
@@ -120,6 +123,9 @@ struct State {
     section: usize,
     toc_len: usize,
     loaded: bool,
+    /// Files in the vault index (DESIGN D11). Built off-thread, so this is also
+    /// how a test waits for a background rescan to land rather than sleeping.
+    vault_files: usize,
 }
 
 impl State {
@@ -137,6 +143,7 @@ impl State {
             math_width: field(json, "math_width")?.parse().ok()?,
             msup_shift_ratio: field(json, "msup_shift_ratio")?.parse().ok()?,
             fence_width: field(json, "fence_width")?.parse().ok()?,
+            frontmatter_width: field(json, "frontmatter_width")?.parse().ok()?,
             fn_color: field_str(json, "fn_color")?,
             dark: field(json, "dark")? == "true",
             zoom: field(json, "zoom")?.parse().ok()?,
@@ -145,6 +152,7 @@ impl State {
             section: field(json, "section")?.parse().ok()?,
             toc_len: field(json, "toc_len")?.parse().ok()?,
             loaded: field(json, "loaded")? == "true",
+            vault_files: field(json, "vault_files")?.parse().ok()?,
         })
     }
 }
@@ -204,9 +212,9 @@ impl Harness {
     }
 
     /// As [`launch_file`](Self::launch_file), but with an explicit working
-    /// directory for the child. The vault index is rooted at the process CWD
-    /// (DESIGN D11), so any test that exercises `[[wikilink]]` resolution must
-    /// launch inside the tree it expects to resolve against.
+    /// directory for the child. The vault root comes from the *document*, not
+    /// the CWD (DESIGN D11), so this exists precisely to prove the CWD is
+    /// irrelevant — see `vault_root_follows_the_marker_not_the_working_directory`.
     fn launch_file_in_dir(file: PathBuf, cwd: Option<PathBuf>) -> Self {
         let id = next_display();
         let config_home = std::env::temp_dir().join(format!("jumanji-e2e-xdg-{id}"));
@@ -454,6 +462,13 @@ impl Harness {
             button.to_string(),
         ]);
         self.xdotool(["keyup".to_string(), "ctrl".to_string()]);
+    }
+
+    /// Click a mouse side button (8 = back, 9 = forward) at the current pointer.
+    /// Delivered via XTEST at the pointer for the same reason as [`click`]:
+    /// bare Xvfb drops synthetic `--window` button events.
+    fn side_click(&self, button: u32) {
+        self.xdotool(["click".to_string(), button.to_string()]);
     }
 
     /// Ctrl + left-click at window-relative `(x, y)` (reverse editor sync). Like
@@ -1765,10 +1780,11 @@ fn filler() -> String {
 
 #[test]
 fn wikilink_follows_across_vault_notes() {
-    // The checked-in fixture vault, entered the way a user would: the reader is
-    // launched *inside* `demo/vault`, so the index is rooted there and
-    // `[[Concepts/Callouts]]` resolves vault-wide. The emitted `file://` link
-    // then routes through `open_uri` → `open_file` like any other.
+    // The checked-in fixture vault, entered the way a user would. It carries an
+    // `.obsidian/` marker, so the index roots there — not at the surrounding
+    // jumanji repo — and `[[Concepts/Callouts]]` resolves vault-wide. The
+    // emitted `file://` link then routes through `open_uri` → `open_file` like
+    // any other.
     // `Welcome.md`'s first link is that one, so the first hint label follows it.
     let Some(_g) = setup_guard() else { return };
     let manifest = env!("CARGO_MANIFEST_DIR");
@@ -1816,6 +1832,190 @@ fn wikilink_heading_fragment_scrolls_target_document() {
         SETTLE,
         |s| s.mode == "normal" && s.file.ends_with("Target.md") && s.scroll_y > 1.0,
     );
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn vault_root_follows_the_marker_not_the_working_directory() {
+    // The whole point of marker-based rooting (DESIGN D11): a note opened from
+    // deep inside a marked tree, with the process launched somewhere else
+    // entirely, still resolves against the *vault*. `[[Welcome]]` lives in the
+    // vault root, two levels above the document and nowhere near the CWD, so it
+    // resolves only if the `.obsidian/` marker was honoured.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("marker-root");
+    std::fs::create_dir_all(vault.join(".obsidian")).expect("marker");
+    std::fs::create_dir_all(vault.join("Concepts/Nested")).expect("subfolders");
+    std::fs::write(vault.join("Welcome.md"), "# Welcome\n\nArrived.\n").expect("write Welcome.md");
+    std::fs::write(
+        vault.join("Concepts/Nested/Deep.md"),
+        "# Deep\n\nUp to [[Welcome]].\n",
+    )
+    .expect("write Deep.md");
+    let elsewhere = temp_vault("marker-root-cwd");
+
+    let h = Harness::launch_file_in_dir(
+        vault.join("Concepts/Nested/Deep.md"),
+        Some(elsewhere.clone()),
+    );
+
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    h.wait_for_state(
+        "the wikilink resolved against the marked root",
+        SETTLE,
+        |s| s.mode == "normal" && s.file.ends_with("Welcome.md"),
+    );
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+    let _ = std::fs::remove_dir_all(&elsewhere);
+}
+
+#[test]
+fn the_vault_index_skips_ignored_and_irrelevant_files() {
+    // Two filters keep the index proportional to the vault rather than to the
+    // tree it sits in (DESIGN D11): ignore files are obeyed, and only Obsidian's
+    // accepted formats are indexed. Both matter most under the `.git/` fallback,
+    // where the root can be a source repo.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("index-filters");
+    std::fs::create_dir_all(vault.join("Private")).expect("subfolder");
+    std::fs::create_dir_all(vault.join("build")).expect("subfolder");
+    std::fs::write(vault.join(".gitignore"), "Private/\nbuild/\n").expect("write .gitignore");
+    std::fs::write(
+        vault.join("Doc.md"),
+        "# Doc\n\nTo [[Secret]] and [[Public]].\n",
+    )
+    .expect("write Doc.md");
+    std::fs::write(vault.join("Public.md"), "# Public\n\nArrived.\n").expect("write Public.md");
+    std::fs::write(vault.join("Private/Secret.md"), "# Secret\n").expect("write Secret.md");
+    // Not an accepted format, and not ignored either: filtered on its extension.
+    std::fs::write(vault.join("main.rs"), "fn main() {}\n").expect("write main.rs");
+    std::fs::write(vault.join("build/out.o"), "\0").expect("write out.o");
+
+    let h = Harness::launch_file(vault.join("Doc.md"));
+
+    // Exactly the two notes: `.gitignore` took `Private/` and `build/`, the
+    // format filter took `main.rs`. `.gitignore` itself is hidden.
+    h.wait_for_state("the background scan landed", SETTLE, |s| s.vault_files > 0);
+    assert_eq!(h.get_state().vault_files, 2, "indexed files");
+
+    // And the ignored note is genuinely unaddressable: an unresolved wikilink
+    // gets no `href`, so it is not a hint target — the first hint is `[[Public]]`
+    // even though `[[Secret]]` comes first in the source.
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    h.wait_for_state("the first live link was Public, not Secret", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("Public.md")
+    });
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn a_note_created_after_launch_resolves_once_the_background_rescan_lands() {
+    // The index is built off the main loop (DESIGN D11), so `r` cannot re-render
+    // with a fresh index synchronously — it renders now and re-renders when the
+    // scan lands. This is that whole round trip: a dead link becomes a live one
+    // without the reader having done anything but ask for a reload.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("rescan-lands");
+    std::fs::write(vault.join("Doc.md"), "# Doc\n\nOn to [[Later]].\n").expect("write Doc.md");
+
+    let h = Harness::launch_file(vault.join("Doc.md"));
+    h.wait_for_state("the initial scan landed", SETTLE, |s| s.vault_files == 1);
+
+    // The target arrives after the window is already up.
+    std::fs::write(vault.join("Later.md"), "# Later\n\nArrived.\n").expect("write Later.md");
+    h.execute_action("reload", 1);
+    h.wait_for_state("the rescan landed and re-rendered", SETTLE, |s| {
+        s.vault_files == 2
+    });
+
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    h.wait_for_state("the once-dead wikilink resolved", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("Later.md")
+    });
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn mouse_side_buttons_walk_the_jumplist() {
+    // Buttons 8/9 are the browser gesture, bound to the cross-document jumplist
+    // (DESIGN D10) so a thumb click and `Ctrl-o`/`Ctrl-i` cannot disagree.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("side-buttons");
+    std::fs::write(vault.join("Source.md"), "# Source\n\nOn to [[Target]].\n")
+        .expect("write Source.md");
+    std::fs::write(vault.join("Target.md"), "# Target\n\nArrived.\n").expect("write Target.md");
+
+    let h = Harness::launch_file_in_dir(vault.join("Source.md"), Some(vault.clone()));
+
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    h.wait_for_state("followed the link", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("Target.md")
+    });
+
+    // Park the pointer over the window; the buttons are read at the pointer.
+    h.mouse_move(200, 200);
+    h.side_click(8);
+    h.wait_for_state("back button returns to the source", SETTLE, |s| {
+        s.file.ends_with("Source.md")
+    });
+    h.side_click(9);
+    h.wait_for_state("forward button returns to the target", SETTLE, |s| {
+        s.file.ends_with("Target.md")
+    });
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn frontmatter_is_hidden_until_the_command_shows_it() {
+    // Hidden is the default and the toggle is a full re-render, so this asserts
+    // the whole round trip: absent → shown → absent again (DESIGN D11).
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("frontmatter");
+    let doc = vault.join("Note.md");
+    std::fs::write(
+        &doc,
+        "---\ntitle: Properties\ntags: [alpha, beta]\n---\n\n# Note\n\nBody text.\n",
+    )
+    .expect("write Note.md");
+
+    let h = Harness::launch_file_in_dir(doc, Some(vault.clone()));
+    let s = h.wait_for_state("loaded", SETTLE, |s| s.loaded);
+    assert_eq!(
+        s.frontmatter_width, 0.0,
+        "frontmatter is hidden by default, got {s:?}"
+    );
+
+    h.execute_action("toggle frontmatter", 1);
+    let shown = h.wait_for_state("frontmatter panel rendered", SETTLE, |s| {
+        s.frontmatter_width > 0.0
+    });
+    assert!(
+        shown.frontmatter_width > 0.0,
+        "`:frontmatter` shows the properties panel, got {shown:?}"
+    );
+
+    h.execute_action("toggle frontmatter", 1);
+    h.wait_for_state("frontmatter hidden again", SETTLE, |s| {
+        s.frontmatter_width == 0.0
+    });
 
     drop(h);
     let _ = std::fs::remove_dir_all(&vault);

@@ -73,8 +73,9 @@ webview sees a keypress, so the vim layer is absolute. See
 Counts work as prefixes (`5j`). Every binding is remappable in the config file.
 
 Mouse: wheel scrolls, `Ctrl`+wheel zooms geometrically, `Ctrl`+`Shift`+wheel
-zooms the text, links are clickable (external links open in your browser —
-jumanji itself never touches the network). Scroll position and zoom are
+zooms the text, the back/forward side buttons walk the jumplist (same as
+`Ctrl-o` / `Ctrl-i`), and links are clickable (external links open in your
+browser — jumanji itself never touches the network). Scroll position and zoom are
 remembered per file. Drop `.css` files into `~/.config/jumanji/themes/` to
 restyle the reader; GFM alerts (`> [!NOTE]` …) render as callouts. LaTeX math —
 inline `$…$` and display `$$…$$`, matrices and aligned environments — is
@@ -137,6 +138,38 @@ root). With lazy.nvim:
 The default `$EDITOR +%l %f` also works without any of this — it just opens a
 new editor per click rather than reusing a session.
 
+## Obsidian notes
+
+jumanji reads Obsidian's markdown dialect — the syntax, not the app. Nothing is
+gated on Obsidian being installed and there is no mode to switch on:
+`[[wikilinks]]` and `![[embeds]]` (with `#Heading`, `#^block-id`, `|alias` and
+`|WxH` forms), all 27 callout spellings with `+`/`-` folding, `==highlight==`,
+`%%comments%%`, `^block-ids`, inline footnotes and `- [?]` task markers all
+render. A link that resolves to nothing renders inert rather than broken.
+
+**The vault root** — what a bare `[[Note]]` is looked up in — is derived from
+the file you opened, once, at launch:
+
+1. the nearest ancestor directory containing `.obsidian/`, else
+2. the nearest containing `.git/`, else
+3. the file's own directory.
+
+So an Obsidian vault works as a vault, a git-tracked notes tree works without a
+marker, and a loose file resolves against its neighbours. Following links never
+re-roots — you opened a collection, not a directory. Resolution is Obsidian's:
+vault-wide by filename, root beats a sibling folder, case-insensitive, and
+frontmatter `aliases` participate.
+
+**What gets indexed** is your notes, not your whole checkout. `.gitignore` and
+`.ignore` are obeyed (in the vault and above it, whether or not the tree is a
+git repo), hidden directories are skipped, and only Obsidian's accepted file
+formats are indexed — notes, images, audio/video, PDF, `.canvas`, `.base`. So a
+notes tree rooted at a source repo indexes the notes and ignores the source. The
+scan runs off the UI thread, so opening a document never waits on it.
+
+**Frontmatter is hidden** so a note opens as prose. `:frontmatter` shows it as a
+properties table (or set `show-frontmatter = true` to start that way).
+
 ## External fence renderers
 
 Extend diagram support to any tool without a plugin API: map a fence language to
@@ -171,6 +204,7 @@ A ```` ```dot ```` fence then renders as a diagram. Details:
 scroll-step = 60        # pixels per j/k
 zoom-step = 0.1
 default-recolor = false # start in dark mode
+show-frontmatter = false # show YAML frontmatter as a properties table
 page-width = 960        # px, content column width
 editor-command = "$EDITOR +%l %f"  # reverse editor sync (Ctrl+click), %l line / %f file
 

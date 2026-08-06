@@ -2,6 +2,126 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-08-06 — the vault index gets small, and gets off the main thread
+
+Follow-up to the entry below, which shipped marker-based rooting and then
+admitted in the same breath that the `.git/` fallback walked 21 k files in
+~150 ms per load, with the fix deferred to "measurement first — a narrower cap,
+or moving the walk off-thread". This is that measurement, and all three fixes.
+
+The measurement first, because it moved the target. On this repo the old path
+walked 22 966 files in ~23 ms and then spent **~126 ms building the lookup
+tables**. The ~150 ms was mostly the build, not the walk — a shrunken index was
+always going to matter more than a faster traversal.
+
+**`.gitignore` is obeyed.** Via the `ignore` crate (ripgrep's): `.gitignore`,
+`.ignore`, `.git/info/exclude`, the global gitignore, and the same files in
+parent directories. `require_git` is off, so an ignore file counts in a
+marker-less or `.obsidian/`-rooted vault too — the file is the user saying "this
+is not my content", and whether git is watching is beside the point. Writing a
+gitignore matcher by hand was never on the table; negation, `**`, and precedence
+are exactly the kind of thing that looks done and isn't.
+
+**Only Obsidian's accepted formats are indexed** — notes, images, audio/video,
+PDF, `.canvas`, `.base` (research §2). Nothing else can be named by a `[[…]]`,
+so indexing it bought nothing and cost an alias-read each.
+`AssetKind::classify` now returns `Option<AssetKind>`, which makes that list the
+single place the formats are written down and `is_indexable` one line over it.
+The earlier revision's rejection of a `target/`/`node_modules/` blocklist still
+stands and is the reason this shape is right: a blocklist is a guess about which
+directories don't count, whereas an ignore file is already in the tree and the
+user wrote it.
+
+Together: 22 966 files / ~149 ms → **16 files / ~1.4 ms** on this repo.
+
+**And the walk moved off the main loop** anyway, because the remaining cost is
+set by the filesystem, not by us — a vault on a slow mount would still stall
+every `:open`. `scan` + `VaultIndex::build` run on `gio::spawn_blocking` and the
+result is swapped in when it lands. Landing is deliberately quiet: the new index
+is compared against the one in hand and an identical one — nearly always —
+re-renders nothing, and a changed one re-renders only if the document contains a
+`[[` at all. Launch starts with an empty index and the scan overlaps window
+creation and WebKit startup, so it lands long before the first load finishes.
+`Vault::rooted` is the only blocking constructor left and is now `#[cfg(test)]`,
+so "the reader never blocks on a walk" is a compile error rather than a habit.
+
+The e2e suite caught a real bug in this: a rescan landing *mid-load* re-queried
+the live scroll position (still 0.0, the restore not yet applied) and clobbered
+the pending history restore. It now keeps a queued restore instead of re-reading.
+`GetState` gained `vault_files`, which is both how the tests wait for a scan to
+land without sleeping and the first thing to check when a `[[…]]` won't
+resolve — it tells you whether the vault jumanji found is the one you meant.
+
+Next: nothing outstanding here. If a vault ever does hit the 50 000-file cap the
+answer is still measurement, not a cache.
+
+## 2026-08-06 — vault root by marker, a frontmatter toggle, mouse side buttons
+
+Three user-reported gaps after living with D11 for a day.
+
+**The vault root is the document's tree again, not the CWD.** Yesterday's entry
+argued the root should be the process working directory, on the grounds that
+depending on `.obsidian/` meant depending on a competitor's private directory.
+Using it proved the trade backwards. A marker directory sitting in your own
+notes tree is a *fact about how those notes are organised*; jumanji reading it
+requires Obsidian to exist about as much as reading `.git/` requires GitHub. The
+CWD, meanwhile, is state that is not in the tree at all and is invisible in the
+launcher, desktop entry, or file manager that most opens actually come through —
+so the same note rendered differently depending on which directory a shell
+happened to be in. The original objection that *did* hold up was two resolution
+modes, and there is still only one.
+
+`vault::root_for(doc)` now walks up from the document's directory: nearest
+ancestor with `.obsidian/`, else nearest with `.git/`, else the document's own
+directory. Each marker is searched over the whole chain before the next is
+tried, so a repo checked out inside a vault reads as part of that vault rather
+than rooting at itself. `.git/` is what covers the marker-less notes tree, which
+was the case that prompted this.
+
+The root is now **pinned**: resolved once from the launch document and held for
+the process, where before every load recomputed it. Without CWD as the anchor
+that recomputation would silently narrow the vault as you followed links into
+subfolders. Only the index is still rebuilt per load, which is what keeps it
+fresh. `demo/vault/.obsidian/` came back — deleted yesterday as unused, it is
+now what makes the fixture a vault instead of part of the jumanji repo.
+
+Measured, since `.git/` can root wide: this repo is ~21 000 non-hidden files and
+walks in ~150 ms per load. Left alone. A build-output blocklist (`target/`,
+`node_modules/`) is the obvious next move and is exactly the wrong one — it is a
+heuristic guess about which directories "don't count", which is the invisible
+state this change exists to remove. The 32-deep / 50 000-file caps still bound
+the tail.
+
+**Frontmatter got a toggle, and a rendering.** Hidden stays the default — a note
+should open as prose. `:frontmatter` (or `toggle frontmatter`) flips it live,
+`show-frontmatter` sets the startup state. Showing it was nearly free: comrak
+already parses frontmatter into a node its formatter skips, so the pass swaps
+that node's value for raw HTML the way the fence passes do, keeping its source
+position and so its D7 reverse-click target.
+
+What it renders is a `<dl>` properties table, not the YAML source. The reason to
+ask for frontmatter is to read the values, and a monospace dump is a worse way to
+do that. New `core::frontmatter` parses it with the same deliberately shallow
+rules as `parse_aliases` — one level of `key: value`, both list spellings,
+verbatim text for anything structured it does not model, and the whole block
+verbatim when nothing parses. No YAML crate: a dependency to render metadata
+nobody asked to see is a bad trade, and the fallback is honest rather than
+lossy.
+
+**Mouse buttons 8/9 walk the jumplist.** They dispatch `JumpBackward` /
+`JumpForward` rather than owning a history — after following a wikilink the
+jumplist *is* "back through what I was reading", and a thumb click should not be
+able to disagree with `Ctrl-o`. Capture-phase `GestureClick` with
+`set_button(0)` on the toplevel: a controller on the WebView never sees these
+(D5a), and WebKit would otherwise walk its own session history, which is not the
+history the reader navigates.
+
+Also fixed a pre-existing `collapsible_if` in `tests/e2e.rs` that clippy 1.95
+started flagging.
+
+Tests: 281 core unit tests, 42 e2e (three new: marker rooting from an unrelated
+CWD, the frontmatter round trip, and the side buttons under XTEST), all green.
+
 ## 2026-08-05 — D11 follow-up: the vault root is the working directory
 
 Reversed the vault-discovery half of D11, hours after landing it. The dialect

@@ -16,7 +16,8 @@ use comrak::{Arena, Options as ComrakOptions, format_html, parse_document};
 use super::highlight::escape_html;
 use super::vault::Vault;
 use super::{
-    Heading, RenderedDocument, callout, diagram, fence, highlight, math, textscan, toc, wikilink,
+    Heading, RenderedDocument, callout, diagram, fence, frontmatter, highlight, math, textscan,
+    toc, wikilink,
 };
 
 /// The stylesheet is embedded at compile time; nothing is fetched at runtime.
@@ -34,6 +35,10 @@ const CSP: &str =
 pub struct Options {
     /// Content column width in pixels (the centred reading measure).
     pub page_width_px: u32,
+    /// Show the document's YAML frontmatter as a properties table. Off by
+    /// default — comrak parses frontmatter into a node it never renders, so
+    /// "hidden" costs nothing and "shown" is one AST pass (DESIGN D11).
+    pub show_frontmatter: bool,
     /// Body/prose font family; empty means keep the stylesheet default stack.
     pub font_body: String,
     /// Monospace/code font family; empty means keep the stylesheet default.
@@ -56,6 +61,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             page_width_px: 960,
+            show_frontmatter: false,
             font_body: String::new(),
             font_mono: String::new(),
             font_size_px: 18,
@@ -149,6 +155,9 @@ pub fn render(md: &str, opts: &Options, vault: &Vault) -> RenderedDocument {
     textscan::extract_block_ids(&arena, root);
     mark_task_symbols(&arena, root);
     wrap_tables(&arena, root);
+    if opts.show_frontmatter {
+        reveal_front_matter(root);
+    }
 
     // Editor sync (DESIGN D7): the code-block-replacing passes above turn their
     // nodes into raw `HtmlBlock`s, which comrak emits verbatim *without* the
@@ -247,6 +256,38 @@ fn mark_task_symbols<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>) {
             Some(inline) => inline.insert_before(badge),
             None => first.append(badge),
         }
+    }
+}
+
+/// AST pass: turn the document's `FrontMatter` node into a rendered properties
+/// table (DESIGN D11). Comrak parses frontmatter into a node its formatter
+/// skips, so hiding is the do-nothing path and this pass is the whole of
+/// showing it: swap the node's value for the raw HTML, exactly as the fence
+/// passes do, which keeps its source position and so its D7 reverse-click
+/// target. A block with no readable content is dropped rather than rendered as
+/// an empty box.
+fn reveal_front_matter<'a>(root: &'a AstNode<'a>) {
+    let Some(node) = root
+        .descendants()
+        .find(|n| matches!(n.data.borrow().value, NodeValue::FrontMatter(_)))
+    else {
+        return;
+    };
+    let html = {
+        let data = node.data.borrow();
+        let NodeValue::FrontMatter(block) = &data.value else {
+            unreachable!("just matched")
+        };
+        frontmatter::to_html(block)
+    };
+    match html {
+        Some(html) => {
+            node.data.borrow_mut().value = NodeValue::HtmlBlock(NodeHtmlBlock {
+                block_type: 0,
+                literal: html,
+            })
+        }
+        None => node.detach(),
     }
 }
 
@@ -824,6 +865,55 @@ mod tests {
         assert!(!html.contains("<h2"), "no setext heading from the fences");
         assert!(!html.contains("<hr"), "no thematic break from the fences");
         assert!(html.contains("<h1"));
+    }
+
+    /// Render with frontmatter shown, everything else at defaults.
+    fn render_showing_front_matter(md: &str) -> String {
+        render(
+            md,
+            &Options {
+                show_frontmatter: true,
+                ..Options::default()
+            },
+            &test_vault(),
+        )
+        .html
+    }
+
+    #[test]
+    fn front_matter_is_shown_as_a_properties_table_on_request() {
+        let html =
+            render_showing_front_matter("---\ntitle: x\ntags: [a, b]\n---\n\n# Real heading\n");
+        assert!(html.contains("<div class=\"frontmatter\""), "{html}");
+        assert!(html.contains("<dt>title</dt><dd>x</dd>"), "{html}");
+        assert!(html.contains("frontmatter-item\">a</span>"), "{html}");
+        // The document itself is untouched by the reveal.
+        assert!(html.contains("<h1"), "{html}");
+    }
+
+    #[test]
+    fn shown_front_matter_keeps_its_source_position_for_reverse_click() {
+        // It replaces a real block, so D7 reverse click must land on line 1
+        // rather than silently losing the mapping.
+        let html = render_showing_front_matter("---\ntitle: x\n---\n\n# H\n");
+        assert!(
+            html.contains("<div class=\"frontmatter\" data-sourcepos=\"1:"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn showing_an_empty_front_matter_block_adds_nothing() {
+        let html = render_showing_front_matter("---\n---\n\n# H\n");
+        assert!(!html.contains("class=\"frontmatter\""), "{html}");
+        assert!(html.contains("<h1"), "{html}");
+    }
+
+    #[test]
+    fn showing_front_matter_is_a_no_op_on_a_document_without_any() {
+        let plain = render_str("# H\n\ntext\n");
+        let shown = render_showing_front_matter("# H\n\ntext\n");
+        assert_eq!(plain, shown);
     }
 
     #[test]

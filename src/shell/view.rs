@@ -75,6 +75,10 @@ pub struct ViewportState {
     /// svg`), 0 if none. CSS px. Lets e2e assert a configured fence renderer
     /// (DESIGN D6.2) actually produced visible output.
     pub fence_width: f64,
+    /// Rendered width of the shown frontmatter panel (`.frontmatter`), 0 when
+    /// the document has none *or* it is hidden — which is the default. Lets e2e
+    /// assert the `:frontmatter` toggle from outside the page (DESIGN D11).
+    pub frontmatter_width: f64,
     /// Computed `color` of the first python function-name span
     /// (`.entity.name.function.python`), as a CSS `rgb(...)` string ("" if the
     /// document has no python code). Lets e2e assert the dark-mode syntax-CSS
@@ -517,6 +521,7 @@ impl View {
              const svg = document.querySelector('.mermaid svg'); \
              const math = document.querySelector('math'); \
              const rf = document.querySelector('.rendered-fence svg'); \
+             const fm = document.querySelector('.frontmatter'); \
              const fn = document.querySelector('.entity.name.function.python'); \
              const msup = document.querySelector('math msup'); \
              let ms = 0; \
@@ -531,6 +536,7 @@ impl View {
                       mw: math ? math.getBoundingClientRect().width : 0, \
                       ms: ms, \
                       rw: rf ? rf.getBoundingClientRect().width : 0, \
+                      fw: fm ? fm.getBoundingClientRect().width : 0, \
                       fc: fn ? getComputedStyle(fn).color : '' }; })()";
         self.webview.evaluate_javascript(
             script,
@@ -554,6 +560,7 @@ impl View {
                         math_width: num("mw"),
                         msup_shift_ratio: num("ms"),
                         fence_width: num("rw"),
+                        frontmatter_width: num("fw"),
                         fn_color,
                     });
                 }
@@ -567,6 +574,7 @@ impl View {
                     math_width: 0.0,
                     msup_shift_ratio: 0.0,
                     fence_width: 0.0,
+                    frontmatter_width: 0.0,
                     fn_color: String::new(),
                 }),
             },

@@ -348,6 +348,70 @@ img.internal-embed {
   scroll-margin-top: 2em;
 }
 
+/* Frontmatter, shown only on request (`:frontmatter`). It is metadata *about*
+ * the document, not part of it, so it reads as a quiet panel ahead of the
+ * prose: smaller, muted, sans-serif — deliberately a different voice from the
+ * body serif — and never competing with the first heading. */
+.frontmatter {
+  margin: 0 0 2.5rem;
+  padding: 0.9rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--table-head-bg);
+  font-family: system-ui, sans-serif;
+  font-size: 0.8em;
+  line-height: 1.5;
+}
+
+/* Two columns: keys sized to their content, values taking the rest. Falls back
+ * to stacked rows when the keys would leave no room for the values. */
+.frontmatter dl {
+  display: grid;
+  grid-template-columns: minmax(auto, 12ch) 1fr;
+  gap: 0.35rem 1.1rem;
+  margin: 0;
+}
+
+.frontmatter dt {
+  color: var(--fg-muted);
+  font-weight: 600;
+  /* A long key wraps rather than pushing the value column off the panel. */
+  overflow-wrap: anywhere;
+}
+
+.frontmatter dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* List values as chips, so `tags: [a, b]` reads as two things, not one string. */
+.frontmatter-item {
+  display: inline-block;
+  padding: 0 0.45em;
+  margin: 0 0.3em 0.2em 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--fg-muted);
+}
+
+/* A declared-but-empty property: say so, rather than leaving a blank row that
+ * looks like a rendering bug. */
+.frontmatter-empty {
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+/* Structure the properties parser does not model is shown verbatim — monospace
+ * because at that point it *is* source, and scrollable so it obeys the
+ * no-page-h-scroll invariant (D5a). */
+.frontmatter-raw {
+  margin: 0;
+  overflow-x: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.95em;
+  color: var(--fg-muted);
+}
+
 /* `==highlight==` (comrak's `highlight` extension). */
 mark {
   background: color-mix(in srgb, var(--alert-warning) 28%, transparent);
