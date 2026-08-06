@@ -127,6 +127,7 @@ Options surface (all optional; defaults in parentheses):
 | `font-mono` | string (`""`) | code font family; empty = stylesheet default mono stack |
 | `font-size` | u32 (`18`) | base body font px; also the text-zoom 100% reference |
 | `selection-clipboard` | `"primary"` \| `"clipboard"` (`primary`) | which clipboard copy-on-select writes to |
+| `background` | bool (`false`) | detach from the terminal at startup, so the prompt returns immediately; startup-only, and `--background`/`--foreground` override it |
 
 Font names are CSS-escaped and quoted before emission into the generated
 `:root{…}` block (the stylesheet already consumes `--font-body`/`--font-mono`/
@@ -141,6 +142,16 @@ the clipboard: WebKitGTK mirrors the find match into the X11 PRIMARY selection a
 it selects it, so the `FindController::found-text` handler restores PRIMARY to
 the user's last real selection (or clears it) after every `/`, `n`, `N` — the
 match highlight stays, but a search never lands on the clipboard.
+
+`background` detaches by **re-executing the binary**, not by forking: the process
+is about to bring up GTK, WebKit and D-Bus, and `fork` in a soon-to-be-threaded
+program is a well-known footgun, while a fresh process starts from a clean slate.
+The child gets the original argv plus a trailing `--foreground` (the two flags
+override each other last-one-wins, so that also neutralises an explicit
+`--background`), its own process group, and null stdio — a detached process that
+outlives its terminal must not write to a closed tty. The detach happens as the
+last step of startup, after every diagnostic the user needs to see on the
+terminal, and never for a stdin source, whose pipe we are still consuming.
 
 ### D5a: Two-axis zoom
 
@@ -801,12 +812,61 @@ left underspecified:
   done) and prepends `<span class="task-marker">?</span>` to the item's first
   paragraph. `x`/`X` are left alone.
 
-**Deliberately out of scope:** transclusion (link-card instead), `#tag` pills
+**Deliberately out of scope (D11):** transclusion (link-card instead), `#tag` pills
 (no search index behind them, so a pill is decoration), Templater, Bases/`.base`, Canvas
 rendering, Publish-only properties, and the `internal-link` mermaid node class.
 Dataview/dataviewjs/tasks/query fences need no work — `highlight_code_blocks`
 already falls back to plain-text syntect for unknown languages, so they render
 as code blocks today.
+
+### D12: A document opens where it is meant to open (post-1.0; implemented)
+
+**A reading position is part of a load, not something done to a document
+afterwards.** Every position — a remembered offset, a link fragment, a
+`--forward` line — used to be applied from Rust in the `LoadEvent::Finished`
+handler. By then WebKit has parsed, laid out and composited the document at
+scroll 0, and the correction costs a further UI→web IPC hop, so the unscrolled
+top is on screen for that whole window. That is the flash the reader sees
+walking the jumplist, and it is worse the more real the document is: `Finished`
+waits for subresources while WebKit paints incrementally during parsing, so
+images and math fonts widen the gap.
+
+- **One position per load, resolved once.** `shell::view::InitialPosition` is
+  `Top | Offset(f64) | Anchor(String) | SourceLine(u32)`, armed by whoever
+  initiates the load. It replaces two `Option` fields whose precedence was
+  decided by the *order of two statements* at load-finished time, and which
+  could between them show three positions in one load (top → history offset →
+  fragment). `Top` is the position, not the absence of one, which is why it
+  carries no data.
+- **The position travels as inert markup**, `data-jmnj-open` on `<html>`,
+  written by the same one-shot rewrite that already pre-applies `class="dark"`
+  and now also the text-zoom `--font-size`. Inline `<script>` is not available
+  and should not be: the page CSP is `default-src 'none'` with no `script-src`,
+  and D3 keeps the webview a dumb static renderer whose HTML can later feed an
+  export path. A `data-` attribute survives that export; a script would break
+  both.
+- **A permanent document-start user-script applies it**, alongside the four that
+  already exist — shell viewport glue, the sanctioned category, not
+  content-pipeline JS. It applies on `requestAnimationFrame`, whose callbacks
+  run *before* the frame they belong to is painted, re-arming on
+  `DOMContentLoaded` and `load` for a document still growing, and stopping once
+  the position is reached or `readyState === 'complete'`.
+- **`html.jmnj-restoring body { visibility: hidden }` closes the gap the timing
+  cannot**, a shell-toggled class on the same contract as `html.dark`. The
+  reveal is unconditional and timer-backed: a page left permanently blank would
+  be a worse bug than the flash, and graceful degradation is binding (D8/D9).
+- **`LoadEvent::Finished` keeps one job**: re-running the script's *own* apply
+  once subresources are in, since an offset can clamp against a document that
+  has not finished growing. Idempotent, and a no-op for a document opening at
+  the top.
+
+Verified the way the 2026-07-06 flicker was: Xvfb + `ffmpeg` frame capture across
+a cross-document `Ctrl-o`, with a CSS-painted marker at the top of the departed
+document. Pre-fix, two captured frames are a full screen of that marker; after,
+zero — what replaces them is two frames of the page's own `--bg`. The
+load-finished restore passed a "lands in the right place" assertion the whole
+time, which is why the e2e observable is `first_frame_scroll_y`: the offset the
+*first* painted frame was placed at, recorded from inside the page.
 
 ## Non-goals
 

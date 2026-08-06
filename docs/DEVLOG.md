@@ -2,6 +2,82 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-08-07 — the unscrolled page stops flashing; `background = true`
+
+**Reported:** walking the jumplist between documents flashes the top of the
+page before it lands where you left off.
+
+**Root cause, and it was never really about the jumplist.** Every reading
+position was applied from Rust inside the `LoadEvent::Finished` handler. By the
+time that fires, WebKit has parsed, laid out and composited the document at
+scroll 0, and the correction takes another UI→web IPC hop — so the unscrolled
+top is on screen for that whole window. The jumplist just shows it worst,
+because a cross-document hop reloads and the recorded offset is usually deep in
+the file. Five other paths had the same bug and nobody had named it: startup
+into a file with a saved position, **every live reload** (i.e. every save of the
+file you are reading), a landed vault rescan, `r`/`:frontmatter`/`:set`, the
+theme watcher, and — up to *three* positions in one load — a link fragment or
+`--forward` line, which were applied after the history offset that had already
+been applied after the top. A stdin stream re-rendered this way at up to 8 Hz
+for the life of the pipe.
+
+**The position is now part of the load.** `InitialPosition` (`Top | Offset |
+Anchor | SourceLine`) is armed by whoever starts the load — so the precedence
+between the three ways to ask for a position is decided once, in one `match`,
+instead of by the order of two statements in the finished handler — and rides
+into the HTML as `data-jmnj-open` on `<html>`, through the same one-shot rewrite
+that already pre-applied `class="dark"`. Text zoom joins it there: the inline
+`--font-size` was also being re-applied after paint, so every reload at a
+non-100% text zoom reflowed from base size up. A permanent document-start
+user-script applies the attribute on `requestAnimationFrame` — callbacks run
+before the frame they belong to is painted — and `html.jmnj-restoring body {
+visibility: hidden }` covers the rest, with an unconditional timer-backed
+reveal, because a permanently blank page would be the worse bug.
+
+Inert markup rather than an inline `<script>` is not a stylistic call: the page
+CSP is `default-src 'none'` with no `script-src`, so a script would be blocked,
+and D3 wants HTML that can later feed an export path. Recorded as DESIGN D12.
+
+**On proving it.** The first frame-capture harness passed the *buggy* build —
+it marked the top of the document with a `file:` PNG, and an image has no
+intrinsic size until it loads, so during the exact window under test the marker
+had not painted and the detector saw white. Second version marks the top with
+CSS from a user theme (inlined into the page, nothing async) and adds
+subresources below the fold so `Finished` lags first paint the way it does in a
+real note. That version discriminates: pre-fix, frames 145-146 of the capture
+are a full screen of magenta; post-fix, zero magenta frames and two frames of
+the page's own white `--bg` instead. Worth remembering — with an all-inline
+test document the compositor may never produce a top-of-document frame at all,
+and a clean capture then measures nothing.
+
+The e2e observable is `first_frame_scroll_y`: the offset the first painted frame
+was placed at, recorded in-page. The old code always *ended* in the right place,
+so any assertion on the final position passed throughout — which is precisely
+why one existed and the bug shipped anyway.
+
+Two things fixed in passing: `'x` quickmark no longer issues a native zoom
+change alongside an async scroll when the mark was set at the current zoom (a
+frame at the new zoom and the old offset), and `open_file` now queries the
+departure offset live instead of reading the cached `last_scroll`, which the
+scroll listener only refreshes when the *rounded percent* changes — so a small
+wheel scroll then a link click used to record a stale departure and land
+`Ctrl-o` slightly off.
+
+**Also: `background = true`.** Running a GUI reader from a terminal meant typing
+a trailing `&` every time. New `[options]` key (off by default — blocking is
+what a command is expected to do), with `--background`/`--foreground` overriding
+it. It detaches by re-executing the binary rather than forking: this process is
+about to bring up GTK, WebKit and D-Bus, and `fork` in a soon-to-be-threaded
+program is a footgun that a fresh process simply does not have. The child gets
+argv plus a trailing `--foreground` (last flag wins, so it cannot re-detach), its
+own process group, and null stdio. It detaches last, after every startup
+diagnostic has had its chance at the terminal, and never for a stdin source —
+we are the consumer of a pipe the shell is still writing into.
+
+**Next:** the two frames of background during a restore are the hide gate's
+cost; if it ever becomes noticeable on a slow document, the reveal could be
+gated on layout stability rather than a fixed failsafe.
+
 ## 2026-08-06 — the statusbar says how you got here; completion pages
 
 Two chrome complaints, both about the bottom bar not telling the whole truth.
