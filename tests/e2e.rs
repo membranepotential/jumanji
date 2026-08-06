@@ -1710,10 +1710,10 @@ fn reverse_ctrl_click_spawns_editor_command() {
     // The script writes argv.txt on spawn; poll for it.
     let deadline = Instant::now() + SETTLE;
     let contents = loop {
-        if let Ok(s) = std::fs::read_to_string(&argv_out) {
-            if !s.trim().is_empty() {
-                break s;
-            }
+        if let Ok(s) = std::fs::read_to_string(&argv_out)
+            && !s.trim().is_empty()
+        {
+            break s;
         }
         if Instant::now() >= deadline {
             panic!("editor-command was not spawned (no argv.txt) within {SETTLE:?}");
