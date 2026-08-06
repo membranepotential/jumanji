@@ -12,3 +12,6 @@ packaging/aur/src/
 packaging/aur/pkg/
 packaging/aur/*.tar.gz
 packaging/aur/*.pkg.tar.zst
+
+# Scratch: flash-on-document-switch investigation (captures are large, not source)
+.flash-investigation/

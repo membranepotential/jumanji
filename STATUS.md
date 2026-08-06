@@ -13,15 +13,13 @@ dialect support. Linux-first (Arch, X11/i3wm).
 Shipped **v1.6.0** (tag + GitHub release + AUR PKGBUILD pointed at it). Two
 workstreams in flight on the open bugs below:
 
-- **flash-diagnosis** — re-diagnose the document-switch flash (Next 1) from a
-  fresh frame capture of a link-follow. Read-only; returns a root cause + fix
-  proposal. State: running. Next: hand its proposal to an implementer.
-- **zoom-sticky** — make zoom a session-level setting that carries across
-  navigation (Next 2). Owns `src/shell/app.rs`. State: running. Next: review,
-  then commit.
-
-Sequencing: both bugs live in `src/shell/app.rs`, so the flash *fix* only starts
-after zoom-sticky lands.
+- **flash-diag2** — re-diagnose the document-switch flash (Next 1). Round 1
+  (`flash-diagnosis`) was stopped: its 60fps video rig returned a false negative
+  on the jumplist path that the user contradicted. Work saved to
+  `.flash-investigation/` (gitignored) with a handoff note. Round 2 measures
+  `first_frame_scroll_y` instead of filming. State: running. Next: hand its
+  proposal to an implementer.
+- ~~zoom-sticky~~ — landed as `6efa729`.
 
 ## Done (recent)
 
@@ -37,20 +35,23 @@ after zoom-sticky lands.
 
 ## Next
 
-1. **Flash on document switch is NOT fixed.** Despite the v1.6.0 work, switching
-   files still flashes visibly. The D12 mechanism (arm position → inline
-   `data-jmnj-open` → rAF user-script → `html.jmnj-restoring body { visibility:
-   hidden }` + failsafe reveal) either isn't covering the real path or the
-   hide-gate reveal itself is what's seen. Needs re-diagnosis from a fresh frame
-   capture of a *link follow* / `Ctrl-o` between two real files — the existing
-   harness proved the startup/reload case, not necessarily this one. Do not
-   assume the previous root cause was the whole story.
-2. **Follow a link → keep the current zoom.** Today `load_document`
-   (`src/shell/app.rs:1802-1814`) restores the *target file's* saved zoom, or
-   resets to 100% when the file has never been opened. Reading at 130% and
-   clicking a wikilink therefore drops back to 100%. Zoom should behave as a
-   session-level view setting that carries across navigation, with the saved
-   per-file value only used when there's no live session zoom to inherit.
+1. **Flash on document switch is NOT fixed.** User-confirmed shape: the new
+   document is painted **at scroll 0**, then scrolls to the linked/stored
+   position — not a white frame, not the old document persisting. Happens on
+   **both** link-follows and jumplist `Ctrl-o`/`Ctrl-i`, so it's a property of
+   the document-switch path in general.
+
+   Verified: `pending_position` *is* consumed before the load
+   (`do_render_and_load`, `src/shell/app.rs:543-544`), so D12 does cover this
+   path — "position applied after paint" is not the explanation.
+
+   Leading hypothesis: a **second full load** per switch. `load_document` calls
+   `rescan_vault` + `do_render_and_load`; when the rescan lands and the index
+   differs (`app.rs:500`), it fires `render_and_load` again — and by then the
+   finished first load has reset `pending_position` to `Top`, so
+   `preserve_scroll` is true and an async scroll round-trip precedes a second
+   parse/layout/paint. Would also explain why a small static fixture never
+   reproduces it (identical index → early return → no second load).
 
 ## Open questions
 
