@@ -52,6 +52,13 @@ pub struct Options {
     /// Whether a document's YAML frontmatter is shown. Off by default (DESIGN
     /// D11): a note should open as prose, not as a block of metadata.
     pub show_frontmatter: bool,
+    /// Whether the process detaches from the terminal at startup, so the shell
+    /// prompt returns immediately instead of the reader holding the foreground
+    /// job (`jumanji notes.md` behaving like `jumanji notes.md &`). Off by
+    /// default: blocking is what a command is expected to do, and the terminal
+    /// is where startup diagnostics land. Config-only and consumed once in
+    /// `main` before the window exists — not a `:set` target.
+    pub background: bool,
     /// Body/prose font family (empty = the stylesheet's default serif stack).
     pub font_body: String,
     /// Monospace/code font family (empty = the stylesheet's default stack).
@@ -81,6 +88,7 @@ impl Default for Options {
             page_width_px: 960,
             default_recolor: false,
             show_frontmatter: false,
+            background: false,
             font_body: String::new(),
             font_mono: String::new(),
             font_size_px: 18,
@@ -247,6 +255,7 @@ impl Config {
             show_frontmatter: raw_opts
                 .show_frontmatter
                 .unwrap_or(defaults.show_frontmatter),
+            background: raw_opts.background.unwrap_or(defaults.background),
             font_body: raw_opts.font_body.unwrap_or(defaults.font_body),
             font_mono: raw_opts.font_mono.unwrap_or(defaults.font_mono),
             font_size_px: raw_opts.font_size.unwrap_or(defaults.font_size_px),
@@ -571,6 +580,7 @@ struct RawOptions {
     default_recolor: Option<bool>,
     #[serde(rename = "show-frontmatter")]
     show_frontmatter: Option<bool>,
+    background: Option<bool>,
     #[serde(rename = "font-body")]
     font_body: Option<String>,
     #[serde(rename = "font-mono")]
@@ -1007,6 +1017,26 @@ mod tests {
     fn show_frontmatter_reads_from_the_config_file() {
         let c = Config::parse("[options]\nshow-frontmatter = true\n").unwrap();
         assert!(c.options.show_frontmatter);
+    }
+
+    #[test]
+    fn background_is_off_by_default_and_reads_from_the_config_file() {
+        assert!(!Options::default().background);
+        assert!(
+            Config::parse("[options]\nbackground = true\n")
+                .unwrap()
+                .options
+                .background
+        );
+        assert!(
+            !Config::parse("[options]\nbackground = false\n")
+                .unwrap()
+                .options
+                .background
+        );
+        // Startup-only: it is consumed before the window exists, so it is not a
+        // `:set` target and must not silently pretend to apply at runtime.
+        assert!(Options::default().set("background", "true").is_err());
     }
 
     #[test]

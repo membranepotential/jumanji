@@ -206,6 +206,7 @@ zoom-step = 0.1
 default-recolor = false # start in dark mode
 show-frontmatter = false # show YAML frontmatter as a properties table
 page-width = 960        # px, content column width
+background = false      # detach from the terminal at startup (see below)
 editor-command = "$EDITOR +%l %f"  # reverse editor sync (Ctrl+click), %l line / %f file
 
 [keys.normal]
@@ -216,6 +217,24 @@ editor-command = "$EDITOR +%l %f"  # reverse editor sync (Ctrl+click), %l line /
 d2 = "d2 - -"            # ```d2 fences rendered with d2lang.com
 dot = "dot -Tsvg"        # ```dot fences rendered with Graphviz
 ```
+
+### Running in the background
+
+By default jumanji holds the terminal until you close the window, like any other
+command. Set `background = true` (or pass `--background`) and it detaches at
+startup instead — the reader opens and the prompt comes straight back, without
+the trailing `&`:
+
+```sh
+jumanji --background notes.md   # detach: prompt returns immediately
+jumanji --foreground notes.md   # stay in front, even with background = true
+```
+
+Whichever flag you pass wins over the config file; passing both leaves the last
+one standing. The detached reader keeps running after the terminal closes, and
+its output goes nowhere — so startup diagnostics (a missing file, a broken
+config, a `--forward` handoff) are all reported *before* it detaches. Reading
+from a pipe never detaches: the shell is still feeding that stdin.
 
 ## Installation
 

@@ -2,8 +2,9 @@ mod core;
 mod shell;
 
 use std::io::IsTerminal;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use clap::{CommandFactory, Parser};
 use gtk::glib;
@@ -25,6 +26,83 @@ struct Cli {
     /// a window (like zathura's `--synctex-forward`). Requires a file argument.
     #[arg(long, value_name = "LINE")]
     forward: Option<u32>,
+
+    /// Detach from the terminal at startup: the reader opens and the shell
+    /// prompt returns immediately, as if launched with a trailing `&`.
+    /// Overrides the `background` config option.
+    #[arg(long, overrides_with = "foreground")]
+    background: bool,
+
+    /// Stay in the foreground, holding the terminal until the window closes.
+    /// Overrides the `background` config option.
+    #[arg(long, overrides_with = "background")]
+    foreground: bool,
+}
+
+impl Cli {
+    /// Whether to detach from the terminal, given the configured default. An
+    /// explicit flag always wins; `--background` and `--foreground` override
+    /// each other POSIX-style (last one on the line wins), so at most one of
+    /// the two is ever set here.
+    fn should_background(&self, configured: bool) -> bool {
+        match (self.background, self.foreground) {
+            (true, _) => true,
+            (_, true) => false,
+            _ => configured,
+        }
+    }
+}
+
+/// Re-execute ourselves detached from the terminal and report whether the child
+/// is on its way, so the caller can exit and hand the prompt back.
+///
+/// Re-exec rather than `fork`: forking a process that is about to bring up GTK,
+/// WebKit and D-Bus — all of which spawn threads — only reliably copies the
+/// calling thread, and the standard fix (`libc::fork` behind `unsafe`) would add
+/// a dependency to sidestep a problem a fresh process does not have.
+///
+/// A failure here is never fatal: backgrounding is a convenience, and it must
+/// not be the reason the reader fails to open. The caller falls through to
+/// running in the foreground.
+fn spawn_detached() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            eprintln!("jumanji: cannot background (locating own binary: {err}); staying in front");
+            return false;
+        }
+    };
+
+    let mut command = Command::new(exe);
+    command
+        // Our own arguments, verbatim — the child re-resolves them in the same
+        // working directory, so relative paths still mean the same file.
+        .args(std::env::args_os().skip(1))
+        // `--foreground` last, so the child never backgrounds itself again: the
+        // two flags override each other last-one-wins, which neutralises both a
+        // configured `background = true` and an explicit `--background`.
+        .arg("--foreground")
+        // Leave the terminal's process group, so the shell does not track the
+        // child as a job and a terminal hangup (SIGHUP to the foreground group)
+        // does not take the reader down with it.
+        .process_group(0)
+        // Detach the standard streams too. A backgrounded process that outlives
+        // its terminal would otherwise write into a closed tty, where `eprintln!`
+        // panics on the broken pipe — and until then it would scribble over the
+        // user's prompt.
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    match command.spawn() {
+        // Deliberately not waited on: the child is reparented to init when we
+        // exit, which is the whole point.
+        Ok(_) => true,
+        Err(err) => {
+            eprintln!("jumanji: cannot background ({err}); staying in the foreground");
+            false
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -77,6 +155,20 @@ fn main() -> ExitCode {
             .exit();
     }
 
+    // Backgrounding a stream is impossible: we are the consumer of a pipe the
+    // shell's producer is still writing into, and detaching means nulling stdin.
+    // A configured default is silently skipped further down, but an explicit
+    // request deserves an explicit "no" rather than a window that renders
+    // nothing.
+    if cli.background && source.is_stdin() {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--background requires a file argument; it cannot be used with stdin (`-`)",
+            )
+            .exit();
+    }
+
     // Resolve a file source to an absolute, existing path (and take the D-Bus
     // forward-to-running-instance shortcut). Stdin passes straight through.
     let source = match source {
@@ -115,10 +207,47 @@ fn main() -> ExitCode {
         }
     };
 
+    // Hand the prompt back, last thing before the window opens. Everything above
+    // reports its problems on the terminal — a bad path, a malformed config, a
+    // forwarded jump — and the user must still see all of it, so the detach
+    // happens only once there is nothing left to say. A stdin source never
+    // detaches (see the `--background` conflict above); with `background = true`
+    // configured, piping simply keeps working in the foreground.
+    if !source.is_stdin() && cli.should_background(config.options.background) && spawn_detached() {
+        return ExitCode::SUCCESS;
+    }
+
     let exit = shell::app::run(source, config, cli.forward);
     if exit == glib::ExitCode::SUCCESS {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("jumanji").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn background_flags_override_the_config_value() {
+        assert!(!parse(&["a.md"]).should_background(false));
+        assert!(parse(&["a.md"]).should_background(true));
+        assert!(parse(&["--background", "a.md"]).should_background(false));
+        assert!(!parse(&["--foreground", "a.md"]).should_background(true));
+    }
+
+    #[test]
+    fn the_last_background_flag_wins() {
+        // Load-bearing for the re-exec, which appends `--foreground` to the
+        // original argument list to stop the child backgrounding itself again:
+        // that only works if a trailing `--foreground` beats a leading
+        // `--background` instead of erroring out as a conflict.
+        assert!(!parse(&["--background", "a.md", "--foreground"]).should_background(true));
+        assert!(parse(&["--foreground", "a.md", "--background"]).should_background(false));
     }
 }
