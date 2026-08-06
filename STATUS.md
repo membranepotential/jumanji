@@ -13,13 +13,11 @@ dialect support. Linux-first (Arch, X11/i3wm).
 Shipped **v1.6.0** (tag + GitHub release + AUR PKGBUILD pointed at it). Two
 workstreams in flight on the open bugs below:
 
-- **flash-diag2** — re-diagnose the document-switch flash (Next 1). Round 1
-  (`flash-diagnosis`) was stopped: its 60fps video rig returned a false negative
-  on the jumplist path that the user contradicted. Work saved to
-  `.flash-investigation/` (gitignored) with a handoff note. Round 2 measures
+- **flash-diag2** — re-diagnose the document-switch flash (Next 1). Round 1 was
+  stopped for a false negative (60fps video can't prove absence); its rig +
+  handoff live in `.flash-investigation/` (gitignored). Round 2 measures
   `first_frame_scroll_y` instead of filming. State: running. Next: hand its
   proposal to an implementer.
-- ~~zoom-sticky~~ — landed as `6efa729`.
 
 ## Done (recent)
 
@@ -27,9 +25,8 @@ workstreams in flight on the open bugs below:
   (`InitialPosition` = `Top | Offset | Anchor | SourceLine`, DESIGN D12); text
   zoom inlined the same way; `background = true` / `--background`. Frame-capture
   harness + `first_frame_scroll_y` e2e observable.
-- **v1.5.0** — jumplist breadcrumb in the statusbar, paginated `:` completion.
-- **v1.4.0 / v1.3.0** — Obsidian dialect: wikilinks, vault resolution, callouts,
-  embeds, vault rooting, frontmatter, side buttons.
+- **v1.5.0 / v1.4.0 / v1.3.0** — jumplist breadcrumb, paginated `:` completion;
+  Obsidian dialect (wikilinks, vault resolution, callouts, embeds, frontmatter).
 - **v1.2.x** — Neovim two-way sync plugin, 960px content column, NON_UNIQUE
   GApplication (one process per window).
 
