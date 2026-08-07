@@ -2,6 +2,51 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-08-07 — the restore gate stops conceding while the page is still growing
+
+**Reported:** switching documents flashes the new page at scroll 0 before it
+scrolls to the linked/stored position — on link follows *and* `Ctrl-o`/`Ctrl-i`.
+Confirmed by the user against `board-reader/docs/index.md`.
+
+**What it was not.** Two structural explanations were killed by tracing an
+instrumented build (artifacts in `.flash-investigation/`):
+
+- the position is *not* applied after first paint — `do_render_and_load` hands
+  `at` to `View::load_document` before the HTML is built, and switches really do
+  carry `open=Some("offset:…")`;
+- there is *not* a second load per switch — the vault-rescan re-render fires only
+  at startup, where the index goes from empty to populated (`equal=true` on every
+  later switch, so `rescan_vault`'s guard short-circuits).
+
+**Cause.** `scroll_restore_js`'s loop conceded one frame after
+`document.readyState === 'complete'`. But `complete` is not a statement that
+layout is final, and `apply` places the position with `scrollTo`, which *clamps
+against the height it finds*. So for a deep offset in a document still growing,
+the loop gave up, `reveal` ran, and the body became visible at a near-top
+offset — then `settle_initial_position` corrected it after the load finished.
+That correction is the visible jump. The comment on `settle_initial_position`
+assumed the content "was already revealed near the right place", which is
+exactly what fails for a deep offset: clamped means ~0, not "near".
+
+Measured directly: forcing `apply` to fail briefly flips the restore from
+`why=reached, reveal_y=24000` to `why=gaveup, reveal_y=0` — the reported shape.
+
+**Fix.** Concede only once the document has stopped growing: track
+`documentElement.scrollHeight` per tick and require `STABLE_FRAMES` (3)
+consecutive unchanged heights *in addition to* `readyState === 'complete'`. A
+document genuinely too short still settles in ~3 frames, and the unconditional
+400ms failsafe still bounds the gate, so the never-blank-page guarantee
+(CLAUDE.md) is untouched.
+
+**Verification.** 300 unit + 48 e2e green on three consecutive full runs. Not
+yet confirmed against the user's real repro — the flash was never reproduced
+headlessly (every fixture placed correctly, `why=reached`), so the last word
+belongs to the machine that shows it.
+
+**Next:** confirm on `board-reader/docs`. If it persists, the reproduction gap
+itself is the finding — see `.flash-investigation/HANDOFF.md`. Also open: the
+startup double load, real but separate.
+
 ## 2026-08-07 — incremental rebuilds: 5.3s → 1.0s
 
 **Reported:** rebuilds feel slow.

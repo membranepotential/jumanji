@@ -232,6 +232,19 @@ const FIRST_FRAME_GLOBAL: &str = "window.__jmnj_first_frame";
 /// [`View::settle_initial_position`]) without a second copy of the rules.
 const APPLY_GLOBAL: &str = "window.__jmnj_apply_open";
 
+/// Consecutive frames the document height must hold steady before the restore
+/// loop concedes an offset is unreachable and reveals anyway.
+///
+/// `readyState === 'complete'` is not a statement that layout is final — the
+/// height keeps growing after it while late boxes settle — and `apply` places
+/// the position by clamping against the height it finds. Conceding on
+/// `complete` alone therefore revealed the body at a clamped, near-top offset
+/// for any deep position, which is the document-switch flash: the page appears
+/// at ~0, then [`View::settle_initial_position`] jumps it down. Three frames
+/// (~50ms at 60Hz) is enough to tell "still laying out" from "genuinely too
+/// short", and the unconditional failsafe still bounds the whole affair.
+const STABLE_FRAMES: u32 = 3;
+
 /// The permanent document-start user-script that places every freshly loaded
 /// document at the position [`View::load_document`] wrote into
 /// [`OPEN_ATTRIBUTE`]. Installed once, in [`View::new`], beside the other four.
@@ -313,7 +326,7 @@ fn scroll_restore_js() -> String {
            // Parked for the shell's post-load settle, so the late-layout\n\
            // correction and the pre-paint placement are the same code.\n\
            {apply_global} = apply;\n\
-           let done = false, pending = false, lastChance = false;\n\
+           let done = false, pending = false, stable = 0, lastHeight = -1;\n\
            const schedule = () => {{ if (done || pending) return; \
              pending = true; requestAnimationFrame(tick); }};\n\
            function tick() {{\n\
@@ -329,14 +342,22 @@ fn scroll_restore_js() -> String {
                // paint with, and the first one is what the e2e asserts on.\n\
                if ({first} === undefined) {first} = window.scrollY;\n\
              }}\n\
-             if (reached || (document.readyState === 'complete' && lastChance)) {{\n\
+             // Giving up is gated on the document having stopped GROWING, not\n\
+             // merely on `readyState === 'complete'`. `apply` scrolls by\n\
+             // clamping against the current height, so while the document is\n\
+             // still laying out a deep offset clamps to near the top; revealing\n\
+             // there is the flash — the body appears at ~0 and the post-load\n\
+             // settle then visibly jumps it down. `complete` does not mean the\n\
+             // height is final, so one extra frame of grace was far too little.\n\
+             const h = document.documentElement.scrollHeight;\n\
+             if (h === lastHeight) stable++; else {{ stable = 0; lastHeight = h; }}\n\
+             if (reached || (document.readyState === 'complete' && stable >= {stable_frames})) {{\n\
                done = true;\n\
                // Next frame, so the frame that lands the position is still the\n\
                // hidden one and the first visible frame is already correct.\n\
                requestAnimationFrame(reveal);\n\
                return;\n\
              }}\n\
-             if (document.readyState === 'complete') lastChance = true;\n\
              schedule();\n\
            }}\n\
            schedule();\n\
@@ -348,6 +369,7 @@ fn scroll_restore_js() -> String {
         nearest = nearest_source_element_js("parseInt(arg, 10)"),
         apply_global = APPLY_GLOBAL,
         first = FIRST_FRAME_GLOBAL,
+        stable_frames = STABLE_FRAMES,
     )
 }
 

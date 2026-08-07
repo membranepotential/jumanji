@@ -865,7 +865,14 @@ images and math fonts widen the gap.
   content-pipeline JS. It applies on `requestAnimationFrame`, whose callbacks
   run *before* the frame they belong to is painted, re-arming on
   `DOMContentLoaded` and `load` for a document still growing, and stopping once
-  the position is reached or `readyState === 'complete'`.
+  the position is reached — or, for a position that cannot be reached, once the
+  document has **stopped growing**: `readyState === 'complete'` *plus*
+  `STABLE_FRAMES` consecutive unchanged `scrollHeight` readings.
+  `complete` alone is not a statement that layout is final, and `apply` places
+  the position with `scrollTo`, which clamps against the height it finds — so
+  conceding on `complete` revealed the body at a near-top offset for any deep
+  position, which *was* the document-switch flash (2026-08-07). The height
+  check is what distinguishes "still laying out" from "genuinely too short".
 - **`html.jmnj-restoring body { visibility: hidden }` closes the gap the timing
   cannot**, a shell-toggled class on the same contract as `html.dark`. The
   reveal is unconditional and timer-backed: a page left permanently blank would
