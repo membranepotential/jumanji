@@ -10,13 +10,12 @@ dialect support. Linux-first (Arch, X11/i3wm).
 
 ## Now
 
-Shipped **v1.6.0** (tag + GitHub release + AUR PKGBUILD pointed at it). Two
-workstreams in flight on the open bugs below:
+Shipped **v1.6.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
-No workstream in flight — both diagnosis rounds were stopped by the user.
-Everything they produced is saved in `.flash-investigation/` (gitignored) with
-`HANDOFF.md` as the entry point: what was disproven, the current untested
-hypothesis, and the exact next experiment.
+No workstream in flight — both flash-diagnosis rounds were stopped by the user.
+Their output is saved in `.flash-investigation/` (gitignored), `HANDOFF.md` as
+the entry point: what was disproven, the untested hypothesis, the next
+experiment.
 
 ## Done (recent)
 
@@ -24,10 +23,12 @@ hypothesis, and the exact next experiment.
   (`InitialPosition` = `Top | Offset | Anchor | SourceLine`, DESIGN D12); text
   zoom inlined the same way; `background = true` / `--background`. Frame-capture
   harness + `first_frame_scroll_y` e2e observable.
+- **Build speed (2026-08-07)** — mold linker via `.cargo/config.toml` + dev
+  `debug = "line-tables-only"`: incremental rebuild 5.3s → 1.0s. `mold` is now
+  an AUR makedepends.
 - **v1.5.0 / v1.4.0 / v1.3.0** — jumplist breadcrumb, paginated `:` completion;
   Obsidian dialect (wikilinks, vault resolution, callouts, embeds, frontmatter).
-- **v1.2.x** — Neovim two-way sync plugin, 960px content column, NON_UNIQUE
-  GApplication (one process per window).
+- **v1.2.x** — Neovim sync plugin, 960px column, NON_UNIQUE GApplication.
 
 ## Next
 
