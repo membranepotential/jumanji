@@ -53,12 +53,6 @@ experiment.
 
 ## Open questions
 
-- ~~Should per-file zoom in `history` survive once zoom becomes sticky?~~
-  **Decided 2026-08-07:** yes, it survives — but it is the *default on open*,
-  consulted only when there is no live session zoom to inherit (cold start of a
-  window). Once the session has a zoom, it wins on every document switch. Follows
-  `docs/research/02-zathura.md:162-166` ("separate default-on-open from current
-  live setting"); no `history.toml` format change.
 - Is the two-frame background flash during a restore (the hide gate's known
   cost, noted as "next" in DEVLOG 2026-08-07) the same thing the user is seeing
   on document switch, or a separate defect? Answering this scopes item 1.
