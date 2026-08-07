@@ -12,10 +12,10 @@ dialect support. Linux-first (Arch, X11/i3wm).
 
 Shipped **v1.6.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
-No workstream in flight — both flash-diagnosis rounds were stopped by the user.
-Their output is saved in `.flash-investigation/` (gitignored), `HANDOFF.md` as
-the entry point: what was disproven, the untested hypothesis, the next
-experiment.
+**Awaiting user verification of the flash fix** (`8559b49`). Diagnosed by
+tracing an instrumented build against the user's own repro vault; investigation
+artifacts in `.flash-investigation/` (gitignored, `HANDOFF.md` first). No agent
+in flight.
 
 ## Done (recent)
 
@@ -32,24 +32,18 @@ experiment.
 
 ## Next
 
-1. **Flash on document switch is NOT fixed.** User-confirmed shape: the new
-   document is painted **at scroll 0**, then scrolls to the linked/stored
-   position — not a white frame, not the old document persisting. Happens on
-   **both** link-follows and jumplist `Ctrl-o`/`Ctrl-i`, so it's a property of
-   the document-switch path in general.
-
-   **Ruled out by trace evidence** (`.flash-investigation/traces/`): the position
-   is consumed *before* the load (app.rs:543-544) and is armed correctly on
-   switches (`open=Some("offset:45764")`); and there is exactly **one** load per
-   switch — the vault-rescan double load is startup-only (`equal=true` on every
-   switch, app.rs:500 short-circuits).
-
-   **Untested lead:** `setTimeout(reveal, 400)` at `src/shell/view.rs:290` is
-   unconditional, while `apply()`'s `scrollTo` clamps against the not-yet-final
-   document height. Layout slower than 400ms ⇒ body revealed at ~0, position
-   lands after. No fixture yet exceeds 400ms (~25-190ms observed), so this is
-   unproven — the next round needs JS-side reveal instrumentation and a
-   positive control. See `.flash-investigation/HANDOFF.md`.
+1. **Verify the flash fix on `board-reader/docs/index.md`** — the one machine
+   that reliably shows the bug. `8559b49` makes the restore loop concede only
+   after the document stops growing (3 unchanged `scrollHeight` frames) rather
+   than one frame after `readyState === 'complete'`; conceding early revealed
+   the body at a `scrollTo`-clamped near-top offset, and the post-load settle
+   then jumped it down. Measured: forcing `apply` to fail flips the restore from
+   `why=reached, reveal_y=24000` to `why=gaveup, reveal_y=0` — the reported
+   shape. **Never reproduced headlessly**, so tests passing is not evidence the
+   user-visible bug is gone. If it persists, the reproduction gap is the finding.
+2. **Startup double load** — real but separate: at launch the vault index goes
+   empty → populated, so `rescan_vault` fires a second full `render_and_load`
+   after the first already finished. Wasted parse/layout/paint on every start.
 
 ## Open questions
 
