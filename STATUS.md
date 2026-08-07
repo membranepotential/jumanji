@@ -13,11 +13,10 @@ dialect support. Linux-first (Arch, X11/i3wm).
 Shipped **v1.6.0** (tag + GitHub release + AUR PKGBUILD pointed at it). Two
 workstreams in flight on the open bugs below:
 
-- **flash-diag2** — re-diagnose the document-switch flash (Next 1). Round 1 was
-  stopped for a false negative (60fps video can't prove absence); its rig +
-  handoff live in `.flash-investigation/` (gitignored). Round 2 measures
-  `first_frame_scroll_y` instead of filming. State: running. Next: hand its
-  proposal to an implementer.
+No workstream in flight — both diagnosis rounds were stopped by the user.
+Everything they produced is saved in `.flash-investigation/` (gitignored) with
+`HANDOFF.md` as the entry point: what was disproven, the current untested
+hypothesis, and the exact next experiment.
 
 ## Done (recent)
 
@@ -38,17 +37,18 @@ workstreams in flight on the open bugs below:
    **both** link-follows and jumplist `Ctrl-o`/`Ctrl-i`, so it's a property of
    the document-switch path in general.
 
-   Verified: `pending_position` *is* consumed before the load
-   (`do_render_and_load`, `src/shell/app.rs:543-544`), so D12 does cover this
-   path — "position applied after paint" is not the explanation.
+   **Ruled out by trace evidence** (`.flash-investigation/traces/`): the position
+   is consumed *before* the load (app.rs:543-544) and is armed correctly on
+   switches (`open=Some("offset:45764")`); and there is exactly **one** load per
+   switch — the vault-rescan double load is startup-only (`equal=true` on every
+   switch, app.rs:500 short-circuits).
 
-   Leading hypothesis: a **second full load** per switch. `load_document` calls
-   `rescan_vault` + `do_render_and_load`; when the rescan lands and the index
-   differs (`app.rs:500`), it fires `render_and_load` again — and by then the
-   finished first load has reset `pending_position` to `Top`, so
-   `preserve_scroll` is true and an async scroll round-trip precedes a second
-   parse/layout/paint. Would also explain why a small static fixture never
-   reproduces it (identical index → early return → no second load).
+   **Untested lead:** `setTimeout(reveal, 400)` at `src/shell/view.rs:290` is
+   unconditional, while `apply()`'s `scrollTo` clamps against the not-yet-final
+   document height. Layout slower than 400ms ⇒ body revealed at ~0, position
+   lands after. No fixture yet exceeds 400ms (~25-190ms observed), so this is
+   unproven — the next round needs JS-side reveal instrumentation and a
+   positive control. See `.flash-investigation/HANDOFF.md`.
 
 ## Open questions
 
