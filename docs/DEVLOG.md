@@ -38,14 +38,16 @@ document genuinely too short still settles in ~3 frames, and the unconditional
 400ms failsafe still bounds the gate, so the never-blank-page guarantee
 (CLAUDE.md) is untouched.
 
-**Verification.** 300 unit + 48 e2e green on three consecutive full runs. Not
-yet confirmed against the user's real repro — the flash was never reproduced
-headlessly (every fixture placed correctly, `why=reached`), so the last word
-belongs to the machine that shows it.
+**Verification.** 300 unit + 48 e2e green on three consecutive full runs, and
+**confirmed gone by the user on `board-reader/docs`** — the machine that
+reliably showed it. Worth recording that the headless suite never reproduced the
+bug (every fixture placed correctly, `why=reached`): the fixtures load too fast
+to catch a document mid-growth, so the green suite was only ever evidence of no
+regression. The reproduction gap is still open as a testing weakness.
 
-**Next:** confirm on `board-reader/docs`. If it persists, the reproduction gap
-itself is the finding — see `.flash-investigation/HANDOFF.md`. Also open: the
-startup double load, real but separate.
+**Next:** the startup double load — real but separate: at launch the vault index
+goes empty → populated, so `rescan_vault` fires a second full `render_and_load`
+after the first already finished.
 
 ## 2026-08-07 — incremental rebuilds: 5.3s → 1.0s
 
