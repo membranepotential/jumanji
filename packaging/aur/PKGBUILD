@@ -7,7 +7,7 @@ arch=('x86_64')
 url="https://github.com/membranepotential/jumanji"
 license=('MIT')
 depends=('gtk4' 'webkitgtk-6.0')
-makedepends=('cargo')
+makedepends=('cargo' 'mold')
 optdepends=('xdg-utils: register jumanji as the default handler for text/markdown')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/membranepotential/jumanji/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('18183169b22be186da70665b8ff4b8f2e2e9c68ae356cfcc72123c4751df3879')
@@ -24,11 +24,12 @@ build() {
     export CARGO_TARGET_DIR=target
     # syntect pulls in onig_sys, which compiles bundled oniguruma C sources
     # via the `cc` crate using $CFLAGS. The distro default CFLAGS carries
-    # -flto=auto, which produces GCC-only LTO bitcode objects that rustc's
-    # default lld linker cannot resolve (undefined onig_* symbols at link
-    # time). -ffat-lto-objects keeps real machine code alongside the LTO
-    # IR so lld can link it. Same fix as the official `bat` package (also
-    # syntect+onig).
+    # -flto=auto, which produces GCC-only LTO bitcode objects that the
+    # linker cannot resolve (undefined onig_* symbols at link time).
+    # -ffat-lto-objects keeps real machine code alongside the LTO IR so the
+    # linker can use it. Still required with mold (see .cargo/config.toml),
+    # which no more consumes GCC LTO bitcode than lld does. Same fix as the
+    # official `bat` package (also syntect+onig).
     CFLAGS+=' -ffat-lto-objects -w'
     cargo build --frozen --release
 }

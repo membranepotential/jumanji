@@ -1,0 +1,11 @@
+# Link with mold instead of GNU ld.
+#
+# jumanji links GTK4 + WebKitGTK 6, which makes the link step dominate
+# incremental rebuilds: a one-line change in src/ spends most of its wall
+# clock in the linker, not in rustc. mold cuts that substantially.
+#
+# gcc has supported -fuse-ld=mold since GCC 12, so this needs no clang --
+# only the `mold` package (Arch: `pacman -S mold`, and a makedepends entry
+# in packaging/aur/PKGBUILD).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

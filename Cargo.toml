@@ -20,6 +20,14 @@ toml = "1.1.2"
 two-face = "0.5.1"
 webkit6 = "0.6.1"
 
+# Line tables instead of full debuginfo: panics and backtraces keep their
+# file:line, which is what we actually read, but the linker no longer has to
+# haul around per-variable DWARF for GTK4 + WebKitGTK. Cheaper links, much
+# smaller target/. Trade-off: no inspecting locals in gdb/lldb -- raise this
+# back to `true` for a debugging session if you need that.
+[profile.dev]
+debug = "line-tables-only"
+
 # Dependencies at opt-level 2 even in dev builds: the content pipeline (comrak,
 # syntect, merman) is 10-20x slower unoptimized, which makes `cargo run` starts
 # and live reloads drag. The workspace crate itself stays at opt-level 0 for

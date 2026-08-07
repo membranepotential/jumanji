@@ -2,6 +2,39 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-08-07 — incremental rebuilds: 5.3s → 1.0s
+
+**Reported:** rebuilds feel slow.
+
+**Measured.** A one-line edit to `src/main.rs` took **5.3s**. Almost none of that
+was rustc — jumanji is a single crate linking GTK4 + WebKitGTK 6, so a trivial
+edit recompiles one crate and then spends the bulk of its wall clock in the
+linker. The repo had no `.cargo/config.toml`, so it was linking with GNU `ld`,
+the slowest linker on the box, while `mold` and `lld` sat installed and unused.
+
+**Two changes, both config, no code:**
+
+- `.cargo/config.toml` sets `-C link-arg=-fuse-ld=mold`. gcc has supported
+  `-fuse-ld=mold` since GCC 12 (16.1.1 here), so this needs no `clang` — the
+  only new build requirement is `mold` itself, added to the AUR `makedepends`.
+- `[profile.dev] debug = "line-tables-only"` in `Cargo.toml`. Panics and
+  backtraces keep file:line (`.debug_line` verified present in the linked
+  binary); what goes away is per-variable DWARF, i.e. inspecting locals in
+  gdb/lldb. Raise it back to `true` for a debugging session if you need that.
+
+**Result: 5.3s → 1.0s** (1.02 / 1.00 / 1.09 over three runs), a 5.2x cut.
+Verified mold actually linked it (`.comment` records `mold 2.41.0`). Full clean
+rebuild is 2m35s. 300 unit + 48 e2e tests pass, clippy clean.
+
+Note the config is repo-wide, not dev-only — cargo has no per-profile
+`rustflags` — so release and packaging builds link with mold too. The
+`-ffat-lto-objects` workaround in the PKGBUILD is still required: mold no more
+consumes GCC LTO bitcode from `onig_sys` than lld does.
+
+**Next:** `target/` is 22G and still holds the superseded `ld`-built,
+full-debuginfo artifacts. A `cargo clean` reclaims it at the cost of one 2m35s
+rebuild — worth doing when convenient, not urgent.
+
 ## 2026-08-07 — zoom sticks across navigation
 
 **Reported:** reading at 130% and clicking a wikilink drops you back to 100%.
