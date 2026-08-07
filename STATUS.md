@@ -12,11 +12,16 @@ dialect support. Linux-first (Arch, X11/i3wm).
 
 Shipped **v1.6.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
-Both open bugs are fixed and confirmed; working tree clean on `main`, unreleased.
-No workstream in flight. Next move is a release, or the startup double load.
+Shipped **v1.7.0** (tag + GitHub release + AUR PKGBUILD pointed at it); working
+tree clean on `main`. No workstream in flight.
 
 ## Done (recent)
 
+- **v1.7.0** — zoom is a session setting that carries across navigation
+  (history's per-file value demoted to *default on open*, DESIGN D5a); the
+  document-switch flash is gone — the restore gate now concedes only once
+  `scrollHeight` holds steady, not one frame after `readyState === 'complete'`.
+  User-confirmed on the repro vault.
 - **v1.6.0** — reading position rides into the load as `data-jmnj-open`
   (`InitialPosition` = `Top | Offset | Anchor | SourceLine`, DESIGN D12); text
   zoom inlined the same way; `background = true` / `--background`. Frame-capture
@@ -30,13 +35,10 @@ No workstream in flight. Next move is a release, or the startup double load.
 
 ## Next
 
-1. **Release** the two fixes (zoom stickiness + document-switch flash). Both are
-   user-visible; minor bump per the release checklist in CLAUDE.md (tag **and**
-   `gh release`, then repoint the AUR PKGBUILD).
-2. **Startup double load** — real but separate: at launch the vault index goes
+1. **Startup double load** — real but separate: at launch the vault index goes
    empty → populated, so `rescan_vault` fires a second full `render_and_load`
    after the first already finished. Wasted parse/layout/paint on every start.
-3. **The e2e suite cannot see this class of bug.** Every fixture loads too fast
+2. **The e2e suite cannot see this class of bug.** Every fixture loads too fast
    to catch a document mid-growth, so the flash never reproduced headlessly and
    a green suite proved only "no regression". A fixture whose height grows after
    `readyState === 'complete'` would turn the restore gate into something tests
@@ -44,6 +46,8 @@ No workstream in flight. Next move is a release, or the startup double load.
 
 ## Open questions
 
-- Is the two-frame background flash during a restore (the hide gate's known
-  cost, noted as "next" in DEVLOG 2026-08-07) the same thing the user is seeing
-  on document switch, or a separate defect? Answering this scopes item 1.
+- ~~Was the two-frame background flash during a restore the same thing seen on
+  document switch?~~ **Answered 2026-08-07: separate.** The reported flash was
+  the restore loop conceding early and revealing at a `scrollTo`-clamped offset
+  (fixed in v1.7.0). The hide gate's own two-frame `--bg` cost is a different,
+  much smaller thing and remains as designed.
