@@ -8,11 +8,17 @@
 use std::sync::OnceLock;
 
 use comrak::nodes::{AstNode, NodeHtmlBlock, NodeValue};
+use rayon::prelude::*;
 use syntect::highlighting::Theme;
 use syntect::html::{ClassStyle, ClassedHTMLGenerator, css_for_theme_with_class_style};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 use two_face::theme::EmbeddedThemeName;
+
+/// Below this many fences, sequential highlighting is faster than paying for
+/// rayon's thread-pool dispatch — most documents (the demo, a README) never
+/// cross it, so they pay zero parallel overhead.
+const PARALLEL_THRESHOLD: usize = 4;
 
 /// Spaced classes keep the generated CSS selectors readable (`.comment`,
 /// `.keyword`, …) and match [`css_for_theme_with_class_style`] output.
@@ -102,18 +108,40 @@ fn theme_css(name: EmbeddedThemeName) -> String {
 /// AST pass: replace every remaining fenced/indented code block with its
 /// highlighted HTML. Run *after* the mermaid pass so mermaid fences (already
 /// turned into HTML blocks) are left untouched.
+///
+/// The comrak arena (`RefCell`-backed, `!Sync`) can't cross thread
+/// boundaries, so this runs in three phases: collect node references plus
+/// owned `(info, literal)` pairs on the main thread, highlight the owned
+/// pairs in parallel (pure computation, no arena access), then write the
+/// resulting HTML back into the collected nodes sequentially. Below
+/// [`PARALLEL_THRESHOLD`] fences it just highlights sequentially.
 pub fn highlight_code_blocks<'a>(root: &'a AstNode<'a>) {
+    let mut nodes: Vec<&'a AstNode<'a>> = Vec::new();
+    let mut inputs: Vec<(String, String)> = Vec::new();
     for node in root.descendants() {
-        let replacement = match &node.data.borrow().value {
-            NodeValue::CodeBlock(block) => Some(highlight_block(&block.info, &block.literal)),
-            _ => None,
-        };
-        if let Some(html) = replacement {
-            node.data.borrow_mut().value = NodeValue::HtmlBlock(NodeHtmlBlock {
-                block_type: 0,
-                literal: html,
-            });
+        if let NodeValue::CodeBlock(block) = &node.data.borrow().value {
+            nodes.push(node);
+            inputs.push((block.info.clone(), block.literal.clone()));
         }
+    }
+
+    let htmls: Vec<String> = if inputs.len() < PARALLEL_THRESHOLD {
+        inputs
+            .iter()
+            .map(|(info, code)| highlight_block(info, code))
+            .collect()
+    } else {
+        inputs
+            .par_iter()
+            .map(|(info, code)| highlight_block(info, code))
+            .collect()
+    };
+
+    for (node, html) in nodes.into_iter().zip(htmls) {
+        node.data.borrow_mut().value = NodeValue::HtmlBlock(NodeHtmlBlock {
+            block_type: 0,
+            literal: html,
+        });
     }
 }
 

@@ -13,6 +13,7 @@ merman = { version = "0.7.0", features = ["render"] }
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
 pulldown-latex = "0.7.1"
+rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 syntect = "5.3.0"
 thiserror = "2.0.18"

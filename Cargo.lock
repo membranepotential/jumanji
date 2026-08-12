@@ -1699,6 +1699,7 @@ dependencies = [
  "notify",
  "notify-debouncer-full",
  "pulldown-latex",
+ "rayon",
  "serde",
  "syntect",
  "thiserror 2.0.18",
