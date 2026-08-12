@@ -1,6 +1,3 @@
-mod core;
-mod shell;
-
 use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -9,8 +6,9 @@ use std::process::{Command, ExitCode, Stdio};
 use clap::{CommandFactory, Parser};
 use gtk::glib;
 
-use crate::core::config::{self, Config};
-use crate::core::source::Source;
+use jumanji::core::config::{self, Config};
+use jumanji::core::source::Source;
+use jumanji::shell;
 
 /// A zathura-inspired markdown reader.
 #[derive(Debug, Parser)]
