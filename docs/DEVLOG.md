@@ -2,6 +2,52 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-08-12 — the e2e suite can now see a restore flash
+
+Closes STATUS "Next" #1. The v1.7.0 flash fix (the restore gate conceding only
+once `scrollHeight` holds steady) shipped with no test that could fail without
+it: every fixture reached full height within a frame or two of
+`readyState === 'complete'`, so a restore always landed on the first try and a
+green suite proved only "no regression".
+
+Two things were missing, and both are now in:
+
+**A fixture that grows after the load completes.** `growing_fixture()` in
+`tests/e2e.rs` emits a spacer whose height a CSS `@keyframes` animation drives
+0 → 8000 px over `GROW_MS` (200 ms). No JS is involved and none is possible —
+the page CSP is `default-src 'none'` with `style-src 'unsafe-inline'`, and
+comrak passes a raw `<style>` block through, so an inline stylesheet is the one
+lever a fixture has over layout timing. Animating `height` is layout-affecting,
+so `scrollHeight` really does climb frame by frame, and `visibility: hidden`
+(the gate itself) does not pause animations. Generated into a temp dir, not
+checked in: it is a timing fixture, not content.
+
+**An observable for the frame the reader actually sees.**
+`first_frame_scroll_y` measures placement, and the gate hides the early frames
+— so for a growing document it reads near-top whether or not there was a flash.
+The restore script now also records `{y, failsafe}` at the moment it unhides
+the body, surfaced through `GetState` as `reveal_scroll_y` and
+`reveal_failsafe`. Asserting the failsafe did *not* fire matters as much as the
+offset: a reveal by the 400 ms timer is the gate giving up, which is correct as
+a last resort (a blank page is worse) but is not a passing restore.
+
+Two tests use them, one per caller: live reload
+(`render_and_load(preserve_scroll)`) and the reported flash path, `Ctrl-o` back
+into a document last read at the bottom (`load_document` +
+`InitialPosition::Offset`, parsed from scratch). Each also self-checks the
+fixture — an early frame far short of the target is the proof the document was
+genuinely mid-growth, so the test cannot pass vacuously if the animation ever
+stops working.
+
+Validated in both directions, which is what round 1 of the flash investigation
+failed to do. Green: reveal at the exact target (~11.9k px), first painted
+frame at ~34% of it, no failsafe — and still green with every core saturated.
+Red: `STABLE_FRAMES` set to 0 (the pre-v1.7.0 concede-on-`complete` behaviour)
+reveals at ~4.0k px and both tests fail with the offsets in the message.
+
+Next: nothing outstanding on the gate. The unreleased perf pass plus this ships
+as the next minor.
+
 ## 2026-08-12 — performance pass: parallel highlighting, mermaid renderer reuse, deferred initial render, scroll fast path
 
 Four targeted fixes driven by the new benchmarks (entry below). Quiet-machine

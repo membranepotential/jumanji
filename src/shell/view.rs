@@ -135,6 +135,21 @@ pub struct ViewportState {
     /// anyway, which is exactly why the *visual* proof is the frame-capture
     /// harness and this is the regression sentinel.
     pub first_frame_scroll_y: f64,
+    /// The scroll offset the body was **revealed** at — the first frame the
+    /// reader can actually see — or `-1` while still hidden / for a document
+    /// that opened at the top and installed no restore script.
+    ///
+    /// The companion to [`first_frame_scroll_y`](Self::first_frame_scroll_y),
+    /// and the sharper of the two: the gate hides the early frames, so a
+    /// document that is still growing legitimately paints its first (hidden)
+    /// frames at a clamped, near-top offset. Only the offset at reveal says
+    /// whether the reader saw the flash.
+    pub reveal_scroll_y: f64,
+    /// Whether the reveal came from the unconditional 400 ms failsafe rather
+    /// than from the position being reached. `true` means the page was unhidden
+    /// wherever it happened to be — correct as a last resort (a blank page is
+    /// worse), and the thing a restore-gate e2e must assert did *not* happen.
+    pub revealed_by_failsafe: bool,
     /// Whether `<html>` still carries `jmnj-restoring`, i.e. the body is still
     /// hidden waiting for its opening position. Transient by design — it must
     /// be `false` on any settled document, and an e2e that finds it `true` has
@@ -227,6 +242,12 @@ const RESTORING_CLASS: &str = "jmnj-restoring";
 /// it is `undefined` again on every document.
 const FIRST_FRAME_GLOBAL: &str = "window.__jmnj_first_frame";
 
+/// The page global the restore script records the reveal in: `{y, failsafe}`,
+/// the scroll offset the body was *unhidden* at and whether the unconditional
+/// timer was what unhid it. Read back by [`View::scroll_state`] into
+/// [`ViewportState::reveal_scroll_y`] / [`ViewportState::revealed_by_failsafe`].
+const REVEAL_GLOBAL: &str = "window.__jmnj_reveal";
+
 /// The page global the restore script parks its `apply` on, so the shell can
 /// re-run *the same* placement once the load has fully finished (see
 /// [`View::settle_initial_position`]) without a second copy of the rules.
@@ -296,11 +317,17 @@ fn scroll_restore_js() -> String {
            const kind = spec.slice(0, sep), arg = spec.slice(sep + 1);\n\
            root.classList.add('{cls}');\n\
            let revealed = false;\n\
-           const reveal = () => {{ if (revealed) return; \
-             revealed = true; root.classList.remove('{cls}'); }};\n\
+           // `failsafe` records *why* the body was unhidden. The offset is read\n\
+           // here and nowhere else: this is the frame the reader's eye first\n\
+           // gets, so it — not the first laid-out frame, which the gate hides —\n\
+           // is what an e2e must assert on to see a flash at all.\n\
+           const reveal = (failsafe) => {{ if (revealed) return; \
+             revealed = true; \
+             {reveal_global} = {{ y: window.scrollY, failsafe: failsafe }}; \
+             root.classList.remove('{cls}'); }};\n\
            // The failsafe, and the reason the gate is safe to have at all: it\n\
            // is not conditional on anything above working.\n\
-           setTimeout(reveal, 400);\n\
+           setTimeout(() => reveal(true), 400);\n\
            // Returns whether the position is now actually reached; anything\n\
            // short of that keeps the loop running.\n\
            const apply = () => {{\n\
@@ -355,7 +382,7 @@ fn scroll_restore_js() -> String {
                done = true;\n\
                // Next frame, so the frame that lands the position is still the\n\
                // hidden one and the first visible frame is already correct.\n\
-               requestAnimationFrame(reveal);\n\
+               requestAnimationFrame(() => reveal(false));\n\
                return;\n\
              }}\n\
              schedule();\n\
@@ -369,6 +396,7 @@ fn scroll_restore_js() -> String {
         nearest = nearest_source_element_js("parseInt(arg, 10)"),
         apply_global = APPLY_GLOBAL,
         first = FIRST_FRAME_GLOBAL,
+        reveal_global = REVEAL_GLOBAL,
         stable_frames = STABLE_FRAMES,
     )
 }
@@ -858,6 +886,8 @@ impl View {
         let script = format!(
             "{HEAD}, ff: typeof {FIRST_FRAME_GLOBAL} === 'number' \
              ? {FIRST_FRAME_GLOBAL} : -1, \
+             rv: {REVEAL_GLOBAL} ? {REVEAL_GLOBAL}.y : -1, \
+             rt: {REVEAL_GLOBAL} ? {REVEAL_GLOBAL}.failsafe : false, \
              rs: d.classList.contains('{RESTORING_CLASS}') }}; }})()"
         );
         self.webview.evaluate_javascript(
@@ -884,6 +914,10 @@ impl View {
                         fence_width: num("rw"),
                         frontmatter_width: num("fw"),
                         first_frame_scroll_y: num("ff"),
+                        reveal_scroll_y: num("rv"),
+                        revealed_by_failsafe: v
+                            .object_get_property("rt")
+                            .is_some_and(|b| b.to_boolean()),
                         restoring: v.object_get_property("rs").is_some_and(|b| b.to_boolean()),
                         fn_color,
                     });
@@ -901,6 +935,8 @@ impl View {
                     frontmatter_width: 0.0,
                     // Matches the in-page sentinel: nothing was recorded.
                     first_frame_scroll_y: -1.0,
+                    reveal_scroll_y: -1.0,
+                    revealed_by_failsafe: false,
                     restoring: false,
                     fn_color: String::new(),
                 }),

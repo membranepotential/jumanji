@@ -124,6 +124,19 @@ struct State {
     /// from "gets there without flashing the top first" — the old,
     /// load-finished restore passed the former and failed the latter.
     first_frame_scroll_y: f64,
+    /// The scroll offset the body was **revealed** at — the first frame the
+    /// reader can actually see — or `-1` while still hidden, and for a document
+    /// that opened at the top and installed no restore script.
+    ///
+    /// Sharper than `first_frame_scroll_y` for a document that is still growing
+    /// when it loads: the gate hides the early frames, so those legitimately
+    /// paint at a clamped, near-top offset. Only this one says what the reader
+    /// saw.
+    reveal_scroll_y: f64,
+    /// Whether the reveal came from the unconditional 400 ms failsafe instead of
+    /// the position being reached. A restore that concedes to the timer has shown
+    /// the reader whatever offset it happened to be at.
+    reveal_failsafe: bool,
     /// Whether the body is still hidden waiting for its opening position. Must
     /// be false on any settled document — the guard on the hide-until-restored
     /// gate's one catastrophic failure mode, a permanently blank page.
@@ -162,6 +175,8 @@ impl State {
             fence_width: field(json, "fence_width")?.parse().ok()?,
             frontmatter_width: field(json, "frontmatter_width")?.parse().ok()?,
             first_frame_scroll_y: field(json, "first_frame_scroll_y")?.parse().ok()?,
+            reveal_scroll_y: field(json, "reveal_scroll_y")?.parse().ok()?,
+            reveal_failsafe: field(json, "reveal_failsafe")? == "true",
             restoring: field(json, "restoring")? == "true",
             fn_color: field_str(json, "fn_color")?,
             dark: field(json, "dark")? == "true",
@@ -1262,6 +1277,193 @@ fn live_reload_keeps_text_zoom_and_position_from_the_first_frame() {
         reloaded.first_frame_scroll_y
     );
     h.wait_for_state("body revealed after the live reload", SETTLE, |s| {
+        !s.restoring
+    });
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// The growing-document fixture: the restore gate's positive control
+// ---------------------------------------------------------------------------
+
+/// How long the fixture below keeps growing, in ms. Two constraints bound it:
+/// it must outlast `readyState === 'complete'` by several frames (or the gate
+/// would be right to concede and the test proves nothing), and the whole
+/// restore must still finish inside the restore script's unconditional 400 ms
+/// failsafe (or a *correct* gate reveals by timer and the test fails for the
+/// wrong reason). Around 200 ms sits comfortably between the two under Xvfb;
+/// `reveal_failsafe` is asserted false so a machine slow enough to break that
+/// budget fails loudly rather than silently passing on the timer.
+const GROW_MS: u32 = 200;
+
+/// Wait out the fixture's growth. Nothing observable marks the end of a CSS
+/// animation from outside the page, and the height it settles at is what every
+/// assertion below is relative to — so this is one place where a sleep is the
+/// honest instrument rather than a guess. Generous multiple of [`GROW_MS`]; the
+/// `scroll_percent == 100` check at each call site is what actually proves the
+/// document had stopped growing.
+fn wait_out_growth() {
+    std::thread::sleep(Duration::from_millis(GROW_MS as u64 * 4));
+}
+
+/// A document whose height keeps growing for [`GROW_MS`] *after* it has
+/// finished loading — the fixture the e2e suite had no way to express, and the
+/// only condition under which the restore gate's real job is visible.
+///
+/// Every other fixture reaches its final height within a frame or two of
+/// `readyState === 'complete'`, so a restore always landed on the first try and
+/// a green suite proved only "no regression" (STATUS, 2026-08-12). Growth comes
+/// from a CSS `height` animation on a spacer: layout-affecting, so
+/// `scrollHeight` genuinely climbs frame by frame, wall-clock-timed rather than
+/// dependent on machine speed, and needing no JS — inline `<style>` is the one
+/// thing the page CSP allows (`style-src 'unsafe-inline'`, `core::pipeline`),
+/// and comrak passes the raw block through.
+///
+/// This is what the reader's real documents do slowly (late-laid-out images,
+/// heavy fences, mermaid) and what Xvfb fixtures were always too fast to do at
+/// all. While it grows, `window.scrollTo(0, deep)` clamps to near the top; a
+/// gate that conceded there would reveal the flash.
+/// `tail` is appended at the very end, i.e. inside the viewport once the
+/// document is scrolled to the bottom — where a test that needs to *leave* from
+/// a deep offset puts its link.
+fn growing_fixture(tail: &str) -> String {
+    let filler = filler();
+    format!(
+        "# Growing document\n\n\
+         <style>\n\
+         .jmnj-e2e-spacer {{ display: block; height: 0; \
+           animation: jmnj-e2e-grow {GROW_MS}ms linear forwards; }}\n\
+         @keyframes jmnj-e2e-grow {{ from {{ height: 0px; }} to {{ height: 8000px; }} }}\n\
+         </style>\n\n\
+         {filler}\
+         <div class=\"jmnj-e2e-spacer\"></div>\n\n\
+         ## Tail\n\n\
+         The last line, reachable only once the spacer has finished growing.\n\n\
+         {tail}\n"
+    )
+}
+
+/// Shared assertions for a restore into [`growing_fixture`]: the reader's first
+/// *visible* frame is already at `target`, and it got there by the position
+/// being reached, not by the failsafe giving up.
+fn assert_restored_without_flash(s: &State, target: f64, path: &str) {
+    assert!(
+        !s.reveal_failsafe,
+        "{path}: the body was revealed by the 400 ms failsafe, not by reaching \
+         the position — reveal offset {} (target {target})",
+        s.reveal_scroll_y
+    );
+    assert!(
+        (s.reveal_scroll_y - target).abs() < 20.0,
+        "{path}: the first frame the reader can see must already be at the \
+         restored offset {target}, got {} (first painted, still hidden: {})",
+        s.reveal_scroll_y,
+        s.first_frame_scroll_y
+    );
+    // Self-check on the fixture, not on the reader: if the spacer had failed to
+    // animate, the document would have been full height from the first frame,
+    // the restore would have landed immediately and the assertions above would
+    // pass without ever exercising the gate. An early frame far short of the
+    // target is the proof that the document really was mid-growth.
+    assert!(
+        s.first_frame_scroll_y >= 0.0 && s.first_frame_scroll_y < target * 0.75,
+        "{path}: fixture did not grow — the first painted frame was already at \
+         {} of a {target} target, so the gate was never under test",
+        s.first_frame_scroll_y
+    );
+}
+
+#[test]
+fn reload_of_a_growing_document_reveals_only_at_the_restored_offset() {
+    // The live-reload restore path (`render_and_load(preserve_scroll)`) against a
+    // document that is still laying out when the position is applied. `scrollTo`
+    // clamps against the height it finds, so every frame until the spacer stops
+    // growing places the offset short — the gate has to hold the body hidden
+    // across all of them.
+    let dir = temp_vault("growreload");
+    let file = dir.join("growing.md");
+    std::fs::write(&file, growing_fixture("")).expect("write fixture");
+
+    let Some((_g, h)) = setup_file(file.clone()) else {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+
+    // The real bottom, at full height — an offset the reload can only honour
+    // once the document has grown back into it.
+    wait_out_growth();
+    h.key(&["shift+g"]);
+    let bottom = h
+        .wait_for_state("scrolled to the settled bottom", SETTLE, |s| {
+            s.scroll_y > 1000.0 && s.scroll_percent == 100
+        })
+        .scroll_y;
+
+    let content = std::fs::read_to_string(&file).expect("read fixture");
+    std::fs::write(&file, format!("{content}\n")).expect("touch fixture");
+
+    let reloaded = h.wait_for_state(
+        "the reload reveals its body",
+        Duration::from_secs(10),
+        |s| s.reveal_scroll_y > 0.0,
+    );
+    assert_restored_without_flash(&reloaded, bottom, "live reload");
+    h.wait_for_state("body revealed after the live reload", SETTLE, |s| {
+        !s.restoring
+    });
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn jumplist_return_to_a_growing_document_reveals_only_at_the_stored_offset() {
+    // The path the reader actually reported the flash on: leaving a document
+    // read deep down, then walking the jumplist back into it. Unlike the reload
+    // above this goes through `load_document` with `InitialPosition::Offset` and
+    // parses the document from scratch — the same gate, a different caller.
+    let Some(_g) = setup_guard() else { return };
+    let dir = temp_vault("growjump");
+    // The link sits after the tail so it is on screen at the bottom: the hint
+    // overlay only labels links inside the viewport, and the departure has to
+    // happen *from* the deep offset for the return to restore one.
+    std::fs::write(
+        dir.join("growing.md"),
+        growing_fixture("Leaving from down here: [[other]]"),
+    )
+    .expect("write fixture");
+    std::fs::write(dir.join("other.md"), "# Other\n\nA short note.\n").expect("write other");
+
+    let h = Harness::launch_file_in_dir(dir.join("growing.md"), Some(dir.clone()));
+    wait_out_growth();
+    h.key(&["shift+g"]);
+    let bottom = h
+        .wait_for_state("scrolled to the settled bottom", SETTLE, |s| {
+            s.scroll_y > 1000.0 && s.scroll_percent == 100
+        })
+        .scroll_y;
+
+    h.key(&["f"]);
+    h.wait_for_state("hint overlay active", SETTLE, |s| s.mode == "hint");
+    h.key(&["a"]);
+    h.wait_for_state("the wikilink opens the other note", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("other.md") && s.loaded
+    });
+
+    // Back across the file boundary, to the offset the jumplist stored on
+    // departure — a fresh load of a document that has to grow into it again.
+    h.key(&["ctrl+o"]);
+    // Gate on the file too: the reveal globals live in the page, so a poll that
+    // catches the outgoing document would otherwise read *its* reveal.
+    let returned = h.wait_for_state(
+        "Ctrl-o reopens the growing note and reveals it",
+        Duration::from_secs(10),
+        |s| s.file.ends_with("growing.md") && s.reveal_scroll_y > 0.0,
+    );
+    assert_restored_without_flash(&returned, bottom, "jumplist back");
+    h.wait_for_state("body revealed after the jumplist hop", SETTLE, |s| {
         !s.restoring
     });
 

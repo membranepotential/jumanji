@@ -890,6 +890,20 @@ load-finished restore passed a "lands in the right place" assertion the whole
 time, which is why the e2e observable is `first_frame_scroll_y`: the offset the
 *first* painted frame was placed at, recorded from inside the page.
 
+That observable is necessary but not sufficient, and the 2026-08-12 gap says
+why: with the gate in place the early frames are *hidden*, so a document still
+growing legitimately paints them at a clamped, near-top offset — and no e2e
+fixture grew after `complete` in the first place, so the suite could not
+reproduce the flash even in principle. Both halves are now covered: the page
+also records **`reveal_scroll_y`** and **`reveal_failsafe`** — the offset the
+body was unhidden at, and whether the 400 ms timer is what unhid it, i.e. the
+first frame the reader can actually see and how it was earned — and the suite
+carries a fixture that keeps growing for ~200 ms after `complete` (a CSS
+`height` animation; inline `<style>` is CSP-allowed, JS is not). Weakening
+`STABLE_FRAMES` to the pre-fix behaviour turns both restore tests red at
+~34% of the target offset, so the gate is now defended by a test that has been
+shown to fail without it.
+
 ## Non-goals
 
 - Editing. Ever. Pair with an editor instead (D7).

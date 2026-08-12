@@ -1186,9 +1186,10 @@ fn expand_env_token(token: &str) -> String {
 /// The viewport widths (`viewport_width`, `doc_scroll_width`, `diagram_width`,
 /// `math_width`) let e2e tests assert the reflow invariants and that MathML laid
 /// out with nonzero geometry; `fn_color` lets e2e assert the dark-mode
-/// syntax-highlight scoping fix; `first_frame_scroll_y` lets e2e assert the
-/// no-flash property (the *first* painted frame's offset, not just the final
-/// one); the rest are unchanged.
+/// syntax-highlight scoping fix; `first_frame_scroll_y` and `reveal_scroll_y`
+/// let e2e assert the no-flash property (the *first* painted frame's offset and
+/// the offset the body was unhidden at, not just the final one); the rest are
+/// unchanged.
 #[allow(clippy::too_many_arguments)]
 fn state_json(
     file: &str,
@@ -1210,7 +1211,9 @@ fn state_json(
          \"doc_scroll_width\":{doc_scroll_width},\"diagram_width\":{diagram_width},\
          \"math_width\":{math_width},\"msup_shift_ratio\":{msup_shift_ratio},\
          \"fence_width\":{fence_width},\"frontmatter_width\":{frontmatter_width},\
-         \"first_frame_scroll_y\":{first_frame_scroll_y},\"restoring\":{restoring},\
+         \"first_frame_scroll_y\":{first_frame_scroll_y},\
+         \"reveal_scroll_y\":{reveal_scroll_y},\
+         \"reveal_failsafe\":{reveal_failsafe},\"restoring\":{restoring},\
          \"fn_color\":{fn_color},\
          \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded},\
@@ -1228,6 +1231,8 @@ fn state_json(
         fence_width = vs.fence_width,
         frontmatter_width = vs.frontmatter_width,
         first_frame_scroll_y = vs.first_frame_scroll_y,
+        reveal_scroll_y = vs.reveal_scroll_y,
+        reveal_failsafe = vs.revealed_by_failsafe,
         restoring = vs.restoring,
         fn_color = json_string(&vs.fn_color),
         mode = json_string(mode),

@@ -47,6 +47,37 @@ Note that `Welcome.md` puts its link list immediately under the title **on
 purpose**: the hint overlay only labels links inside the viewport, so a link
 pushed below the fold takes no label and the test would see "no links in view".
 
+### The growing fixture (`growing_fixture`)
+
+Generated into a temp dir rather than checked in, because it is a *timing*
+fixture, not content: a spacer `<div>` whose height a CSS `@keyframes`
+animation drives from 0 to 8000 px over `GROW_MS` (200 ms), so the document
+keeps growing for ~200 ms **after** `readyState === 'complete'`.
+
+That is the one condition under which the restore gate does any work. Every
+other fixture reaches its final height within a frame or two of `complete`, so
+a restore always lands on the first try — which is why the suite could not see
+the v1.7.0 document-switch flash at all, and a green run proved only "no
+regression". While the document is short, `window.scrollTo(0, deep)` clamps to
+near the top; a gate that conceded there would reveal the flash.
+
+Mechanics worth knowing before editing it:
+
+- **No JS is involved.** The page CSP allows `style-src 'unsafe-inline'` and
+  comrak renders raw HTML blocks verbatim, so an inline `<style>` is the one
+  lever a fixture has over layout timing. `visibility: hidden` (the gate) does
+  not stop animations, and animating `height` is layout-affecting, so
+  `scrollHeight` genuinely climbs frame by frame.
+- **`GROW_MS` is bounded on both sides.** It must outlast `complete` by several
+  frames (or the gate is right to concede and the test proves nothing), and the
+  whole restore must still finish inside the restore script's unconditional
+  400 ms failsafe (or a *correct* gate reveals by timer). Measured on a quiet
+  machine and with every core saturated: reveal at the exact target, first
+  painted frame at ~34% of it — comfortable margins at both ends.
+- **The tests wait the growth out before measuring the bottom** — `G` pressed
+  mid-growth lands on a bottom that then moves. `wait_out_growth()` plus a
+  `scroll_percent == 100` predicate is the guard.
+
 ## System requirements & the skip gate
 
 The harness shells out to three tools. On Arch:
@@ -81,6 +112,8 @@ state):
 | `wikilink_follows_across_vault_notes` | launched *inside* `demo/vault`, `f`+`a` on `Welcome.md` opens `Concepts/Callouts.md` — CWD rooting, indexing and `[[…]]` routing end to end |
 | `wikilink_heading_fragment_scrolls_target_document` | `[[Target#Folding]]` opens the target **and** scrolls to the anchor (the `pending_anchor` path) |
 | `unresolved_wikilink_is_not_hintable` | an unresolved `[[…]]` carries no `href`, so the hint overlay skips it and `a` lands on the resolvable link |
+| `reload_of_a_growing_document_reveals_only_at_the_restored_offset` | live reload of the growing fixture: the body is unhidden only once the preserved offset is reached, never by the failsafe |
+| `jumplist_return_to_a_growing_document_reveals_only_at_the_stored_offset` | the same, on the reported flash path — `Ctrl-o` back into a document last read at the bottom, loaded from scratch |
 
 ## The D-Bus interface is the automation / editor-sync surface
 
@@ -96,7 +129,13 @@ with two methods:
 
 - `GetState() -> (s)` — a JSON snapshot: `file`, `scroll_y`, `scroll_percent`,
   `dark`, `zoom` (geometric), `text_zoom`, `mode`, `section`, `toc_len`,
-  `loaded`. Scroll figures are
+  `loaded`, plus the restore-gate trio — `first_frame_scroll_y` (the offset the
+  first *painted* frame was placed at, hidden or not), `reveal_scroll_y` (the
+  offset the body was *unhidden* at: the first frame the reader can see) and
+  `reveal_failsafe` (whether the 400 ms timer, not the position landing, is
+  what unhid it). For a document that finishes laying out immediately the first
+  two coincide; for one still growing they do not, and only the reveal figure
+  can tell a flash from a hidden frame nobody saw. Scroll figures are
   queried live from the webview (async JS); the reply is completed from the JS
   callback, so the main loop never blocks.
 - `ExecuteAction(s action, u count)` — parses an action string with the config
