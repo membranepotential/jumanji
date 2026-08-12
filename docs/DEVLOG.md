@@ -2,6 +2,70 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-08-12 — performance pass: parallel highlighting, mermaid renderer reuse, deferred initial render, scroll fast path
+
+Four targeted fixes driven by the new benchmarks (entry below). Quiet-machine
+numbers, before → after:
+
+**Parallel syntect highlighting** (`core/highlight.rs`, rayon). The comrak
+arena is `RefCell`-backed and `!Sync`, so the pass is three-phase: a
+sequential walk collects each fence's `(info, literal)` as owned strings, a
+`par_iter` highlights them (pure string → string; `syntax_set()` is a
+thread-safe `OnceLock`), and a sequential pass writes the HTML back into the
+nodes. Below 4 fences the identical sequential path runs, so small documents
+pay no pool overhead. Output HTML is byte-identical. `code_heavy` 44.7 ms →
+**8.3 ms (−81%)**.
+
+**Mermaid renderer reuse** (`core/diagram.rs`). `transform_mermaid` now
+builds one `HeadlessRenderer` per document and mutates `svg.diagram_id` per
+fence instead of constructing a fresh renderer each time (merman 0.7's
+engine holds no per-render state — confirmed against its source). `mermaid`
+4.6 ms → **3.5 ms (−23%)**; `demo` (which has both fences and a diagram)
+14.1 ms → **9.8 ms (−31%)**.
+
+**Deferred initial render** (`shell/app.rs`; STATUS "Next" #1, the startup
+double load). The vault scan lands via `spawn_future_local`, which cannot run
+until `build_ui` returns — but the first render ran synchronously *inside*
+`build_ui`, so a vault document was structurally guaranteed to render once
+against the empty index and again when the scan landed. Now a launch whose
+document `may_reference_vault` defers its initial render until the scan lands
+(the normal few-ms case) or a 250 ms failsafe fires, whichever first; the
+failsafe path degrades exactly to the old render-then-rerender behaviour. The
+flag is consumed with `mem::take` before every early return in the landing
+closure, so an empty vault (index identical to the startup one) or a panicked
+walk still renders. Time-to-`loaded` is unchanged (~618 ms on the wikilink
+fixture — the old metric never included the second render anyway); the win is
+that the wasted second parse/layout/paint is gone from every vault-document
+start.
+
+**Scroll statusbar fast path** (`shell/view.rs` + `app.rs`). The in-page
+scroll listener already posted the percent on every rounded-percent change,
+but the shell ignored the payload and answered with `refresh_status` — a full
+`scroll_state` JS eval (querySelectors, `getBoundingClientRect`s,
+`getComputedStyle`; IPC + forced layout) per percent step while scrolling.
+The listener now posts `"<percent> <scrollY>"` and the shell paints the
+statusbar and refreshes the `last_scroll` cache synchronously from the
+payload — zero JS evals on the native-scroll path. `refresh_status` and the
+D-Bus `GetState` snapshot are unchanged.
+
+Post-review fix: the deferral flag was consumed only by the scan landing and
+the failsafe, so a user render inside the ≤250 ms window (`r`, `:open`, a
+link follow) left it standing and the eventual consumer fired a redundant
+render that snapped the view to the top. The flag is now cleared at the top
+of `do_render_and_load` itself — any first render cancels the deferral by
+construction, so no trigger site can forget.
+
+Not pursued, deliberately: a syntect warmup thread (cold cost is ~6–10 ms —
+noise next to WebKit's ~600 ms process spawn), merging the textscan AST
+passes (sub-millisecond stakes), rendering off the main thread (demo-sized
+documents render in ~10 ms ≈ one frame; not worth a generation counter yet),
+and the watcher/stdin 120 ms poll timers (idle wakeups, not jank). The
+remaining startup cost is GTK/WebKit bring-up itself, which is not ours to
+optimize.
+
+**Next:** the e2e blind spot from the v1.7.0 flash work still stands (a
+fixture whose height grows after `readyState === 'complete'`).
+
 ## 2026-08-12 — benchmark infrastructure: lib/bin split, pipeline criterion benches, headless startup timing
 
 Needed to quantify render and startup performance before chasing hotspots.

@@ -12,11 +12,19 @@ dialect support. Linux-first (Arch, X11/i3wm).
 
 Shipped **v1.6.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
-Shipped **v1.7.0** (tag + GitHub release + AUR PKGBUILD pointed at it); working
-tree clean on `main`. No workstream in flight.
+Shipped **v1.7.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
+
+No workstream in flight. Perf pass landed (8 commits incl. review fix +
+docs); unreleased on `main` — next release ships it (minor bump: benches +
+perf are feature-ish).
 
 ## Done (recent)
 
+- **Perf pass (2026-08-12)** — criterion benches (`benches/pipeline.rs`) +
+  headless startup timing (`scripts/bench-startup.sh`) via a lib/bin split;
+  parallel syntect highlighting (code_heavy 44.7→8.3 ms), mermaid renderer
+  reuse, the startup double load fixed (initial render deferred ≤250 ms until
+  the vault index lands), native-scroll statusbar updates with zero JS evals.
 - **v1.7.0** — zoom is a session setting that carries across navigation
   (history's per-file value demoted to *default on open*, DESIGN D5a); the
   document-switch flash is gone — the restore gate now concedes only once
@@ -35,10 +43,7 @@ tree clean on `main`. No workstream in flight.
 
 ## Next
 
-1. **Startup double load** — real but separate: at launch the vault index goes
-   empty → populated, so `rescan_vault` fires a second full `render_and_load`
-   after the first already finished. Wasted parse/layout/paint on every start.
-2. **The e2e suite cannot see this class of bug.** Every fixture loads too fast
+1. **The e2e suite cannot see this class of bug.** Every fixture loads too fast
    to catch a document mid-growth, so the flash never reproduced headlessly and
    a green suite proved only "no regression". A fixture whose height grows after
    `readyState === 'complete'` would turn the restore gate into something tests
