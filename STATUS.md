@@ -10,11 +10,10 @@ dialect support. Linux-first (Arch, X11/i3wm).
 
 ## Now
 
-Shipped through **v1.7.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
+Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it):
+the perf pass and the e2e restore-gate fixture.
 
-No workstream in flight. The perf pass and the e2e restore-gate fixture are
-landed and unreleased on `main` — the next release ships both (minor bump:
-benches + perf are feature-ish).
+No workstream in flight, nothing unreleased on `main`.
 
 ## Done (recent)
 
@@ -47,10 +46,9 @@ benches + perf are feature-ish).
 
 ## Next
 
-1. **Cut the next minor release** — perf pass + the restore-gate e2e are on
-   `main` unreleased (tag + GitHub release + AUR PKGBUILD, per CLAUDE.md).
-2. Delete `.flash-investigation/` (gitignored) once released — bug closed, and
-   the suite now defends the fix.
+1. Delete `.flash-investigation/` (gitignored) — bug closed, released, and the
+   suite now defends the fix.
+2. Nothing else queued. Next feature direction is open.
 
 ## Open questions
 
