@@ -420,9 +420,9 @@ pub struct View {
     /// Called with the source line (as a string) of a Ctrl+clicked element, so
     /// the shell can spawn the editor (reverse sync, DESIGN D7).
     editor_sync_cb: Sink,
-    /// Called (with the current percent, as a string) whenever the page scrolls
-    /// by any means WebKit handles itself — wheel, touchpad, scrollbar drag — so
-    /// the shell can refresh the statusbar percent.
+    /// Called with `"<percent> <scrollY>"` whenever the page scrolls by any
+    /// means WebKit handles itself — wheel, touchpad, scrollbar drag — so the
+    /// shell can refresh the statusbar percent without an eval round trip.
     scroll_cb: Sink,
 }
 
@@ -513,7 +513,7 @@ impl View {
     }
 
     /// Install the shell's handler for native-scroll pings (wheel / touchpad /
-    /// scrollbar). The argument is the current scroll percent, as a string.
+    /// scrollbar). The argument is `"<percent> <scrollY>"`.
     pub fn set_scroll_handler(&self, f: impl Fn(String) + 'static) {
         *self.scroll_cb.borrow_mut() = Some(Box::new(f));
     }
@@ -973,10 +973,13 @@ fn install_selection_copy(
 
 /// Wire the in-page scroll listener: a passive `scroll` listener, coalesced to
 /// one report per animation frame and only firing when the *rounded* percent
-/// changes, posts the current percent back to Rust. This is the only signal for
-/// scrolls WebKit performs itself (wheel, touchpad, scrollbar) — keyboard
-/// scrolls are Rust-driven and refresh the statusbar directly. The percent
-/// formula mirrors [`View::scroll_state`] so the two agree.
+/// changes, posts `"<percent> <scrollY>"` back to Rust. This is the only
+/// signal for scrolls WebKit performs itself (wheel, touchpad, scrollbar) —
+/// keyboard scrolls are Rust-driven and refresh the statusbar directly. The
+/// percent formula mirrors [`View::scroll_state`] so the two agree. Posting
+/// `scrollY` alongside the percent lets the shell update the statusbar
+/// directly from the payload — no eval round trip back into the page just to
+/// ask for the number it already has (see `Shell`'s scroll handler).
 fn install_scroll_notify(ucm: &UserContentManager, sink: Sink) {
     ucm.register_script_message_handler(SCROLL_HANDLER, None);
 
@@ -992,7 +995,7 @@ fn install_scroll_notify(ucm: &UserContentManager, sink: Sink) {
             const p = max > 0 ? Math.min(100, Math.max(0, Math.round((window.scrollY / max) * 100))) : 0;\n\
             if (p !== last) {\n\
               last = p;\n\
-              window.webkit.messageHandlers.scroll.postMessage(String(p));\n\
+              window.webkit.messageHandlers.scroll.postMessage(p + ' ' + window.scrollY);\n\
             }\n\
           });\n\
         }, { passive: true });\n\

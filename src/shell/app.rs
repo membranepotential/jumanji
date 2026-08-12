@@ -493,10 +493,37 @@ fn install_view_handlers(shell: &Rc<RefCell<Shell>>) {
     }
     {
         // Native scrolls (wheel / touchpad / scrollbar) never run through the
-        // key dispatcher, so this ping is what keeps the statusbar percent live.
+        // key dispatcher, so this ping is what keeps the statusbar percent
+        // live. The payload already carries both numbers `refresh_status`
+        // would otherwise need a JS eval to ask for, so this updates the
+        // statusbar directly instead (see `on_native_scroll`).
         let shell = shell.clone();
-        view.set_scroll_handler(move |_percent| refresh_status(&shell));
+        view.set_scroll_handler(move |payload| on_native_scroll(&shell, &payload));
     }
+}
+
+/// Handle a native-scroll ping (`"<percent> <scrollY>"`, see
+/// `install_scroll_notify`) with no JS round trip: unlike `refresh_status`,
+/// which re-queries the whole viewport (multiple querySelectors,
+/// getBoundingClientRects, getComputedStyle — forced layout) for every single
+/// percent step, the payload already has everything needed to paint the
+/// statusbar. A malformed payload (there should never be one) is ignored
+/// silently rather than risking a stale statusbar over a parse panic.
+fn on_native_scroll(shell: &Rc<RefCell<Shell>>, payload: &str) {
+    let Some((percent, y)) = payload.split_once(' ') else {
+        return;
+    };
+    let (Ok(percent), Ok(y)) = (percent.parse::<u32>(), y.parse::<f64>()) else {
+        return;
+    };
+    let mut s = shell.borrow_mut();
+    s.last_scroll = y;
+    // Same fields `refresh_status` re-fits/paints, just built synchronously
+    // from the shell instead of round-tripping into the page for them.
+    s.bar.refit_trail();
+    let pending = s.matcher.pending_indicator();
+    let zoom = zoom_indicator(s.zoom, s.text_zoom);
+    s.bar.set_status_right(percent, &pending, &zoom);
 }
 
 /// Read the file, render it, and load the HTML. When `preserve_scroll`, capture
