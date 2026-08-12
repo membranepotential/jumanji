@@ -114,6 +114,17 @@ struct Shell {
     /// rescan re-renders only if it does — which is what keeps the pipeline off
     /// the hot path for the ordinary markdown file that names nothing.
     doc_uses_vault: bool,
+    /// Set at construction when the launch document may reference the vault
+    /// (`vault::may_reference_vault`), and cleared the moment the deferred
+    /// initial render actually happens — by the scan landing (the fast path)
+    /// or by [`INITIAL_RENDER_FAILSAFE`] (the pathological one). While true,
+    /// the window is up but nothing has been rendered yet: `build_ui` skipped
+    /// its usual closing `do_render_and_load` so the *first* render can use
+    /// the freshly landed index instead of the empty one it started with,
+    /// which is what saves a second full render on every vault document at
+    /// startup. `false` for a stdin source (no vault) and for any file whose
+    /// initial `may_reference_vault` check came back negative.
+    initial_render_deferred: bool,
     /// Reverse editor-sync template (DESIGN D7): spawned on Ctrl+click with
     /// `%l`/`%f` substituted. Config-only (copied from options at construction).
     editor_command: EditorCommand,
@@ -262,6 +273,16 @@ fn build_ui(
 ) {
     let is_stdin = source.is_stdin();
     let file = base_path(&source);
+    // Cheap, best-effort check of whether this launch is worth deferring the
+    // initial render for (see `initial_render_deferred`). Re-read by
+    // `do_render_and_load` when the render actually happens — a second read
+    // of one small file at startup is nothing next to the render it lets us
+    // skip. Stdin never defers: it has no vault, and its content isn't even
+    // available yet (the reader thread starts after the window is built).
+    let defer_initial_render = !is_stdin
+        && std::fs::read_to_string(&file)
+            .map(|md| vault::may_reference_vault(&md))
+            .unwrap_or(false);
     let view = View::new(options.selection_clipboard);
     let toc_view = TocView::new();
     let bar = Bar::new();
@@ -320,6 +341,7 @@ fn build_ui(
         vault_root,
         vault_scanning: false,
         doc_uses_vault: false,
+        initial_render_deferred: defer_initial_render,
         editor_command: options.editor_command.clone(),
         // Resolved just below, once the saved window-state has been read.
         pending_position: InitialPosition::Top,
@@ -416,8 +438,41 @@ fn build_ui(
     window.present();
     view.widget().grab_focus();
 
-    // Initial render + load.
-    do_render_and_load(&shell);
+    // Initial render + load — deferred when the document may reference the
+    // vault, so it can render once against the freshly landed index instead
+    // of twice (once against the empty one, again when the scan lands). See
+    // `initial_render_deferred`.
+    if defer_initial_render {
+        arm_initial_render_failsafe(&shell);
+    } else {
+        do_render_and_load(&shell);
+    }
+}
+
+/// How long the deferred initial render (see `initial_render_deferred`) waits
+/// on the vault scan before giving up and rendering anyway. The window itself
+/// is already on screen by the time this is armed (`window.present()` above
+/// runs unconditionally) — this only bounds how long the *content* waits, so a
+/// pathological vault (a slow mount, a huge tree) cannot leave the reader
+/// looking blank indefinitely.
+const INITIAL_RENDER_FAILSAFE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Arm the failsafe for a deferred initial render: if the scan hasn't landed
+/// (and rendered) within [`INITIAL_RENDER_FAILSAFE`], render anyway against
+/// whatever index is in hand — normally still the empty one the shell was
+/// constructed with, which degrades to today's behaviour (a second render
+/// when the scan does land, see `rescan_vault`).
+fn arm_initial_render_failsafe(shell: &Rc<RefCell<Shell>>) {
+    let shell = shell.clone();
+    glib::timeout_add_local_once(INITIAL_RENDER_FAILSAFE, move || {
+        let still_deferred = {
+            let mut s = shell.borrow_mut();
+            std::mem::take(&mut s.initial_render_deferred)
+        };
+        if still_deferred {
+            do_render_and_load(&shell);
+        }
+    });
 }
 
 /// Wire the view's shell-supplied callbacks: link-hint posts and navigation
@@ -492,15 +547,35 @@ fn rescan_vault(shell: &Rc<RefCell<Shell>>) {
         };
         let mut s = shell.borrow_mut();
         s.vault_scanning = false;
+        // A deferred initial render (see `initial_render_deferred`) is waiting
+        // on exactly this landing — nothing has been rendered at all yet, so
+        // it must go out even when the scan found nothing new (an empty vault
+        // scans identical to the empty index the shell started with) or the
+        // walk itself panicked. Consumed here, before either early return
+        // below, so neither can skip it.
+        let deferred = std::mem::take(&mut s.initial_render_deferred);
         // `Err` is a panic in the walk. Keeping the previous index costs some
         // links their targets; taking down the reader would cost the document.
         let Ok(index) = scanned else {
+            if deferred {
+                drop(s);
+                do_render_and_load(&shell);
+            }
             return;
         };
         if *s.vault.index() == index {
+            if deferred {
+                drop(s);
+                do_render_and_load(&shell);
+            }
             return;
         }
         s.vault.set_index(index);
+        if deferred {
+            drop(s);
+            do_render_and_load(&shell);
+            return;
+        }
         if !s.doc_uses_vault {
             return;
         }
