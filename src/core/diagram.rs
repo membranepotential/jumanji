@@ -29,8 +29,7 @@ enum Rendered {
     Failed(String),
 }
 
-fn render(source: &str, diagram_id: &str) -> Rendered {
-    let renderer = HeadlessRenderer::new().with_diagram_id(diagram_id);
+fn render(renderer: &HeadlessRenderer, source: &str) -> Rendered {
     match renderer.render_svg_sync(source) {
         Ok(Some(svg)) => Rendered::Svg(wrap_svg(&svg)),
         Ok(None) => Rendered::Failed("no mermaid diagram detected in fence".to_string()),
@@ -78,16 +77,25 @@ fn degrade(source: &str, reason: &str) -> String {
 /// AST pass: replace each mermaid fence with inline SVG (or a degraded error
 /// block). Diagram ids are made unique per document so multiple inlined SVGs
 /// do not collide on internal marker/id references.
+///
+/// One [`HeadlessRenderer`] is built per document and reused across all its
+/// mermaid fences: `render_svg_sync` takes `&self` and `Engine` holds only
+/// immutable registries/config (no per-render caching), so reuse is sound —
+/// it just skips re-building those registries for every fence. The per-fence
+/// diagram id is set by mutating the renderer's public `svg.diagram_id`
+/// field in place rather than rebuilding the renderer via `with_diagram_id`.
 pub fn transform_mermaid<'a>(root: &'a AstNode<'a>) {
+    let mut renderer = HeadlessRenderer::new();
     let mut index = 0usize;
     for node in root.descendants() {
         let html = {
             let data = node.data.borrow();
             match &data.value {
                 NodeValue::CodeBlock(block) if block.fenced && is_mermaid_fence(&block.info) => {
-                    let id = sanitize_svg_id(&format!("jumanji-diagram-{index}"));
+                    renderer.svg.diagram_id =
+                        Some(sanitize_svg_id(&format!("jumanji-diagram-{index}")));
                     index += 1;
-                    Some(match render(&block.literal, &id) {
+                    Some(match render(&renderer, &block.literal) {
                         Rendered::Svg(svg) => svg,
                         Rendered::Failed(reason) => degrade(&block.literal, &reason),
                     })
@@ -119,7 +127,8 @@ mod tests {
 
     #[test]
     fn valid_flowchart_renders_inline_svg_with_intrinsic_width() {
-        match render("flowchart TD\nA[Start] --> B[Done]", "test-ok") {
+        let renderer = HeadlessRenderer::new().with_diagram_id("test-ok");
+        match render(&renderer, "flowchart TD\nA[Start] --> B[Done]") {
             Rendered::Svg(html) => {
                 // Real merman output carries an inline `max-width:<N>px`, so the
                 // wrapper must pin it onto `--dw` for the intrinsic-size model.
