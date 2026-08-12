@@ -115,15 +115,19 @@ struct Shell {
     /// the hot path for the ordinary markdown file that names nothing.
     doc_uses_vault: bool,
     /// Set at construction when the launch document may reference the vault
-    /// (`vault::may_reference_vault`), and cleared the moment the deferred
-    /// initial render actually happens — by the scan landing (the fast path)
-    /// or by [`INITIAL_RENDER_FAILSAFE`] (the pathological one). While true,
-    /// the window is up but nothing has been rendered yet: `build_ui` skipped
-    /// its usual closing `do_render_and_load` so the *first* render can use
-    /// the freshly landed index instead of the empty one it started with,
-    /// which is what saves a second full render on every vault document at
-    /// startup. `false` for a stdin source (no vault) and for any file whose
-    /// initial `may_reference_vault` check came back negative.
+    /// (`vault::may_reference_vault`), and cleared by the *first render,
+    /// whoever triggers it* — normally the scan landing (the fast path) or
+    /// [`INITIAL_RENDER_FAILSAFE`] (the pathological one), but equally a
+    /// user's `r`, `:open`, or link follow arriving inside the deferral
+    /// window. Consumed at the top of [`do_render_and_load`] rather than at
+    /// each trigger site, so no render path can forget to cancel the deferral
+    /// and leave a stale flag that fires a redundant render later. While
+    /// true, the window is up but nothing has been rendered yet: `build_ui`
+    /// skipped its usual closing `do_render_and_load` so the *first* render
+    /// can use the freshly landed index instead of the empty one it started
+    /// with, which is what saves a second full render on every vault document
+    /// at startup. `false` for a stdin source (no vault) and for any file
+    /// whose initial `may_reference_vault` check came back negative.
     initial_render_deferred: bool,
     /// Reverse editor-sync template (DESIGN D7): spawned on Ctrl+click with
     /// `%l`/`%f` substituted. Config-only (copied from options at construction).
@@ -618,6 +622,12 @@ fn rescan_vault(shell: &Rc<RefCell<Shell>>) {
 
 fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
     let mut s = shell.borrow_mut();
+    // Every render cancels a pending deferred initial render, whatever
+    // triggered it: a user's `r`/`:open`/link follow inside the deferral
+    // window renders the document just as well as the scan landing would
+    // have, and a flag left standing would make the scan's landing (or the
+    // failsafe) fire a redundant render over the document being read.
+    s.initial_render_deferred = false;
     // User CSS themes are reloaded on every render so edits hot-swap in.
     s.render_opts.extra_css = load_themes(&s.config_dir);
     let path = s.file.clone();

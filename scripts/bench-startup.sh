@@ -13,8 +13,8 @@
 # Fixtures (both run by default):
 #   - demo/demo.md
 #   - a generated wikilink-heavy note in a temp vault (50 sibling notes + a
-#     main note with 100 [[wikilinks]]), which triggers the background vault
-#     rescan and its double-load.
+#     main note with 100 [[wikilinks]]), which exercises the vault-index path
+#     (the initial render defers until the background scan lands).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -72,7 +72,7 @@ WORK_DIR="$(mktemp -d /tmp/jumanji-bench-startup.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 # 50 sibling notes + a main note with 100 wikilinks (round-robin over the 50),
-# to exercise the vault index / background rescan double-load.
+# to exercise the vault-index path (deferred initial render + background scan).
 gen_wikilink_vault() {
     local dir="$WORK_DIR/vault"
     mkdir -p "$dir"
