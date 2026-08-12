@@ -34,3 +34,10 @@ debug = "line-tables-only"
 # fast incremental rebuilds.
 [profile.dev.package."*"]
 opt-level = 2
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "pipeline"
+harness = false

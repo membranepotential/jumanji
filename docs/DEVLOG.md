@@ -2,6 +2,63 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-08-12 — benchmark infrastructure: lib/bin split, pipeline criterion benches, headless startup timing
+
+Needed to quantify render and startup performance before chasing hotspots.
+Two prerequisites plus the benches themselves:
+
+**Lib/bin split.** The crate was binary-only (`src/main.rs` declared `mod
+core; mod shell;`), so nothing outside the binary could reach
+`core::pipeline`. Added `src/lib.rs` (`pub mod core; pub mod shell;`) and
+slimmed `main.rs` to `use jumanji::core::…` / `use jumanji::shell`. No other
+restructuring — `crate::` paths inside `core`/`shell` files stay valid because
+those modules now live in the lib crate root instead of the bin's. The
+architecture boundary (core never imports shell/GTK) is untouched.
+
+**`benches/pipeline.rs`** (criterion, `harness = false`): renders eight
+synthetic document shapes — `prose_10k`/`prose_500k`, `code_heavy` (50 fences
+across 5 languages, ~100 KB, exercises syntect), `math_heavy` (100 inline +
+20 display formulas), `mermaid` (5 flowcharts, exercises merman),
+`wikilinks` (~200 links + 20 callouts), `table_heavy` (50 GFM tables), and
+`demo` (the real `demo/demo.md`) — plus one manual cold-vs-warm measurement
+before Criterion takes over, since the first render anywhere in the process
+pays for syntect's `OnceLock` load and math CSS/font init.
+
+One gotcha: `core::pipeline`'s own tests build their vault with
+`Vault::rooted`, but that constructor is `#[cfg(test)]`-only and so invisible
+to a bench binary (which links the lib crate's normal, non-test build). The
+bench instead builds an empty `VaultIndex` directly via `Vault::new` — same
+effect (every `[[…]]` unresolved) without needing a filesystem scan.
+
+Measured (`cargo bench --bench pipeline -- --warm-up-time 1
+--measurement-time 2`): cold first render ~9.7 ms, warm ~0.4 ms. Warm
+per-case medians: `prose_10k` 176 µs, `prose_500k` 8.8 ms, `code_heavy`
+**44.7 ms** (the outlier — syntect over ~100 KB across 5 syntaxes dominates
+everything else here), `math_heavy` 1.1 ms, `mermaid` 4.6 ms, `wikilinks`
+810 µs, `table_heavy` 4.5 ms, `demo` 14.1 ms. `code_heavy` is the clearest
+lead for follow-up optimization work.
+
+**`scripts/bench-startup.sh`**: headless wall-clock time from process spawn
+to "driveable", using the same per-run private-Xvfb + private-session-bus
+approach as `tests/e2e.rs`, polling `GetState` over D-Bus (`gdbus call`) at a
+5 ms interval until `"loaded":true`. Reports per-run ms and the median over
+`-n` runs (default 5) for two fixtures: `demo/demo.md` and a generated
+wikilink-heavy note (50 sibling notes + 100 `[[wikilinks]]` in a temp vault,
+to catch the vault-rescan double-load). Requires a fresh `cargo build
+--release` (built automatically if `target/release/jumanji` is missing or
+older than anything under `src/`); skips cleanly if `Xvfb`/`dbus-daemon`/
+`gdbus` are absent. Never touches the real `DISPLAY` or session bus.
+
+Measured (5 runs each): `demo/demo.md` median 1249 ms, wikilink-heavy median
+616 ms. Surprising direction: the wikilink-heavy vault loads in *half* the
+time of the demo document, despite the vault rescan's double-load — the
+demo's mermaid/math/code content costs more than the second vault-driven
+render does. Startup-latency work should look at `demo`-shaped documents
+first, not the vault rescan.
+
+**Next:** use both benches to drive the performance pass (`code_heavy`'s
+syntect cost and the demo document's ~1.2 s cold startup are the two leads).
+
 ## 2026-08-07 — the restore gate stops conceding while the page is still growing
 
 **Reported:** switching documents flashes the new page at scroll 0 before it
