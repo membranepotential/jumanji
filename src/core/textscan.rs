@@ -240,8 +240,8 @@ fn strip_comment_regions<'a>(root: &'a AstNode<'a>) {
             .filter(|(_, node)| is_comment_marker(node))
             .map(|(i, _)| i)
             .collect();
-        for pair in markers.chunks_exact(2) {
-            for node in &children[pair[0]..=pair[1]] {
+        for [open, close] in markers.as_chunks::<2>().0 {
+            for node in &children[*open..=*close] {
                 node.detach();
             }
         }
