@@ -5,12 +5,28 @@ jumanji — a zathura-inspired markdown reader. Rust, GTK4 + system WebKitGTK 6,
 
 ## Read first
 
+- @STATUS.md — the live project dashboard: what is in flight, what just
+  landed, what is queued. Imported into every session by that `@`; keep it
+  true (rules below).
 - `docs/DESIGN.md` — the architecture decision record. **Binding.** Deviations
   from it require updating it in the same change, with reasoning.
 - `docs/DEVLOG.md` — running log. Append an entry (newest first) for every
   substantial change: what, why, what's next.
 - `docs/research/` — the research the design rests on; cite it, don't re-argue
   it without new evidence.
+
+## Project dashboard (STATUS.md)
+
+`STATUS.md` at the repo root is the shared dashboard: Goal / Now / Done /
+Next / Open questions, hard cap 60 lines. Keep it true:
+
+- Register every workstream in **Now** before starting it (one line: name —
+  objective — state — next); move it to **Done** when it lands.
+- Update Done/Next at phase boundaries and before reporting work complete.
+  Prune rather than append; history lives in git and `docs/DEVLOG.md`.
+- `/orient` (a project skill in `.claude/skills/orient/`) reconciles the file
+  against git and prints a brief. Run it when you sit down and before you
+  hand off.
 
 ## Build & run
 
