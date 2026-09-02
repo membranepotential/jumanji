@@ -1,15 +1,16 @@
 //! Live reload. Editors rename-replace files on save, so we watch the parent
 //! *directory* (not the inode), debounce, filter to our file, and marshal the
-//! result onto the GTK main loop.
+//! result onto the toolkit's main loop.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Context;
-use gtk::glib;
 use notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{Debouncer, RecommendedCache, new_debouncer};
+
+use crate::controller::toolkit::Host;
 
 /// What happened to the watched file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,24 +21,17 @@ pub enum FileEvent {
     Removed,
 }
 
-/// Owns the debouncer and the main-loop poll source; dropping it stops both.
-pub struct Watch {
+/// Owns the debouncer and the main-loop poll timer; dropping it stops both —
+/// the timer because [`Host::Timer`] cancels on drop.
+pub struct Watch<H: Host> {
     _debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
-    poll: Option<glib::SourceId>,
+    _poll: H::Timer,
 }
 
-impl Drop for Watch {
-    fn drop(&mut self) {
-        if let Some(id) = self.poll.take() {
-            id.remove();
-        }
-    }
-}
-
-impl Watch {
-    /// Start watching `file`'s parent directory. `on_event` runs on the GTK
-    /// main thread whenever a debounced change touches `file`.
-    pub fn start<F>(file: &Path, on_event: F) -> anyhow::Result<Self>
+impl<H: Host> Watch<H> {
+    /// Start watching `file`'s parent directory. `on_event` runs on the
+    /// main loop whenever a debounced change touches `file`.
+    pub fn start<F>(host: &H, file: &Path, on_event: F) -> anyhow::Result<Self>
     where
         F: Fn(FileEvent) + 'static,
     {
@@ -52,6 +46,7 @@ impl Watch {
         // directory (sibling saves, editor swap files) is filtered out.
         let target_name = file.file_name().map(|n| n.to_owned());
         Self::start_impl(
+            host,
             &parent,
             move |event| {
                 let hits = event
@@ -74,19 +69,24 @@ impl Watch {
     /// Start watching a whole directory (non-recursive). Any content-mutating
     /// event inside it fires [`FileEvent::Changed`] — used for the user-CSS
     /// themes directory, where any `.css` add/edit/remove should re-render.
-    pub fn start_dir<F>(dir: &Path, on_event: F) -> anyhow::Result<Self>
+    pub fn start_dir<F>(host: &H, dir: &Path, on_event: F) -> anyhow::Result<Self>
     where
         F: Fn(FileEvent) + 'static,
     {
-        Self::start_impl(dir, |_event| Some(FileEvent::Changed), on_event)
+        Self::start_impl(host, dir, |_event| Some(FileEvent::Changed), on_event)
     }
 
     /// Watch `watch_path` (non-recursive), debounce, and marshal each debounced
-    /// batch onto the GTK main loop. `classify` maps a raw debounced event to an
+    /// batch onto the main loop. `classify` maps a raw debounced event to an
     /// optional [`FileEvent`]; `None` drops it. Only content-mutating event
     /// kinds reach `classify` (`Access` events fire on every read — including our
     /// own reload's — and would otherwise feed a self-sustaining reload loop).
-    fn start_impl<C, F>(watch_path: &Path, classify: C, on_event: F) -> anyhow::Result<Self>
+    fn start_impl<C, F>(
+        host: &H,
+        watch_path: &Path,
+        classify: C,
+        on_event: F,
+    ) -> anyhow::Result<Self>
     where
         C: Fn(&notify::Event) -> Option<FileEvent> + 'static,
         F: Fn(FileEvent) + 'static,
@@ -100,7 +100,7 @@ impl Watch {
 
         // Poll the channel from the main loop; the debouncer already coalesces,
         // so a coarse tick adds no perceptible latency.
-        let poll = glib::timeout_add_local(Duration::from_millis(120), move || {
+        let poll = host.interval(Duration::from_millis(120), move || {
             let mut fired: Option<FileEvent> = None;
             while let Ok(result) = rx.try_recv() {
                 if let Ok(events) = result {
@@ -126,12 +126,11 @@ impl Watch {
             if let Some(ev) = fired {
                 on_event(ev);
             }
-            glib::ControlFlow::Continue
         });
 
         Ok(Self {
             _debouncer: debouncer,
-            poll: Some(poll),
+            _poll: poll,
         })
     }
 }

@@ -8,26 +8,8 @@ use gtk::pango::EllipsizeMode;
 use gtk::prelude::*;
 use gtk::{Align, Box as GtkBox, CssProvider, Entry, Label, Orientation};
 
+use crate::controller::toolkit::Prompt;
 use crate::core::jumplist::breadcrumb;
-
-/// Which kind of input the bar is currently collecting. The prompt character
-/// and how `Enter` is interpreted (search vs command) both follow from this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Prompt {
-    /// `/` incremental find.
-    Search,
-    /// `:` command line.
-    Command,
-}
-
-impl Prompt {
-    fn prefix(self) -> &'static str {
-        match self {
-            Prompt::Search => "/",
-            Prompt::Command => ":",
-        }
-    }
-}
 
 /// The bottom bar: `[ status_left ............ status_right ]` with a hidden
 /// single-line [`Entry`] stacked above it for search/command input.
@@ -184,10 +166,6 @@ impl Bar {
         self.prompt.set(None);
         self.entry.set_text("");
         self.entry.set_visible(false);
-    }
-
-    pub fn is_input_visible(&self) -> bool {
-        WidgetExt::is_visible(&self.entry)
     }
 
     /// The active prompt kind, or `None` when the input bar is hidden.

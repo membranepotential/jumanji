@@ -72,6 +72,7 @@ impl Model {
 type ActivateHandler = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
 /// The TOC page widget plus its backing model.
+#[derive(Clone)]
 pub struct TocView {
     scroller: ScrolledWindow,
     list: ListBox,

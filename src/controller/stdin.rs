@@ -1,5 +1,5 @@
 //! Stdin streaming. A background thread reads standard input into a growing
-//! byte buffer and posts "content changed" ticks to the GTK main loop, which
+//! byte buffer and posts "content changed" ticks to the main loop, which
 //! coalesces a burst of chunks into one re-render — the same batch-then-poll
 //! shape the live-reload watcher uses (see `watch.rs`).
 //!
@@ -13,33 +13,25 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gtk::glib;
+use crate::controller::toolkit::Host;
 
 /// Main-loop poll cadence, matching `watch.rs`'s poll tick: the debouncer there
 /// coalesces to ~150 ms, this coarse poll to ~120 ms. Either way a physical
 /// burst of chunks collapses into a single re-render.
 const POLL: Duration = Duration::from_millis(120);
 
-/// Owns the growing buffer and the main-loop poll source; dropping it removes
+/// Owns the growing buffer and the main-loop poll timer; dropping it cancels
 /// the poll (and, once the reader's next `send` fails, ends the reader thread).
-pub struct StdinReader {
+pub struct StdinReader<H: Host> {
     buffer: Arc<Mutex<Vec<u8>>>,
-    poll: Option<glib::SourceId>,
+    _poll: H::Timer,
 }
 
-impl Drop for StdinReader {
-    fn drop(&mut self) {
-        if let Some(id) = self.poll.take() {
-            id.remove();
-        }
-    }
-}
-
-impl StdinReader {
+impl<H: Host> StdinReader<H> {
     /// Spawn the reader thread and install the main-loop poll. `on_change` runs
-    /// on the GTK main thread whenever a debounced batch of new bytes (or EOF)
+    /// on the main loop whenever a debounced batch of new bytes (or EOF)
     /// has arrived; the caller re-renders from [`buffer`](Self::buffer).
-    pub fn start<F>(on_change: F) -> Self
+    pub fn start<F>(host: &H, on_change: F) -> Self
     where
         F: Fn() + 'static,
     {
@@ -82,7 +74,7 @@ impl StdinReader {
         // the coalescing step. The channel stays empty (and this is a cheap
         // no-op) after EOF, mirroring how `watch.rs` keeps its poll alive for the
         // window's lifetime rather than tearing it down.
-        let poll = glib::timeout_add_local(POLL, move || {
+        let poll = host.interval(POLL, move || {
             let mut any = false;
             while rx.try_recv().is_ok() {
                 any = true;
@@ -90,12 +82,11 @@ impl StdinReader {
             if any {
                 on_change();
             }
-            glib::ControlFlow::Continue
         });
 
         Self {
             buffer,
-            poll: Some(poll),
+            _poll: poll,
         }
     }
 

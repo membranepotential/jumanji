@@ -18,22 +18,7 @@
 //! tiny prelude script before any of these run — never defined by these
 //! scripts themselves.
 
-/// Where a reflow-preserving zoom keeps the reading position pinned.
-///
-/// Both geometric and text zoom now reflow the page, so an anchor is captured
-/// before the change and scrolled back into view after — this picks the anchor
-/// element. One mechanism ([`capture_anchor_js`] + [`RESTORE_ANCHOR_JS`]),
-/// parameterised by the probe point.
-#[derive(Clone, Copy)]
-pub enum ZoomAnchor {
-    /// Keep the element at the top of the viewport fixed (keyboard / D-Bus
-    /// zoom, and text zoom). Only anchors when scrolled, so an exact top stays
-    /// exactly at the top.
-    Top,
-    /// Keep the element under a viewport point (CSS px) fixed — the cursor, for
-    /// Ctrl+wheel zoom ("zoom towards the cursor").
-    Point { x: f64, y: f64 },
-}
+use crate::controller::page::ZoomAnchor;
 
 /// The function every shared script posts through:
 /// `window.__jmnj_post(name, payload)`. Defined by each shell in its own
@@ -120,7 +105,7 @@ pub const RESTORE_ANCHOR_JS: &str = "(() => { const a = window.__jmnj_anchor; \
 /// makes those lines non-decreasing, so the last match ≤ the target is the
 /// nearest block at-or-above it. Factored out because forward editor sync needs
 /// it twice — once for a jump inside the loaded document
-/// (`View::goto_source_line`) and once from [`scroll_restore_js`], before the
+/// (`Page::goto_source_line`) and once from [`scroll_restore_js`], before the
 /// document has ever painted — and two copies of a rule this fiddly would drift.
 pub fn nearest_source_element_js(line_expr: &str) -> String {
     format!(
@@ -154,7 +139,7 @@ pub const REVEAL_GLOBAL: &str = "window.__jmnj_reveal";
 
 /// The page global the restore script parks its `apply` on, so the shell can
 /// re-run *the same* placement once the load has fully finished (see
-/// `View::settle_initial_position`) without a second copy of the rules.
+/// `Page::settle_initial_position`) without a second copy of the rules.
 pub const APPLY_GLOBAL: &str = "window.__jmnj_apply_open";
 
 /// Consecutive frames the document height must hold steady before the restore
@@ -435,7 +420,7 @@ fn editor_sync_js() -> String {
 ///
 /// Not included: the shell's own [`POST_FN`] prelude (toolkit-specific, must
 /// be installed *before* these) and [`hints_build_js`] (built on demand by
-/// `View::request_hints`, not installed once at document start).
+/// `Page::request_hints`, not installed once at document start).
 pub fn document_start() -> Vec<String> {
     vec![
         selection_copy_js(),
@@ -446,7 +431,7 @@ pub fn document_start() -> Vec<String> {
     ]
 }
 
-/// The overlay-building script for `View::request_hints`. Finds visible
+/// The overlay-building script for `Page::request_hints`. Finds visible
 /// links, assigns home-row-alphabet labels (`a`..`z`, then `aa`,`ab`,… past 26),
 /// draws a fixed-position tag over each, and posts the label→href map to the
 /// shell via [`message::HINTS`].

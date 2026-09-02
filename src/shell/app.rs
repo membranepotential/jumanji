@@ -1,7 +1,8 @@
 //! The GTK4 application: window, capture-phase key dispatch, and the mapping
-//! from [`Action`]s to `webkit6` calls. As thin as the design allows — the
+//! from [`Action`]s to the toolkit traits. As thin as the design allows — the
 //! keymap, config, command parsing, jumplist, marks, and history all live in
-//! `core`; this layer is the imperative glue.
+//! `core`, the viewport behaviour and the file/stdin watchers in `controller`;
+//! this layer is the GTK glue that binds them.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -14,13 +15,17 @@ use gtk::glib;
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{
-    Application, ApplicationWindow, Box as GtkBox, EventControllerKey, EventControllerMotion,
+    Application, ApplicationWindow, EventControllerKey, EventControllerMotion,
     EventControllerScroll, EventControllerScrollFlags, EventSequenceState, GestureClick,
-    Orientation, PropagationPhase, Stack,
+    PropagationPhase,
 };
 use webkit6::LoadEvent;
 use webkit6::prelude::*;
 
+use crate::controller::page::{InitialPosition, Page, ViewportState, ZoomAnchor};
+use crate::controller::stdin::StdinReader;
+use crate::controller::toolkit::{Chrome, Host, Prompt, Viewport};
+use crate::controller::watch::{FileEvent, Watch};
 use crate::core::command::{self, Command, Completions};
 use crate::core::config::{self, Config, Options, SetEffect};
 use crate::core::editor::EditorCommand;
@@ -34,12 +39,10 @@ use crate::core::source::Source;
 use crate::core::vault::{self, Vault, VaultIndex};
 use crate::core::{Action, Direction, Heading, Mode};
 
-use super::bar::{Bar, Prompt};
+use super::chrome::GtkChrome;
 use super::dbus;
-use super::stdin::StdinReader;
-use super::toc::TocView;
-use super::view::{InitialPosition, View, ViewportState, ZoomAnchor};
-use super::watch::{FileEvent, Watch};
+use super::host::GlibHost;
+use super::view::{LastSelection, View};
 
 const APP_ID: &str = "org.membranepotential.jumanji";
 
@@ -183,10 +186,13 @@ struct Shell {
     /// kept in lockstep by every `set_mode` call so `GetState` can report it.
     mode: Mode,
     view: View,
-    toc_view: TocView,
-    /// Stack holding the content (`"content"`) and TOC (`"toc"`) pages.
-    stack: Stack,
-    bar: Bar,
+    /// Status line, input bar, and the content↔TOC stack.
+    chrome: GtkChrome,
+    /// Timers, worker threads, and the operating system.
+    host: GlibHost,
+    /// The toplevel: the GTK event controllers hang off it, and the pointer
+    /// coordinates it reports are translated into the view to anchor
+    /// Ctrl+wheel zoom.
     window: ApplicationWindow,
     toc: Vec<Heading>,
     section: usize,
@@ -208,11 +214,11 @@ struct Shell {
     marks: Marks,
     /// Per-file window-state, loaded at startup and flushed on close/switch.
     history: History,
-    _watch: Option<Watch>,
-    _theme_watch: Option<Watch>,
+    _watch: Option<Watch<GlibHost>>,
+    _theme_watch: Option<Watch<GlibHost>>,
     /// The stdin reader thread + poll source, for a stdin document. Dropping it
     /// stops the streaming updates.
-    _stdin: Option<StdinReader>,
+    _stdin: Option<StdinReader<GlibHost>>,
     /// Keeps the per-instance D-Bus name owned for the process lifetime.
     _dbus: Option<gtk::gio::OwnerId>,
 }
@@ -287,30 +293,23 @@ fn build_ui(
         && std::fs::read_to_string(&file)
             .map(|md| vault::may_reference_vault(&md))
             .unwrap_or(false);
-    let view = View::new(options.selection_clipboard);
-    let toc_view = TocView::new();
-    let bar = Bar::new();
-
-    let stack = Stack::new();
-    stack.set_vexpand(true);
-    stack.set_hexpand(true);
-    stack.add_named(view.widget(), Some("content"));
-    stack.add_named(toc_view.widget(), Some("toc"));
-    stack.set_visible_child_name("content");
-
-    let layout = GtkBox::new(Orientation::Vertical, 0);
-    layout.append(&stack);
-    layout.append(bar.widget());
+    // Shared with the host so the copy-on-select write and the find-clobbers-
+    // PRIMARY restore agree on what the user's last real selection was.
+    let last_selection: LastSelection = Rc::new(RefCell::new(None));
+    let view = View::new(options.selection_clipboard, last_selection.clone());
+    let chrome = GtkChrome::new(view.widget());
 
     let window = ApplicationWindow::builder()
         .application(app)
         .title("jumanji")
         .default_width((options.page_width_px + 80).max(640) as i32)
         .default_height(800)
-        .child(&layout)
+        .child(chrome.widget())
         .build();
 
-    bar.set_trail(vec![source.display_name()]);
+    let host = GlibHost::new(window.clone(), last_selection);
+
+    chrome.set_trail(vec![source.display_name()]);
 
     let config_dir = config::xdg_config_dir();
     let data_dir = xdg_data_dir();
@@ -363,9 +362,8 @@ fn build_ui(
         matcher: Matcher::new(Mode::Normal),
         mode: Mode::Normal,
         view: view.clone(),
-        toc_view,
-        stack,
-        bar: bar.clone(),
+        chrome,
+        host,
         window: window.clone(),
         toc: Vec::new(),
         section: 0,
@@ -440,7 +438,7 @@ fn build_ui(
     serve_dbus(&shell);
 
     window.present();
-    view.widget().grab_focus();
+    view.focus();
 
     // Initial render + load — deferred when the document may reference the
     // vault, so it can render once against the freshly landed index instead
@@ -467,8 +465,9 @@ const INITIAL_RENDER_FAILSAFE: std::time::Duration = std::time::Duration::from_m
 /// constructed with, which degrades to today's behaviour (a second render
 /// when the scan does land, see `rescan_vault`).
 fn arm_initial_render_failsafe(shell: &Rc<RefCell<Shell>>) {
+    let host = shell.borrow().host.clone();
     let shell = shell.clone();
-    glib::timeout_add_local_once(INITIAL_RENDER_FAILSAFE, move || {
+    host.defer(INITIAL_RENDER_FAILSAFE, move || {
         let still_deferred = {
             let mut s = shell.borrow_mut();
             std::mem::take(&mut s.initial_render_deferred)
@@ -524,10 +523,10 @@ fn on_native_scroll(shell: &Rc<RefCell<Shell>>, payload: &str) {
     s.last_scroll = y;
     // Same fields `refresh_status` re-fits/paints, just built synchronously
     // from the shell instead of round-tripping into the page for them.
-    s.bar.refit_trail();
+    s.chrome.refit_trail();
     let pending = s.matcher.pending_indicator();
     let zoom = zoom_indicator(s.zoom, s.text_zoom);
-    s.bar.set_status_right(percent, &pending, &zoom);
+    s.chrome.set_status_right(percent, &pending, &zoom);
 }
 
 /// Read the file, render it, and load the HTML. When `preserve_scroll`, capture
@@ -567,57 +566,63 @@ fn rescan_vault(shell: &Rc<RefCell<Shell>>) {
         }
         s.vault_scanning = true;
     }
-    let root = shell.borrow().vault_root.clone();
+    let (root, host) = {
+        let s = shell.borrow();
+        (s.vault_root.clone(), s.host.clone())
+    };
     // Weak: a scan outliving its window must not keep the shell alive.
     let weak = Rc::downgrade(shell);
-    glib::spawn_future_local(async move {
-        let scanned =
-            gio::spawn_blocking(move || VaultIndex::build(root.clone(), vault::scan(&root))).await;
-        let Some(shell) = weak.upgrade() else {
-            return;
-        };
-        let mut s = shell.borrow_mut();
-        s.vault_scanning = false;
-        // A deferred initial render (see `initial_render_deferred`) is waiting
-        // on exactly this landing — nothing has been rendered at all yet, so
-        // it must go out even when the scan found nothing new (an empty vault
-        // scans identical to the empty index the shell started with) or the
-        // walk itself panicked. Consumed here, before either early return
-        // below, so neither can skip it.
-        let deferred = std::mem::take(&mut s.initial_render_deferred);
-        // `Err` is a panic in the walk. Keeping the previous index costs some
-        // links their targets; taking down the reader would cost the document.
-        let Ok(index) = scanned else {
+    host.spawn_blocking(
+        move || VaultIndex::build(root.clone(), vault::scan(&root)),
+        move |scanned| {
+            let Some(shell) = weak.upgrade() else {
+                return;
+            };
+            let mut s = shell.borrow_mut();
+            s.vault_scanning = false;
+            // A deferred initial render (see `initial_render_deferred`) is
+            // waiting on exactly this landing — nothing has been rendered at
+            // all yet, so it must go out even when the scan found nothing new
+            // (an empty vault scans identical to the empty index the shell
+            // started with) or the walk itself panicked. Consumed here, before
+            // either early return below, so neither can skip it.
+            let deferred = std::mem::take(&mut s.initial_render_deferred);
+            // `None` is a panic in the walk. Keeping the previous index costs
+            // some links their targets; taking down the reader would cost the
+            // document.
+            let Some(index) = scanned else {
+                if deferred {
+                    drop(s);
+                    do_render_and_load(&shell);
+                }
+                return;
+            };
+            if *s.vault.index() == index {
+                if deferred {
+                    drop(s);
+                    do_render_and_load(&shell);
+                }
+                return;
+            }
+            s.vault.set_index(index);
             if deferred {
                 drop(s);
                 do_render_and_load(&shell);
+                return;
             }
-            return;
-        };
-        if *s.vault.index() == index {
-            if deferred {
-                drop(s);
-                do_render_and_load(&shell);
+            if !s.doc_uses_vault {
+                return;
             }
-            return;
-        }
-        s.vault.set_index(index);
-        if deferred {
+            // A position already armed (a history offset, a jumplist hop, a
+            // link fragment) is the place the reader asked for, and the load
+            // that would land it has not finished yet. Re-reading the live
+            // scroll here would capture the pre-restore 0.0 and overwrite it;
+            // keep the armed one.
+            let preserve_scroll = matches!(s.pending_position, InitialPosition::Top);
             drop(s);
-            do_render_and_load(&shell);
-            return;
-        }
-        if !s.doc_uses_vault {
-            return;
-        }
-        // A position already armed (a history offset, a jumplist hop, a link
-        // fragment) is the place the reader asked for, and the load that would
-        // land it has not finished yet. Re-reading the live scroll here would
-        // capture the pre-restore 0.0 and overwrite it; keep the armed one.
-        let preserve_scroll = matches!(s.pending_position, InitialPosition::Top);
-        drop(s);
-        render_and_load(&shell, preserve_scroll);
-    });
+            render_and_load(&shell, preserve_scroll);
+        },
+    );
 }
 
 fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
@@ -645,22 +650,23 @@ fn do_render_and_load(shell: &Rc<RefCell<Shell>>) {
             let doc = pipeline::render(&md, &s.render_opts, &s.vault);
             s.toc = doc.toc.clone();
             s.section = 0;
-            // Record the desired recolor state before loading so `load_document`
-            // pre-applies the `dark` class and paints dark from the first frame.
+            // Re-assert the recolor on the outgoing document, and hand the same
+            // state to `load_document` so it pre-applies the `dark` class on
+            // `<html>` and the new document paints dark from its first frame.
             let dark = s.dark;
             s.view.set_dark(dark);
             // Text zoom rides into the HTML the same way, so the first frames
             // are already at the right size; `None` keeps the stylesheet's base.
             let font_size_px = (s.text_zoom != 1.0).then(|| s.font_base_px * s.text_zoom);
             let at = s.pending_position.clone();
-            s.view.load_document(&doc, &path, &at, font_size_px);
+            s.view.load_document(&doc, &path, &at, dark, font_size_px);
         }
         Err(msg) => {
             // No load will finish, so nothing would ever consume the armed
             // position — disarm it rather than let it leak into a later load of
             // some other document.
             s.pending_position = InitialPosition::Top;
-            s.bar.set_message(&msg);
+            s.chrome.set_message(&msg);
         }
     }
 }
@@ -733,10 +739,10 @@ fn connect_keys(shell: &Rc<RefCell<Shell>>, keymap: Rc<Keymap>) {
 
         // 3) While the input bar is open, let the entry type; Tab completes a
         //    `:` command line, and any edit invalidates a pending cycle.
-        let input_visible = shell.borrow().bar.is_input_visible();
+        let input_visible = shell.borrow().chrome.prompt().is_some();
         if input_visible {
             if keyval == GdkKey::Tab || keyval == GdkKey::ISO_Left_Tab {
-                let is_cmd = shell.borrow().bar.prompt() == Some(Prompt::Command);
+                let is_cmd = shell.borrow().chrome.prompt() == Some(Prompt::Command);
                 if is_cmd {
                     do_completion(&shell);
                 }
@@ -877,8 +883,9 @@ fn accumulate_wheel_zoom(shell: &Rc<RefCell<Shell>>, dy: f64) {
     if leading {
         // Apply the first tick immediately, then open the trailing window.
         flush_wheel_zoom(shell);
+        let host = shell.borrow().host.clone();
         let sh = shell.clone();
-        glib::timeout_add_local_once(WHEEL_ZOOM_COALESCE, move || {
+        host.defer(WHEEL_ZOOM_COALESCE, move || {
             sh.borrow_mut().zoom_flush_scheduled = false;
             flush_wheel_zoom(&sh);
         });
@@ -936,17 +943,17 @@ fn cursor_anchor(s: &Shell) -> ZoomAnchor {
 /// Wire the input bar's `Enter`: run a search or a `:` command depending on the
 /// active prompt kind.
 fn connect_input_entry(shell: &Rc<RefCell<Shell>>) {
-    let entry = shell.borrow().bar.entry().clone();
+    let entry = shell.borrow().chrome.entry().clone();
     let shell = shell.clone();
     entry.connect_activate(move |_| {
-        let prompt = shell.borrow().bar.prompt();
-        let query = shell.borrow().bar.input_query();
+        let prompt = shell.borrow().chrome.prompt();
+        let query = shell.borrow().chrome.input_query();
         match prompt {
             Some(Prompt::Search) => {
                 {
                     let s = shell.borrow();
-                    s.bar.close_input();
-                    s.view.widget().grab_focus();
+                    s.chrome.close_input();
+                    s.view.focus();
                 }
                 shell.borrow_mut().completion = None;
                 if query.is_empty() {
@@ -960,8 +967,8 @@ fn connect_input_entry(shell: &Rc<RefCell<Shell>>) {
             Some(Prompt::Command) => {
                 {
                     let s = shell.borrow();
-                    s.bar.close_input();
-                    s.view.widget().grab_focus();
+                    s.chrome.close_input();
+                    s.view.focus();
                 }
                 shell.borrow_mut().completion = None;
                 run_command(&shell, &query);
@@ -1001,7 +1008,8 @@ fn start_watch(shell: &Rc<RefCell<Shell>>) {
 /// reading position exactly like live reload. EOF just stops the updates.
 fn start_stdin(shell: &Rc<RefCell<Shell>>) {
     let handler_shell = shell.clone();
-    let reader = StdinReader::start(move || render_and_load(&handler_shell, true));
+    let host = shell.borrow().host.clone();
+    let reader = StdinReader::start(&host, move || render_and_load(&handler_shell, true));
     let mut s = shell.borrow_mut();
     s.stdin_buffer = Some(reader.buffer());
     s._stdin = Some(reader);
@@ -1010,19 +1018,22 @@ fn start_stdin(shell: &Rc<RefCell<Shell>>) {
 /// (Re)point the document watcher at `path`, replacing any existing one.
 fn restart_watch(shell: &Rc<RefCell<Shell>>, path: &Path) {
     let handler_shell = shell.clone();
-    let watch = Watch::start(path, move |event| match event {
+    let host = shell.borrow().host.clone();
+    let watch = Watch::start(&host, path, move |event| match event {
         FileEvent::Changed => render_and_load(&handler_shell, true),
         FileEvent::Removed => {
             handler_shell
                 .borrow()
-                .bar
+                .chrome
                 .set_message("file removed — showing last render");
         }
     });
     let mut s = shell.borrow_mut();
     match watch {
         Ok(w) => s._watch = Some(w),
-        Err(err) => s.bar.set_message(&format!("live reload disabled: {err}")),
+        Err(err) => s
+            .chrome
+            .set_message(&format!("live reload disabled: {err}")),
     }
 }
 
@@ -1040,7 +1051,8 @@ fn start_theme_watch(shell: &Rc<RefCell<Shell>>) {
         return; // No themes dir yet: empty, no error, no watcher.
     }
     let handler_shell = shell.clone();
-    if let Ok(w) = Watch::start_dir(&dir, move |_| render_and_load(&handler_shell, true)) {
+    let host = shell.borrow().host.clone();
+    if let Ok(w) = Watch::start_dir(&host, &dir, move |_| render_and_load(&handler_shell, true)) {
         shell.borrow_mut()._theme_watch = Some(w);
     }
 }
@@ -1137,16 +1149,21 @@ fn on_editor_sync(shell: &Rc<RefCell<Shell>>, line: &str) {
     if shell.borrow().is_stdin() {
         shell
             .borrow()
-            .bar
+            .chrome
             .set_message("editor sync unavailable for a stdin document (no file)");
         return;
     }
     let Ok(line) = line.trim().parse::<u32>() else {
         return;
     };
-    let (command, file, bar) = {
+    let (command, file, chrome, host) = {
         let s = shell.borrow();
-        (s.editor_command.clone(), s.file.clone(), s.bar.clone())
+        (
+            s.editor_command.clone(),
+            s.file.clone(),
+            s.chrome.clone(),
+            s.host.clone(),
+        )
     };
     // Substitute `%l`/`%f`, then expand a leading `$VAR` per token (so the
     // default `$EDITOR` resolves from the environment at spawn time).
@@ -1157,18 +1174,11 @@ fn on_editor_sync(shell: &Rc<RefCell<Shell>>, line: &str) {
         .collect();
 
     match argv.split_first() {
-        Some((program, _)) if !program.is_empty() => {
-            let owned: Vec<std::ffi::OsString> =
-                argv.iter().map(std::ffi::OsString::from).collect();
-            let refs: Vec<&std::ffi::OsStr> = owned.iter().map(AsRef::as_ref).collect();
-            // gio::Subprocess reaps the child via the main loop and never blocks
-            // us; we drop the handle (fire-and-forget), matching zathura.
-            match gio::Subprocess::newv(&refs, gio::SubprocessFlags::NONE) {
-                Ok(_) => bar.set_message(&format!("editor: {program} at line {line}")),
-                Err(e) => bar.set_message(&format!("editor-command failed: {e}")),
-            }
-        }
-        _ => bar.set_message("editor-command has no program (set $EDITOR or editor-command)"),
+        Some((program, _)) if !program.is_empty() => match host.spawn_detached(&argv) {
+            Ok(()) => chrome.set_message(&format!("editor: {program} at line {line}")),
+            Err(e) => chrome.set_message(&format!("editor-command failed: {e}")),
+        },
+        _ => chrome.set_message("editor-command has no program (set $EDITOR or editor-command)"),
     }
 }
 
@@ -1245,7 +1255,7 @@ fn mode_str(s: &Shell) -> &'static str {
     if matches!(s.input, Input::Hint { .. }) {
         return "hint";
     }
-    match s.bar.prompt() {
+    match s.chrome.prompt() {
         Some(Prompt::Command) => return "command",
         Some(Prompt::Search) => return "search",
         None => {}
@@ -1388,14 +1398,14 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             // fighting over the combined reflow).
             s.view.reset_zoom(base);
         }
-        Action::SearchStart => s.bar.open_input(Prompt::Search),
+        Action::SearchStart => s.chrome.open_input(Prompt::Search),
         Action::SearchNext => s.view.find_next(),
         Action::SearchPrevious => s.view.find_previous(),
         Action::Recolor => {
             s.dark = !s.dark;
             let dark = s.dark;
             s.view.set_dark(dark);
-            s.toc_view.set_dark(dark);
+            s.chrome.set_dark(dark);
         }
         Action::Reload => {
             drop(s);
@@ -1417,7 +1427,7 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             drop(s);
             toggle_toc(shell);
         }
-        Action::CommandLine => s.bar.open_input(Prompt::Command),
+        Action::CommandLine => s.chrome.open_input(Prompt::Command),
         Action::FollowLink => {
             drop(s);
             start_hints(shell, HintKind::Follow);
@@ -1434,7 +1444,7 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             view.scroll_position(move |y| {
                 let mut s = sh.borrow_mut();
                 s.marks.set(c, Position { scroll_y: y, zoom });
-                s.bar.set_message(&format!("mark {c} set"));
+                s.chrome.set_message(&format!("mark {c} set"));
             });
         }
         Action::QuickmarkJump(c) => {
@@ -1467,7 +1477,7 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
                         refresh_status(&sh);
                     });
                 }
-                None => shell.borrow().bar.set_message(&format!("no mark {c}")),
+                None => shell.borrow().chrome.set_message(&format!("no mark {c}")),
             }
         }
         Action::JumpBackward => {
@@ -1492,27 +1502,31 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
                 show_trail(&shell.borrow());
             }
         }
-        Action::TocNext => s.toc_view.move_selection(count_i as i32),
-        Action::TocPrevious => s.toc_view.move_selection(-(count_i as i32)),
-        Action::TocExpand => s.toc_view.expand_selected(),
-        Action::TocCollapse => s.toc_view.collapse_selected(),
+        Action::TocNext => s.chrome.toc_move(count_i as i32),
+        Action::TocPrevious => s.chrome.toc_move(-(count_i as i32)),
+        Action::TocExpand => s.chrome.toc_expand(),
+        Action::TocCollapse => s.chrome.toc_collapse(),
         Action::TocSelect => {
             drop(s);
             toc_select(shell);
         }
         Action::Abort => {
+            // Read the mode *before* resetting it: leaving the TOC page is
+            // decided by the mode the abort interrupted, not the one it is
+            // about to install.
+            let in_toc = s.mode == Mode::Toc;
             s.matcher.set_mode(Mode::Normal);
             s.mode = Mode::Normal;
-            if s.stack.visible_child_name().as_deref() == Some("toc") {
+            if in_toc {
                 leave_toc(&mut s);
             }
             if matches!(s.input, Input::Hint { .. }) {
                 s.view.clear_hints();
                 s.input = Input::None;
             }
-            if s.bar.is_input_visible() {
-                s.bar.close_input();
-                s.view.widget().grab_focus();
+            if s.chrome.prompt().is_some() {
+                s.chrome.close_input();
+                s.view.focus();
             }
             // Zathura's universal abort: Esc also drops any active search
             // (highlights + `n`/`N` state) and clears any transient statusbar
@@ -1522,11 +1536,11 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
             s.completion = None;
         }
         Action::Quit => {
-            // `close()` synchronously emits close-request, whose handler
+            // Quitting synchronously emits close-request, whose handler
             // re-borrows the shell to flush history — so release our borrow first.
-            let window = s.window.clone();
+            let host = s.host.clone();
             drop(s);
-            window.close();
+            host.quit();
         }
     }
 }
@@ -1535,21 +1549,21 @@ fn execute(shell: &Rc<RefCell<Shell>>, action: Action, count: u32) {
 /// the live scroll offset for the synchronous close-time history flush.
 fn refresh_status(shell: &Rc<RefCell<Shell>>) {
     let sh = shell.clone();
-    let (view, bar, pending, zoom) = {
+    let (view, chrome, pending, zoom) = {
         let s = shell.borrow();
         // The bar may have been resized since the breadcrumb was last laid out;
         // re-fitting here is idempotent and costs a string compare.
-        s.bar.refit_trail();
+        s.chrome.refit_trail();
         (
             s.view.clone(),
-            s.bar.clone(),
+            s.chrome.clone(),
             s.matcher.pending_indicator(),
             zoom_indicator(s.zoom, s.text_zoom),
         )
     };
     view.scroll_state(move |vs| {
         sh.borrow_mut().last_scroll = vs.scroll_y;
-        bar.set_status_right(vs.scroll_percent, &pending, &zoom);
+        chrome.set_status_right(vs.scroll_percent, &pending, &zoom);
     });
 }
 
@@ -1562,8 +1576,8 @@ fn connect_toc_activate(shell: &Rc<RefCell<Shell>>) {
     let handler_shell = shell.clone();
     shell
         .borrow()
-        .toc_view
-        .set_activate_handler(move || toc_select(&handler_shell));
+        .chrome
+        .set_toc_activate_handler(move || toc_select(&handler_shell));
 }
 
 /// Toggle between the content page and the TOC page (zathura `Tab`).
@@ -1574,15 +1588,14 @@ fn toggle_toc(shell: &Rc<RefCell<Shell>>) {
             leave_toc(&mut s);
         } else {
             if s.toc.is_empty() {
-                s.bar.set_message("no headings");
+                s.chrome.set_message("no headings");
                 return;
             }
             let (toc, section, dark) = (s.toc.clone(), s.section, s.dark);
-            s.toc_view.rebuild(&toc, section, dark);
             s.mode = Mode::Toc;
             s.matcher.set_mode(Mode::Toc);
-            s.stack.set_visible_child_name("toc");
-            s.bar.set_message("Index");
+            s.chrome.show_toc(&toc, section, dark);
+            s.chrome.set_message("Index");
         }
     }
     refresh_status(shell);
@@ -1592,9 +1605,9 @@ fn toggle_toc(shell: &Rc<RefCell<Shell>>) {
 fn leave_toc(s: &mut Shell) {
     s.mode = Mode::Normal;
     s.matcher.set_mode(Mode::Normal);
-    s.stack.set_visible_child_name("content");
+    s.chrome.hide_toc();
     show_trail(s);
-    s.view.widget().grab_focus();
+    s.view.focus();
 }
 
 /// Jump to the selected TOC entry's anchor and return to Normal mode (records a
@@ -1602,7 +1615,7 @@ fn leave_toc(s: &mut Shell) {
 fn toc_select(shell: &Rc<RefCell<Shell>>) {
     let target = {
         let mut s = shell.borrow_mut();
-        match s.toc_view.selected() {
+        match s.chrome.toc_selected() {
             Some(sel) => {
                 leave_toc(&mut s);
                 Some(sel)
@@ -1633,7 +1646,7 @@ fn start_hints(shell: &Rc<RefCell<Shell>>, kind: HintKind) {
         typed: String::new(),
         links: Vec::new(),
     };
-    s.bar.set_message(hint_prompt(kind));
+    s.chrome.set_message(hint_prompt(kind));
     s.view.request_hints();
 }
 
@@ -1659,7 +1672,7 @@ fn on_hints_posted(shell: &Rc<RefCell<Shell>>, msg: &str) {
         {
             let s = shell.borrow();
             s.view.clear_hints();
-            s.bar.set_message("no links in view");
+            s.chrome.set_message("no links in view");
         }
         shell.borrow_mut().input = Input::None;
         return;
@@ -1749,7 +1762,7 @@ fn hint_resolve(shell: &Rc<RefCell<Shell>>) -> Option<HintAction> {
 fn hint_act(shell: &Rc<RefCell<Shell>>, action: HintAction) {
     match action {
         HintAction::Follow(href) => open_uri(shell, &href),
-        HintAction::Show(href) => shell.borrow().bar.set_message(&format!("→ {href}")),
+        HintAction::Show(href) => shell.borrow().chrome.set_message(&format!("→ {href}")),
     }
 }
 
@@ -1757,7 +1770,7 @@ fn update_hint_status(shell: &Rc<RefCell<Shell>>) {
     let s = shell.borrow();
     if let Input::Hint { kind, typed, .. } = &s.input {
         let prompt = hint_prompt(*kind);
-        s.bar.set_message(&format!("{prompt} {typed}"));
+        s.chrome.set_message(&format!("{prompt} {typed}"));
     }
 }
 
@@ -1830,15 +1843,13 @@ fn open_uri(shell: &Rc<RefCell<Shell>>, uri: &str) {
     }
 
     // Everything else (http/https, other local files) → the system default.
-    match gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>) {
-        Ok(()) => shell
-            .borrow()
-            .bar
-            .set_message(&format!("opened externally: {uri}")),
-        Err(e) => shell
-            .borrow()
-            .bar
-            .set_message(&format!("cannot open {uri}: {e}")),
+    let (host, chrome) = {
+        let s = shell.borrow();
+        (s.host.clone(), s.chrome.clone())
+    };
+    match host.open_external(uri) {
+        Ok(()) => chrome.set_message(&format!("opened externally: {uri}")),
+        Err(e) => chrome.set_message(&format!("cannot open {uri}: {e}")),
     }
 }
 
@@ -1851,7 +1862,7 @@ fn open_file(shell: &Rc<RefCell<Shell>>, path: PathBuf, anchor: Option<String>) 
     if !path.exists() {
         shell
             .borrow()
-            .bar
+            .chrome
             .set_message(&format!("no such file: {}", path.display()));
         return;
     }
@@ -1989,11 +2000,11 @@ fn run_command(shell: &Rc<RefCell<Shell>>, query: &str) {
         Ok(Command::Set(key, value)) => apply_set(shell, &key, &value),
         Ok(Command::Exec(action)) => execute(shell, action, 1),
         Ok(Command::Quit) => {
-            // Release the borrow before `close()` (its handler re-borrows).
-            let window = shell.borrow().window.clone();
-            window.close();
+            // Release the borrow before quitting (the handler re-borrows).
+            let host = shell.borrow().host.clone();
+            host.quit();
         }
-        Err(e) => shell.borrow().bar.set_message(&e),
+        Err(e) => shell.borrow().chrome.set_message(&e),
     }
 }
 
@@ -2001,7 +2012,7 @@ fn run_command(shell: &Rc<RefCell<Shell>>, query: &str) {
 fn apply_set(shell: &Rc<RefCell<Shell>>, key: &str, value: &str) {
     let effect = shell.borrow_mut().options.set(key, value);
     match effect {
-        Err(e) => shell.borrow().bar.set_message(&e),
+        Err(e) => shell.borrow().chrome.set_message(&e),
         Ok(SetEffect::Rerender) => {
             {
                 let mut s = shell.borrow_mut();
@@ -2020,7 +2031,7 @@ fn apply_set(shell: &Rc<RefCell<Shell>>, key: &str, value: &str) {
             s.dark = s.options.default_recolor;
             let dark = s.dark;
             s.view.set_dark(dark);
-            s.toc_view.set_dark(dark);
+            s.chrome.set_dark(dark);
         }
         Ok(SetEffect::None) => {
             let mut s = shell.borrow_mut();
@@ -2034,13 +2045,13 @@ fn apply_set(shell: &Rc<RefCell<Shell>>, key: &str, value: &str) {
 /// Tab-complete the `:` command line, cycling on repeated presses.
 fn do_completion(shell: &Rc<RefCell<Shell>>) {
     let mut s = shell.borrow_mut();
-    if s.bar.prompt() != Some(Prompt::Command) {
+    if s.chrome.prompt() != Some(Prompt::Command) {
         return;
     }
-    let current = s.bar.input_query();
+    let current = s.chrome.input_query();
     // Taken before the completion borrow below: the echo is laid out to fit the
     // bar, so it pages through *all* candidates instead of listing a prefix.
-    let cols = s.bar.status_columns();
+    let cols = s.chrome.status_columns();
 
     // Cycle when the shown text is the current candidate and there are more.
     if let Some(comp) = s.completion.as_mut() {
@@ -2053,8 +2064,8 @@ fn do_completion(shell: &Rc<RefCell<Shell>>) {
             comp.index = (comp.index + 1) % comp.candidates.len();
             let next = comp.candidates[comp.index].clone();
             let line = command::completion_line(&comp.candidates, comp.index, cols);
-            s.bar.set_input_query(&next);
-            s.bar.set_message(&line);
+            s.chrome.set_input_query(&next);
+            s.chrome.set_message(&line);
             return;
         }
     }
@@ -2068,8 +2079,8 @@ fn do_completion(shell: &Rc<RefCell<Shell>>) {
     }
     let first = candidates[0].clone();
     let line = command::completion_line(&candidates, 0, cols);
-    s.bar.set_input_query(&first);
-    s.bar.set_message(&line);
+    s.chrome.set_input_query(&first);
+    s.chrome.set_message(&line);
     s.completion = Some(Completion {
         candidates,
         index: 0,
@@ -2163,7 +2174,7 @@ fn expand_tilde(s: &str) -> PathBuf {
 /// to the current document (`index.md > topic.md > note.md`). Called after a
 /// document switch, a jumplist hop, and whenever a transient message clears.
 fn show_trail(s: &Shell) {
-    s.bar.set_trail(trail_segments(s));
+    s.chrome.set_trail(trail_segments(s));
 }
 
 /// The breadcrumb segments: the jumplist's route to the live document, as
@@ -2234,14 +2245,14 @@ fn navigate_to_location(shell: &Rc<RefCell<Shell>>, loc: Location) -> bool {
         Some(path) => {
             shell
                 .borrow()
-                .bar
+                .chrome
                 .set_message(&format!("no such file: {}", path.display()));
             false
         }
         None => {
             shell
                 .borrow()
-                .bar
+                .chrome
                 .set_message("cannot return to piped input");
             false
         }
