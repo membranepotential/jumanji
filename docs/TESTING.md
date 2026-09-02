@@ -115,6 +115,53 @@ state):
 | `reload_of_a_growing_document_reveals_only_at_the_restored_offset` | live reload of the growing fixture: the body is unhidden only once the preserved offset is reached, never by the failsafe |
 | `jumplist_return_to_a_growing_document_reveals_only_at_the_stored_offset` | the same, on the reported flash path — `Ctrl-o` back into a document last read at the bottom, loaded from scratch |
 
+## Performance: the third layer
+
+The suite proves behaviour; two measurements prove the reader has not got
+slower. Both live in the repo and both run in CI (`.github/workflows/bench.yml`).
+
+- **`cargo bench --bench pipeline`** — criterion over `core::pipeline::render`
+  for representative document shapes (`benches/pipeline.rs`). Pure CPU work,
+  stable to a few percent on a quiet machine.
+- **`scripts/bench-startup.sh`** — wall clock from process spawn until the
+  D-Bus `GetState` reports `loaded: true`, headless (private Xvfb + bus per
+  run), median over N runs, for `demo/demo.md` and a generated wikilink-heavy
+  vault. This is the number the reader is judged on: it spans WebKit's process
+  spawn, the pipeline, and the shell's own startup path. `-b BIN` measures a
+  given binary; `-j FILE` writes the medians as JSON.
+
+### Checking a change against a baseline
+
+```sh
+scripts/bench-compare.sh            # latest tag vs. the working tree
+scripts/bench-compare.sh v1.8.0     # or any ref
+```
+
+It builds the ref in a throwaway worktree (`.bench-baseline/`, its own
+`target-baseline/`), then runs the startup timing for both binaries
+**interleaved** run by run — so a machine that warms or cools mid-bench skews
+both sides equally — and the pipeline benches with the ref saved as a
+criterion baseline, so criterion reports the change and its p-value per bench.
+One table for startup, criterion's own report for the pipeline.
+
+Run it on a quiet machine — no builds, no test suites, nothing in the
+background — or the numbers mean nothing. Any refactor of the shell should
+show a startup delta inside the run-to-run noise (a few percent) and "No
+change" from criterion; anything else is a finding, not a rounding error.
+
+### In CI
+
+`bench.yml` runs both on every push to `main` and every pull request:
+
+- the results are appended to a JSON trail on the **`bench-data`** branch (a
+  plain branch in this repository — nothing is published);
+- every run uploads its raw output (the criterion report, the bencher-format
+  lines, the startup JSON) as a workflow artifact;
+- a PR gets an alert comment when a bench regresses past the threshold — the
+  pipeline benches **fail the job** at 130 %, the startup timing only
+  comments, at 150 %, because a WebKit spawn on a shared runner is too noisy
+  to gate on. The job summary shows the numbers either way.
+
 ## The D-Bus interface is the automation / editor-sync surface
 
 The tests don't use a back door. They exercise the same per-instance D-Bus
