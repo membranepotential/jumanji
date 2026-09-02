@@ -47,10 +47,9 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
 1. **Mac shell** — Torsten's, on branch `mac-support`, after their spike;
    `05-macos-port.md` §5.3 is the guide. Owner side: review PRs, keep CI green.
-2. Reply on issue #1 (drafted; Felix posts via the bot account).
-3. Trim the e2e suite toward what needs a real engine (unit tests now cover
+2. Trim the e2e suite toward what needs a real engine (unit tests now cover
    the flows in ms).
-4. Delete `.flash-investigation/` (gitignored) — bug closed, released, and the
+3. Delete `.flash-investigation/` (gitignored) — bug closed, released, and the
    suite now defends the fix.
 
 ## Open questions
