@@ -5,5 +5,6 @@
 //! library, in addition to the `jumanji` binary, so integration benches and
 //! tests can reach `core::pipeline` directly.
 
+pub mod controller;
 pub mod core;
 pub mod shell;
