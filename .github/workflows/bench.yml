@@ -64,7 +64,10 @@ jobs:
           fi
 
       - name: Pipeline benches (criterion, libtest-style output)
-        run: cargo bench --bench pipeline -- --output-format bencher | tee pipeline.txt
+        # bash for pipefail: a build failure must fail the step, not hide
+        # behind tee's exit code and hand the action an empty file.
+        shell: bash
+        run: set -o pipefail; cargo bench --bench pipeline -- --output-format bencher | tee pipeline.txt
 
       - name: Startup timing (headless, median of 7)
         run: scripts/bench-startup.sh -n 7 -j startup.json
