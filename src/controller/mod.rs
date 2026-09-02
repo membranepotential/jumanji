@@ -14,6 +14,7 @@
 
 pub mod page;
 pub mod scripts;
+pub mod session;
 pub mod stdin;
 pub mod toolkit;
 pub mod watch;

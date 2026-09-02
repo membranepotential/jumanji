@@ -155,7 +155,7 @@ impl Options {
             }
             "selection-clipboard" => {
                 // Validate for a helpful message, but reject regardless: the
-                // clipboard target is wired at view-construction time.
+                // selection target is a launch-time choice, not a live one.
                 SelectionClipboard::parse(value)
                     .map_err(|m| format!("selection-clipboard: {m}"))?;
                 Err("selection-clipboard cannot be changed at runtime".to_string())

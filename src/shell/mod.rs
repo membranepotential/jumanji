@@ -1,13 +1,9 @@
-//! Imperative shell: GTK4 window, WebKit view, bars, main-loop host.
+//! Imperative shells: one per toolkit.
 //!
-//! As thin as possible — logic lives in `core` and `controller`. Each of the
-//! three toolkit traits (`controller::toolkit`) has exactly one implementation
-//! here: [`view::View`], [`chrome::GtkChrome`], [`host::GlibHost`].
-
-pub mod app;
-mod bar;
-mod chrome;
-pub mod dbus;
-mod host;
-mod toc;
-mod view;
+//! [`gtk`] is the Linux shell — GTK4 window, WebKitGTK view, bars, glib host —
+//! and today the only one. It is deliberately a *sibling* rather than the
+//! shell: everything above it (`core`, `controller`) is toolkit-agnostic, so a
+//! second shell (a tao + wry macOS one, see `docs/research/05-macos-port.md`)
+//! sits beside this module and implements the same three traits rather than
+//! displacing anything.
+pub mod gtk;

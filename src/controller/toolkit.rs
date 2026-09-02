@@ -180,8 +180,17 @@ pub trait Host {
 
 /// A toolkit: the three implementations bundled so the controller is generic
 /// over one type.
+///
+/// All three are `Clone + 'static` because the controller treats them as cheap
+/// handles: it hands them to `'static` callbacks (an eval completion, a timer,
+/// a worker landing) constantly, and a toolkit type that could not be copied
+/// into one would force every such site through the shared `RefCell` instead.
+/// GTK objects are refcounted handles already; a fake wraps its recording in an
+/// `Rc`. `Viewport: Clone + 'static` is also exactly what
+/// [`Page`](crate::controller::page::Page)'s blanket impl asks for, so a
+/// toolkit's viewport gets the shared behaviour by construction.
 pub trait Toolkit {
-    type Viewport: Viewport;
-    type Chrome: Chrome;
-    type Host: Host;
+    type Viewport: Viewport + Clone + 'static;
+    type Chrome: Chrome + Clone + 'static;
+    type Host: Host + Clone + 'static;
 }

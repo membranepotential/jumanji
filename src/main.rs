@@ -115,7 +115,7 @@ fn main() -> ExitCode {
     //
     // This MUST run before WebKit spawns its first render/web process — i.e.
     // before any GTK/WebKit initialisation, which only happens inside
-    // `shell::app::run`; nothing above it touches GTK. SAFETY: `set_var` is
+    // `shell::gtk::run`; nothing above it touches GTK. SAFETY: `set_var` is
     // `unsafe` under edition 2024 because a concurrent getenv/setenv is UB, but
     // this is the first statement in `main`, single-threaded, long before any
     // thread (GTK's included) is spawned.
@@ -187,7 +187,7 @@ fn main() -> ExitCode {
             // D-Bus and exit without opening a second window (zathura's
             // `--synctex-forward`). Otherwise fall through and open normally.
             if let Some(line) = cli.forward
-                && shell::dbus::forward_to_running_instance(&path, line)
+                && shell::gtk::dbus::forward_to_running_instance(&path, line)
             {
                 return ExitCode::SUCCESS;
             }
@@ -215,7 +215,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let exit = shell::app::run(source, config, cli.forward);
+    let exit = shell::gtk::run(source, config, cli.forward);
     if exit == glib::ExitCode::SUCCESS {
         ExitCode::SUCCESS
     } else {
