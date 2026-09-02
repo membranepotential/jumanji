@@ -686,7 +686,9 @@ const SETTLE: Duration = Duration::from_secs(5);
 // real selection drag (mouse press-move-release across glyphs under Xvfb), which
 // is inherently flaky and slow. The clipboard *target* selection (primary vs
 // clipboard) is unit-tested in `core::config` (`selection_clipboard_parses_*`);
-// the JS→Rust write path is a thin `Clipboard::set_text` call in `shell::view`.
+// the JS→Rust write path is a thin `Clipboard::set_text` call in
+// `shell::gtk::host` (`GlibHost::copy_selection`), which `Controller::on_message`
+// hands the posted text to.
 
 #[test]
 fn j_and_k_scroll() {
