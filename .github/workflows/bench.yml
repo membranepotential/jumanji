@@ -1,16 +1,18 @@
 # Performance: the criterion pipeline benches and the headless startup timing,
 # on every push to main and every pull request.
 #
-# Two guards, one trail, all inside the repository:
-# - Every run is compared against the stored history and an alert comment is
-#   posted on the PR when a bench regresses past the threshold; the job
-#   summary shows the numbers either way.
-# - On main, the results are appended to the trail on the `bench-data`
-#   branch (a JSON history per bench, plus the action's stock chart page as a
-#   plain file — no GitHub Pages, nothing published), so a slow drift is
-#   visible even when no single change trips the alert.
-# - Every run uploads its raw output (criterion report, the bencher lines,
-#   the startup JSON) as a workflow artifact.
+# Two guards, one trail, nothing outside the repository's own Actions:
+# - Every run is compared against the trail and an alert comment is posted on
+#   the PR when a bench regresses past the threshold; the job summary shows
+#   the numbers either way.
+# - The trail is a JSON history per bench, carried forward as a workflow
+#   artifact: a run on main restores it from the previous successful main
+#   run, appends its own result, and uploads it again. No branch, no bot
+#   commits, no GitHub Pages. (Artifacts expire after 90 days, so the chain
+#   lives as long as main is pushed within that window; a snapshot committed
+#   at release time is the way to keep a point forever.)
+# - Every run also uploads its raw output (criterion report, bencher lines,
+#   startup JSON) as its own artifact.
 #
 # Thresholds are deliberately loose: shared runners are noisy, and the point
 # is to catch a real regression, not to fail the build on a scheduler hiccup.
@@ -24,7 +26,8 @@ on:
   pull_request:
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
   pull-requests: write
 
 env:
@@ -40,28 +43,28 @@ jobs:
       - name: Install toolchain, system libraries and the headless harness
         run: >-
           pacman -Syu --noconfirm --needed
-          rust mold gtk4 webkitgtk-6.0 git
+          rust mold gtk4 webkitgtk-6.0 git github-cli
           xorg-server-xvfb dbus glib2 mesa
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
 
-      # The benchmark action reads and writes the trail on its data branch and
-      # needs the branch to exist; create it once, empty, on the first run.
-      - name: Ensure the bench-data trail branch exists
-        if: github.event_name == 'push'
-        # An empty root commit pushed straight from the object store: no
-        # checkout, so the working tree the benches run in is never touched.
+      # The trail from the last successful run on main; an empty trail on the
+      # very first run (the action starts one from nothing).
+      - name: Restore the trail from the previous main run
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          if ! git ls-remote --exit-code --heads origin bench-data >/dev/null; then
-            export GIT_AUTHOR_NAME="github-actions[bot]" GIT_COMMITTER_NAME="github-actions[bot]"
-            export GIT_AUTHOR_EMAIL="github-actions[bot]@users.noreply.github.com"
-            export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
-            root=$(git commit-tree "$(git hash-object -t tree /dev/null)" -m "bench trail")
-            git push origin "$root:refs/heads/bench-data"
+          mkdir -p trail
+          last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow bench.yml --branch main \
+                   --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$last" ]; then
+            gh run download "$last" --repo "$GITHUB_REPOSITORY" -n bench-trail -D trail \
+              && echo "trail restored from run $last" \
+              || echo "run $last carried no trail artifact; starting fresh"
+          else
+            echo "no previous successful main run; starting a fresh trail"
           fi
+          ls -l trail || true
 
       - name: Pipeline benches (criterion, libtest-style output)
         # bash for pipefail: a build failure must fail the step, not hide
@@ -72,44 +75,51 @@ jobs:
       - name: Startup timing (headless, median of 7)
         run: scripts/bench-startup.sh -n 7 -j startup.json
 
-      - name: Upload the raw results
+      - name: Upload this run's raw results
         uses: actions/upload-artifact@v4
         with:
-          name: bench-${{ github.sha }}
+          name: bench-raw-${{ github.sha }}
           path: |
             pipeline.txt
             startup.json
             target/criterion
           if-no-files-found: error
+          retention-days: 90
 
-      - name: Record pipeline benches
+      - name: Compare and record pipeline benches
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: pipeline
           tool: cargo
           output-file-path: pipeline.txt
-          gh-pages-branch: bench-data
-          benchmark-data-dir-path: pipeline
+          external-data-json-path: trail/pipeline.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: ${{ github.event_name == 'push' }}
           save-data-file: ${{ github.event_name == 'push' }}
           alert-threshold: "130%"
           comment-on-alert: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
           fail-on-alert: true
           summary-always: true
 
-      - name: Record startup timing
+      - name: Compare and record startup timing
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: startup
           tool: customSmallerIsBetter
           output-file-path: startup.json
-          gh-pages-branch: bench-data
-          benchmark-data-dir-path: startup
+          external-data-json-path: trail/startup.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: ${{ github.event_name == 'push' }}
           save-data-file: ${{ github.event_name == 'push' }}
           alert-threshold: "150%"
           comment-on-alert: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
           fail-on-alert: false
           summary-always: true
+
+      # Only a run on main extends the chain; a PR run compares and stops.
+      - name: Carry the trail forward
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-trail
+          path: trail
+          if-no-files-found: error
+          retention-days: 90

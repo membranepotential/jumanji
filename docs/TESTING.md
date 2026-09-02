@@ -138,25 +138,35 @@ scripts/bench-compare.sh v1.8.0     # or any ref
 ```
 
 It builds the ref in a throwaway worktree (`.bench-baseline/`, its own
-`target-baseline/`), then runs the startup timing for both binaries
-**interleaved** run by run — so a machine that warms or cools mid-bench skews
-both sides equally — and the pipeline benches with the ref saved as a
-criterion baseline, so criterion reports the change and its p-value per bench.
+`target-baseline/`), then measures both sides **interleaved**: the startup
+timing alternates the two binaries run by run, and the pipeline benches run
+ref-then-tree *per bench* from two prebuilt criterion binaries, the ref saved
+as that bench's baseline so criterion reports the change and its p-value.
 One table for startup, criterion's own report for the pipeline.
 
-Run it on a quiet machine — no builds, no test suites, nothing in the
-background — or the numbers mean nothing. Any refactor of the shell should
-show a startup delta inside the run-to-run noise (a few percent) and "No
-change" from criterion; anything else is a finding, not a rounding error.
+Interleaving is not a nicety. Measured on the development laptop (governor
+`powersave`, cores anywhere between 0.8 and 2.8 GHz): two whole criterion
+suites run back to back, from **byte-identical** binaries, differed by up to
+±50 % per bench, while adjacent runs of one bench agreed to a few percent.
+So run it on a quiet machine — no builds, no test suites, nothing in the
+background — and read only the interleaved figures. A refactor of the shell
+should show a startup delta inside the run-to-run noise and "No change" (or
+a few percent either way) from criterion; a consistent double-digit delta on
+one bench is a finding, not a rounding error.
 
 ### In CI
 
 `bench.yml` runs both on every push to `main` and every pull request:
 
-- the results are appended to a JSON trail on the **`bench-data`** branch (a
-  plain branch in this repository — nothing is published);
+- the trail is a JSON history per bench carried forward as a workflow
+  artifact (`bench-trail`): a run on `main` restores it from the previous
+  successful `main` run, appends its result, and uploads it again. No branch
+  holds it and nothing is committed by a bot — a data-only branch shares no
+  history with `main` and is not what branches are for. Artifacts expire
+  after 90 days, so the chain lives as long as `main` is pushed within that
+  window; to keep a point forever, commit a snapshot at release time;
 - every run uploads its raw output (the criterion report, the bencher-format
-  lines, the startup JSON) as a workflow artifact;
+  lines, the startup JSON) as its own artifact (`bench-raw-<sha>`);
 - a PR gets an alert comment when a bench regresses past the threshold — the
   pipeline benches **fail the job** at 130 %, the startup timing only
   comments, at 150 %, because a WebKit spawn on a shared runner is too noisy
