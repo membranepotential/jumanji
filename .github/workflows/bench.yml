@@ -14,10 +14,12 @@
 # - Every run also uploads its raw output (criterion report, bencher lines,
 #   startup JSON) as its own artifact.
 #
-# Thresholds are deliberately loose: shared runners are noisy, and the point
-# is to catch a real regression, not to fail the build on a scheduler hiccup.
-# The pipeline benches are pure CPU work and fail the job at 130%; the startup
-# timing spawns a WebKit process and only comments, at 150%.
+# What gates and what informs. The pipeline's cost in *instructions retired*
+# per render (cachegrind, scripts/bench-instructions.sh) is deterministic —
+# runner type and CPU frequency do not move it — so it fails the job at 105%.
+# The two wall-clock measurements are the numbers a reader feels, but shared
+# runners move them ±30% between instances (measured), so they only comment:
+# criterion at 130%, startup timing at 150%.
 name: bench
 
 on:
@@ -43,7 +45,7 @@ jobs:
       - name: Install toolchain, system libraries and the headless harness
         run: >-
           pacman -Syu --noconfirm --needed
-          rust mold gtk4 webkitgtk-6.0 git github-cli
+          rust mold gtk4 webkitgtk-6.0 git github-cli valgrind
           xorg-server-xvfb dbus glib2 mesa
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -80,6 +82,9 @@ jobs:
           rm -rf target/criterion
           cargo bench --bench pipeline -- --output-format bencher | tee pipeline.txt
 
+      - name: Pipeline instruction counts (cachegrind)
+        run: scripts/bench-instructions.sh -j instructions.json
+
       - name: Startup timing (headless, median of 7)
         run: scripts/bench-startup.sh -n 7 -j startup.json
 
@@ -89,12 +94,27 @@ jobs:
           name: bench-raw-${{ github.sha }}
           path: |
             pipeline.txt
+            instructions.json
             startup.json
             target/criterion
           if-no-files-found: error
           retention-days: 90
 
-      - name: Compare and record pipeline benches
+      - name: Compare and record pipeline instruction counts (the gate)
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: instructions
+          tool: customSmallerIsBetter
+          output-file-path: instructions.json
+          external-data-json-path: trail/instructions.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          save-data-file: ${{ github.event_name == 'push' }}
+          alert-threshold: "105%"
+          comment-on-alert: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
+          fail-on-alert: true
+          summary-always: true
+
+      - name: Compare and record pipeline wall clock
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: pipeline
@@ -105,7 +125,7 @@ jobs:
           save-data-file: ${{ github.event_name == 'push' }}
           alert-threshold: "130%"
           comment-on-alert: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
-          fail-on-alert: true
+          fail-on-alert: false
           summary-always: true
 
       - name: Compare and record startup timing

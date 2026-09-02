@@ -117,12 +117,20 @@ state):
 
 ## Performance: the third layer
 
-The suite proves behaviour; two measurements prove the reader has not got
-slower. Both live in the repo and both run in CI (`.github/workflows/bench.yml`).
+The suite proves behaviour; three measurements prove the reader has not got
+slower. All live in the repo and all run in CI (`.github/workflows/bench.yml`).
 
-- **`cargo bench --bench pipeline`** — criterion over `core::pipeline::render`
-  for representative document shapes (`benches/pipeline.rs`). Pure CPU work,
-  stable to a few percent on a quiet machine.
+- **`scripts/bench-instructions.sh`** — instructions retired per render, per
+  fixture, counted by valgrind's cachegrind through the bench binary's
+  `--once NAME --repeat K` mode (two runs differing by exactly K renders, so
+  start-up and one-time init cancel). **Deterministic**: runner type and CPU
+  frequency do not move it, so it is the number that *gates* — a 3 % change
+  is a change in the code. Needs `valgrind` (Arch: `pacman -S valgrind`).
+- **`cargo bench --bench pipeline`** — criterion wall clock over
+  `core::pipeline::render` for the same shapes (`benches/pipeline.rs`). The
+  felt number, but it moves with the machine: ±30 % between shared-runner
+  instances, up to 2× on a throttling laptop — measured on byte-identical
+  binaries. Informational.
 - **`scripts/bench-startup.sh`** — wall clock from process spawn until the
   D-Bus `GetState` reports `loaded: true`, headless (private Xvfb + bus per
   run), median over N runs, for `demo/demo.md` and a generated wikilink-heavy
@@ -138,21 +146,20 @@ scripts/bench-compare.sh v1.8.0     # or any ref
 ```
 
 It builds the ref in a throwaway worktree (`.bench-baseline/`, its own
-`target-baseline/`), then measures both sides **interleaved**: the startup
-timing alternates the two binaries run by run, and the pipeline benches run
-ref-then-tree *per bench* from two prebuilt criterion binaries, the ref saved
-as that bench's baseline so criterion reports the change and its p-value.
-One table for startup, criterion's own report for the pipeline.
+`target-baseline/`), then prints two tables: startup time, both binaries
+**interleaved** run by run so a machine that warms or cools mid-bench skews
+both sides equally; and pipeline instruction counts for both bench binaries,
+which need no interleaving because they do not drift.
 
-Interleaving is not a nicety. Measured on the development laptop (governor
-`powersave`, cores anywhere between 0.8 and 2.8 GHz): two whole criterion
-suites run back to back, from **byte-identical** binaries, differed by up to
-±50 % per bench, while adjacent runs of one bench agreed to a few percent.
-So run it on a quiet machine — no builds, no test suites, nothing in the
-background — and read only the interleaved figures. A refactor of the shell
-should show a startup delta inside the run-to-run noise and "No change" (or
-a few percent either way) from criterion; a consistent double-digit delta on
-one bench is a finding, not a rounding error.
+Why not criterion for the A/B: on the development laptop (governor
+`powersave`, cores anywhere between 0.8 and 2.8 GHz) byte-identical binaries
+read anywhere from −10 % to +140 % against each other, in every ordering
+tried — whole suites back to back, per-bench alternation, three alternations
+with medians. Wall clock is not a fair instrument for a 5 % question on that
+machine; instruction counts are. Run the startup half on a quiet machine — no
+builds, no test suites, nothing in the background. A refactor of the shell
+should show startup inside the run-to-run noise and pipeline instructions at
+0.00 %; a consistent delta on one fixture is a finding, not a rounding error.
 
 ### In CI
 
@@ -167,10 +174,11 @@ one bench is a finding, not a rounding error.
   window; to keep a point forever, commit a snapshot at release time;
 - every run uploads its raw output (the criterion report, the bencher-format
   lines, the startup JSON) as its own artifact (`bench-raw-<sha>`);
-- a PR gets an alert comment when a bench regresses past the threshold — the
-  pipeline benches **fail the job** at 130 %, the startup timing only
-  comments, at 150 %, because a WebKit spawn on a shared runner is too noisy
-  to gate on. The job summary shows the numbers either way.
+- a PR gets an alert comment when a measurement regresses past its
+  threshold: the pipeline **instruction counts fail the job** at 105 %; the
+  two wall-clock measurements only comment (criterion at 130 %, startup at
+  150 %), because shared runners move them ±30 % on their own. The job
+  summary shows all the numbers either way.
 
 ## The D-Bus interface is the automation / editor-sync surface
 

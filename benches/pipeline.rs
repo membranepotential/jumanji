@@ -295,11 +295,10 @@ const DEMO: &str = include_str!("../demo/demo.md");
 // Benchmark
 // ---------------------------------------------------------------------------
 
-fn bench_pipeline(c: &mut Criterion) {
-    let vault = bench_vault();
-    let opts = Options::default();
-
-    let cases: Vec<(&str, String)> = vec![
+/// The document shapes under measurement, by name. One list for both the
+/// criterion timing below and the instruction-count mode ([`render_once`]).
+fn fixtures() -> Vec<(&'static str, String)> {
+    vec![
         ("prose_10k", prose(10_000)),
         ("prose_500k", prose(500_000)),
         ("code_heavy", code_heavy()),
@@ -308,7 +307,13 @@ fn bench_pipeline(c: &mut Criterion) {
         ("wikilinks", wikilinks()),
         ("table_heavy", table_heavy()),
         ("demo", DEMO.to_string()),
-    ];
+    ]
+}
+
+fn bench_pipeline(c: &mut Criterion) {
+    let vault = bench_vault();
+    let opts = Options::default();
+    let cases = fixtures();
 
     let mut group = c.benchmark_group("pipeline::render");
     for (name, md) in &cases {
@@ -319,7 +324,54 @@ fn bench_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
+/// `--once NAME [--repeat K]`: render fixture NAME K more times after one
+/// warm-up render, then exit — no criterion, no timing.
+///
+/// This is the instruction-counting mode `scripts/bench-instructions.sh` runs
+/// under valgrind's cachegrind. Wall-clock benches drift with CPU frequency
+/// and runner type (measured: ±30% run to run on a shared runner, worse on a
+/// throttling laptop); the instructions a render retires do not. Two runs,
+/// K = 0 and K = N, differ by exactly N renders, so `(I_N − I_0) / N` is the
+/// per-render count with process start-up and the one-time syntect/math init
+/// (paid inside the warm-up render) cancelled out.
+struct Once {
+    fixture: String,
+    repeat: usize,
+}
+
+fn once_args() -> Option<Once> {
+    let args: Vec<String> = std::env::args().collect();
+    let pos = args.iter().position(|a| a == "--once")?;
+    let fixture = args.get(pos + 1)?.clone();
+    let repeat = args
+        .iter()
+        .position(|a| a == "--repeat")
+        .and_then(|p| args.get(p + 1))
+        .and_then(|k| k.parse().ok())
+        .unwrap_or(1);
+    Some(Once { fixture, repeat })
+}
+
+fn render_once(once: &Once) {
+    let vault = bench_vault();
+    let opts = Options::default();
+    let Some((_, md)) = fixtures().into_iter().find(|(n, _)| *n == once.fixture) else {
+        eprintln!("unknown fixture {:?}", once.fixture);
+        std::process::exit(2);
+    };
+    // Warm-up: the OnceLock initialisations land here, in both K runs alike.
+    black_box(pipeline::render(black_box(&md), &opts, &vault));
+    for _ in 0..once.repeat {
+        black_box(pipeline::render(black_box(&md), &opts, &vault));
+    }
+}
+
 fn main() {
+    if let Some(once) = once_args() {
+        render_once(&once);
+        return;
+    }
+
     // One-time cold cost (syntect's `OnceLock` syntax/theme load, math CSS/font
     // init) measured separately from the warm steady state Criterion reports.
     let vault = bench_vault();

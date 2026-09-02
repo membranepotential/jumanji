@@ -19,14 +19,15 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
   `Session`, Arch container for CI, `cfg(target_os)` for the mac shell.
 - **controller-extraction** (on `main`, main checkout) — stage the §5.2
   plan: scripts seam → traits → session move → fake toolkit tests → docs.
-  State: **stage 2 in flight** (Opus implementer: `Page` extension trait,
-  GTK `Viewport`/`Chrome`/`Host` impls, watch/stdin generic over `Host`).
-  Stage 1 landed. Next: stage 3 (session move).
+  State: **stages 1–2 landed** (`21fae85`, `7393903`; reviewed, 50/50 e2e).
+  A/B vs v1.8.0 running. Next: stage 3 (session move) once the A/B is clean.
 - **perf guard** — `.github/workflows/{ci,bench}.yml` (Arch container; fmt/
   clippy/unit, e2e, criterion + startup trail on `gh-pages`, alerts on PRs)
   and `scripts/bench-compare.sh` (local A/B of a ref vs. the tree). State:
-  **written, unvalidated** — CI needs a push; the local A/B runs after each
-  extraction stage on a quiet machine. Next: run A/B v1.8.0 vs. tree.
+  **e2e proven in CI (50/50 in an Arch container)**; trail carried as a
+  workflow artifact chain (no branch, no Pages — the Pages experiment is
+  torn down). `bench-compare.sh` interleaves both halves; local A/B vs
+  v1.8.0 flat at startup. Next: confirm the first artifact-trail run.
 
 ## Done (recent)
 
@@ -37,8 +38,7 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
   load fixed, native-scroll statusbar updates.
 - **v1.7.0** — session-scoped zoom (DESIGN D5a); document-switch flash gone
   (restore gate waits for a steady `scrollHeight`). User-confirmed.
-- **v1.6.0** — reading position rides into the load as `data-jmnj-open`
-  (DESIGN D12); text zoom inlined the same way; `--background`.
+- **v1.6.0** — opening position rides into the load (D12); `--background`.
 - **v1.2 – v1.5** — breadcrumb, `:` completion, Obsidian dialect, Neovim sync.
 
 ## Next

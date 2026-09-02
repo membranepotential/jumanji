@@ -44,6 +44,11 @@ WORKTREE="$REPO_ROOT/.bench-baseline/$REF_SHA"
 BASE_TARGET="$REPO_ROOT/target-baseline"
 
 echo "bench-compare: baseline $REF ($REF_SHA) vs. working tree"
+governor="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)"
+if [ "$governor" != "performance" ]; then
+    echo "bench-compare: note — CPU governor is '$governor'; frequency drifts ±30%/min here." \
+        "Both sides are interleaved so the deltas hold, but absolute figures will not."
+fi
 echo
 
 # ---------------------------------------------------------------------------
@@ -111,16 +116,50 @@ done
 echo
 
 # ---------------------------------------------------------------------------
-# Pipeline: criterion baseline from the ref, tree compared against it
+# Pipeline: instructions retired per render, both sides, via
+# scripts/bench-instructions.sh (cachegrind). Deterministic, so identical
+# code reads 0.0% and a delta is a delta — unlike wall clock, which drifted
+# by up to 2× between byte-identical binaries on this laptop in every
+# ordering that was tried.
 # ---------------------------------------------------------------------------
 
-# Same target dir for both so criterion finds the saved baseline; the two
-# checkouts have distinct package paths, so their artifacts coexist.
-echo "bench-compare: pipeline benches, saving baseline '$REF_SHA'..."
-(cd "$WORKTREE" && CARGO_TARGET_DIR="$REPO_ROOT/target" \
-    cargo bench --quiet --bench pipeline -- --noplot --save-baseline "$REF_SHA" >/dev/null 2>&1)
-echo "bench-compare: pipeline benches, working tree vs. '$REF_SHA':"
-cargo bench --quiet --bench pipeline -- --noplot --baseline "$REF_SHA" 2>&1 |
-    grep -E "time:|change:|No change|Performance has|Change within" || true
+# The bench executable a `cargo bench --no-run` produced, from cargo's JSON.
+bench_binary() {
+    cargo bench --quiet --bench pipeline --no-run --message-format=json 2>/dev/null |
+        python3 -c 'import json,sys
+for line in sys.stdin:
+    try: m = json.loads(line)
+    except ValueError: continue
+    if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "pipeline":
+        print(m["executable"])'
+}
+
+# The ref is measured with the TREE's bench harness: the instruction-count
+# mode (`--once`) may postdate the ref, and the harness only touches
+# `core::pipeline` / `core::vault`, which any ref worth comparing has. The
+# worktree is throwaway, so the overlay is never committed anywhere.
+echo "bench-compare: building the pipeline benches for both sides..."
+cp "$REPO_ROOT/benches/pipeline.rs" "$WORKTREE/benches/pipeline.rs"
+BASE_BENCH="$(cd "$WORKTREE" && CARGO_TARGET_DIR="$REPO_ROOT/target" bench_binary)"
+TREE_BENCH="$(bench_binary)"
+[ -x "$BASE_BENCH" ] && [ -x "$TREE_BENCH" ] || {
+    echo "bench-compare: could not locate both bench binaries" >&2
+    exit 1
+}
+
+echo "bench-compare: pipeline instruction counts (cachegrind), both sides..."
+declare -A BASE_I TREE_I
+while read -r fixture per; do BASE_I["$fixture"]="$per"; done \
+    < <(scripts/bench-instructions.sh -b "$BASE_BENCH" | awk 'NR > 1 { print $1, $2 }')
+while read -r fixture per; do TREE_I["$fixture"]="$per"; done \
+    < <(scripts/bench-instructions.sh -b "$TREE_BENCH" | awk 'NR > 1 { print $1, $2 }')
+
+printf '%-24s %16s %16s %8s\n' "pipeline (instr/render)" "$REF_SHA" "tree" "delta"
+for fixture in "${!TREE_I[@]}"; do
+    b="${BASE_I[$fixture]:-0}"
+    t="${TREE_I[$fixture]}"
+    d="$(awk -v b="$b" -v t="$t" 'BEGIN { if (b > 0) printf "%+.2f%%", (t - b) / b * 100; else print "n/a" }')"
+    printf '%-24s %16s %16s %8s\n' "$fixture" "$b" "$t" "$d"
+done | sort
 echo
 echo "bench-compare: done. Baseline worktree kept at $WORKTREE (git worktree remove it when finished)."
