@@ -69,8 +69,16 @@ jobs:
       - name: Pipeline benches (criterion, libtest-style output)
         # bash for pipefail: a build failure must fail the step, not hide
         # behind tee's exit code and hand the action an empty file.
+        #
+        # target/criterion is wiped first: the build cache can restore a stale
+        # copy, and criterion then compares against it and prints errors into
+        # the middle of the bencher lines the action parses. Comparing across
+        # runs is the trail's job, not criterion's.
         shell: bash
-        run: set -o pipefail; cargo bench --bench pipeline -- --output-format bencher | tee pipeline.txt
+        run: |
+          set -o pipefail
+          rm -rf target/criterion
+          cargo bench --bench pipeline -- --output-format bencher | tee pipeline.txt
 
       - name: Startup timing (headless, median of 7)
         run: scripts/bench-startup.sh -n 7 -j startup.json
