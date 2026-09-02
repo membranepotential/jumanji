@@ -284,6 +284,37 @@ impl<T: Toolkit + 'static> Controller<T> {
         keymap: Keymap,
         forward: Option<u32>,
     ) -> Self {
+        Self::new_in(
+            view,
+            chrome,
+            host,
+            source,
+            options,
+            keymap,
+            forward,
+            Dirs::xdg(),
+        )
+    }
+
+    /// [`Controller::new`] with the user directories handed in rather than read
+    /// from the environment — the one seam the controller's own tests need, so
+    /// a session can be pointed at a temp tree (the XDG variables are
+    /// process-wide, and so unusable from tests that run in parallel).
+    // One argument past the lint's limit, and deliberately: this is
+    // `Controller::new`'s own list (already at it) plus the one value the
+    // tests inject. Bundling them into a launch struct would reshape the
+    // shell's call for the sake of a test seam.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_in(
+        view: T::Viewport,
+        chrome: T::Chrome,
+        host: T::Host,
+        source: Source,
+        options: Options,
+        keymap: Keymap,
+        forward: Option<u32>,
+        dirs: Dirs,
+    ) -> Self {
         let is_stdin = source.is_stdin();
         let file = base_path(&source);
         // Cheap, best-effort check of whether this launch is worth deferring the
@@ -299,8 +330,10 @@ impl<T: Toolkit + 'static> Controller<T> {
 
         chrome.set_trail(vec![source.display_name()]);
 
-        let config_dir = config::xdg_config_dir();
-        let data_dir = xdg_data_dir();
+        let Dirs {
+            config: config_dir,
+            data: data_dir,
+        } = dirs;
         let history = load_history(&data_dir);
 
         // Resolved once, from the document we were launched with, and pinned for
@@ -2070,6 +2103,29 @@ fn doc_label(doc: Option<&Path>) -> String {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| p.to_string_lossy().into_owned()),
         None => "stdin".to_string(),
+    }
+}
+
+/// Where the reader keeps the user's own files: the config base (themes live
+/// under `<config>/jumanji/themes`) and the data dir (`history.toml`).
+///
+/// A value rather than two reads of the environment inside
+/// [`Controller::new`], so a session can be built over a temp tree
+/// ([`Controller::new_in`]). `None` is a dir that could not be located at all —
+/// no `$HOME` — and disables the feature that lives there, as it always has.
+#[derive(Debug, Clone)]
+pub(crate) struct Dirs {
+    pub config: Option<PathBuf>,
+    pub data: Option<PathBuf>,
+}
+
+impl Dirs {
+    /// The real locations a launch uses.
+    fn xdg() -> Self {
+        Self {
+            config: config::xdg_config_dir(),
+            data: xdg_data_dir(),
+        }
     }
 }
 

@@ -12,9 +12,13 @@
 //! byte-identical on every toolkit. That is "shell viewport glue" in DESIGN
 //! D12's terms — never content-pipeline JS, which D3 forbids.
 
+#[cfg(test)]
+mod fake;
 pub mod page;
 pub mod scripts;
 pub mod session;
 pub mod stdin;
+#[cfg(test)]
+mod tests;
 pub mod toolkit;
 pub mod watch;
