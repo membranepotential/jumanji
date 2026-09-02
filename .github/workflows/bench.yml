@@ -1,0 +1,96 @@
+# Performance: the criterion pipeline benches and the headless startup timing,
+# on every push to main and every pull request.
+#
+# Two guards, one trail:
+# - Every run is compared against the stored history and an alert comment is
+#   posted on the PR when a bench regresses past the threshold.
+# - On main, the results are appended to the trail on the `gh-pages` branch
+#   (charts at https://<owner>.github.io/jumanji/dev/bench/), so a slow drift
+#   is visible even when no single change trips the alert.
+#
+# Thresholds are deliberately loose: shared runners are noisy, and the point
+# is to catch a real regression, not to fail the build on a scheduler hiccup.
+# The pipeline benches are pure CPU work and fail the job at 130%; the startup
+# timing spawns a WebKit process and only comments, at 150%.
+name: bench
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+  deployments: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
+
+jobs:
+  bench:
+    name: pipeline benches + startup timing
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install toolchain, system libraries and the headless harness
+        run: >-
+          pacman -Syu --noconfirm --needed
+          rust mold gtk4 webkitgtk-6.0 git
+          xorg-server-xvfb dbus glib2 mesa
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+
+      # The benchmark action reads and writes the trail on gh-pages and needs
+      # the branch to exist; create it once, empty, if this is the first run.
+      - name: Ensure the gh-pages trail branch exists
+        if: github.event_name == 'push'
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if ! git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git switch --orphan gh-pages
+            git commit --allow-empty -m "bench trail"
+            git push origin gh-pages
+            git switch -
+          fi
+
+      - name: Pipeline benches (criterion, libtest-style output)
+        run: cargo bench --bench pipeline -- --output-format bencher | tee pipeline.txt
+
+      - name: Startup timing (headless, median of 7)
+        run: scripts/bench-startup.sh -n 7 -j startup.json
+
+      - name: Record pipeline benches
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: pipeline
+          tool: cargo
+          output-file-path: pipeline.txt
+          benchmark-data-dir-path: dev/bench/pipeline
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: ${{ github.event_name == 'push' }}
+          save-data-file: ${{ github.event_name == 'push' }}
+          alert-threshold: "130%"
+          comment-on-alert: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
+          fail-on-alert: true
+          summary-always: true
+
+      - name: Record startup timing
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: startup
+          tool: customSmallerIsBetter
+          output-file-path: startup.json
+          benchmark-data-dir-path: dev/bench/startup
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: ${{ github.event_name == 'push' }}
+          save-data-file: ${{ github.event_name == 'push' }}
+          alert-threshold: "150%"
+          comment-on-alert: ${{ github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
+          fail-on-alert: false
+          summary-always: true

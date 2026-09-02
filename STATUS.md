@@ -19,26 +19,27 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
   `Session`, Arch container for CI, `cfg(target_os)` for the mac shell.
 - **controller-extraction** (on `main`, main checkout) — stage the §5.2
   plan: scripts seam → traits → session move → fake toolkit tests → docs.
-  State: **stage 1 landing** (scripts + `__jmnj_post`), sequential implementer
-  agents, e2e green per stage. Next: stage 2 (traits + GTK impls).
+  State: **stage 2 in flight** (Opus implementer: `Page` extension trait,
+  GTK `Viewport`/`Chrome`/`Host` impls, watch/stdin generic over `Host`).
+  Stage 1 landed. Next: stage 3 (session move).
+- **perf guard** — `.github/workflows/{ci,bench}.yml` (Arch container; fmt/
+  clippy/unit, e2e, criterion + startup trail on `gh-pages`, alerts on PRs)
+  and `scripts/bench-compare.sh` (local A/B of a ref vs. the tree). State:
+  **written, unvalidated** — CI needs a push; the local A/B runs after each
+  extraction stage on a quiet machine. Next: run A/B v1.8.0 vs. tree.
 
 ## Done (recent)
 
-- **e2e restore-gate hole closed (2026-08-12)** — a growing fixture (CSS
-  `height` animation, CSP-legal) plus `reveal_scroll_y` / `reveal_failsafe`;
-  two tests that go red when `STABLE_FRAMES` is weakened to pre-v1.7.0.
+- **e2e restore-gate hole closed (2026-08-12)** — growing fixture plus
+  `reveal_scroll_y` / `reveal_failsafe`; tests go red without the gate.
 - **Perf pass (2026-08-12)** — criterion benches + headless startup timing via
   a lib/bin split; parallel syntect, mermaid renderer reuse, startup double
   load fixed, native-scroll statusbar updates.
-- **v1.7.0** — zoom is a session setting that carries across navigation
-  (history's per-file value demoted to *default on open*, DESIGN D5a); the
-  document-switch flash is gone — the restore gate now concedes only once
-  `scrollHeight` holds steady, not one frame after `readyState === 'complete'`.
-  User-confirmed on the repro vault.
+- **v1.7.0** — session-scoped zoom (DESIGN D5a); document-switch flash gone
+  (restore gate waits for a steady `scrollHeight`). User-confirmed.
 - **v1.6.0** — reading position rides into the load as `data-jmnj-open`
   (DESIGN D12); text zoom inlined the same way; `--background`.
-- **v1.2 – v1.5** — jumplist breadcrumb, `:` completion, Obsidian dialect,
-  Neovim sync plugin, 960px column, NON_UNIQUE GApplication.
+- **v1.2 – v1.5** — breadcrumb, `:` completion, Obsidian dialect, Neovim sync.
 
 ## Next
 
@@ -55,6 +56,5 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
 ## Open questions
 
-- The §6 decisions in `docs/research/05-macos-port.md`: traits vs type
-  alias, `cfg(target_os)` vs feature, Arch container vs Ubuntu for CI, and
-  whether editor pairing gets a macOS transport at all.
+- Editor pairing on macOS (D7 rides on D-Bus): a unix-socket transport, or
+  a stated gap? `05-macos-port.md` §6. The other §6 decisions are made.

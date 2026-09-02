@@ -15,3 +15,7 @@ packaging/aur/*.pkg.tar.zst
 
 # Scratch: flash-on-document-switch investigation (captures are large, not source)
 .flash-investigation/
+
+# Local performance A/B (scripts/bench-compare.sh): baseline worktree + its target dir
+/.bench-baseline/
+/target-baseline/

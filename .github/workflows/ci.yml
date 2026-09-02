@@ -1,0 +1,63 @@
+# Correctness: fmt, clippy, unit tests, and the headless e2e suite.
+#
+# Runs in an Arch Linux container on purpose: the reader targets Arch (AUR
+# package, the maintainer's machine), and Ubuntu's gtk4/webkitgtk-6.0 are two
+# years older. CI must argue with the versions the reader actually ships on.
+#
+# Performance is a separate workflow (bench.yml) so a noisy timing never
+# blocks a correctness signal, and vice versa.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # WebKitGTK's bubblewrap sandbox needs user namespaces, which a Docker
+  # container on the runner cannot create. CI only; never set this locally.
+  WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
+
+jobs:
+  check:
+    name: fmt + clippy + unit tests
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      # Before checkout: the container has no git, and actions/checkout without
+      # git downloads a tarball with no .git, which later steps need.
+      - name: Install toolchain and system libraries
+        run: pacman -Syu --noconfirm --needed rust mold gtk4 webkitgtk-6.0 git
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --lib --bins
+
+  e2e:
+    name: headless e2e (Xvfb + WebKit + D-Bus)
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install toolchain, system libraries and the e2e harness tools
+        run: >-
+          pacman -Syu --noconfirm --needed
+          rust mold gtk4 webkitgtk-6.0 git
+          xorg-server-xvfb xdotool dbus mesa
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      # The suite skips silently when the tools are missing (see
+      # docs/TESTING.md). CI must never mistake a skip for a pass, so the
+      # tools are asserted present first.
+      - name: Assert the harness tools are on PATH
+        run: command -v Xvfb xdotool dbus-daemon
+      - name: Run the e2e suite
+        run: cargo test --test e2e -- --nocapture 2>&1 | tee e2e.log
+      - name: Fail if the suite skipped instead of running
+        run: |
+          if grep -q "skipping" e2e.log; then
+            echo "::error::the e2e suite skipped — harness tools missing in CI"
+            exit 1
+          fi
+          grep -E "^test result: ok\. [1-9][0-9]* passed" e2e.log

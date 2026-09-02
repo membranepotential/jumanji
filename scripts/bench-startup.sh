@@ -6,9 +6,14 @@
 # private session bus per run, torn down afterwards. Nothing here touches the
 # developer's live DISPLAY or session bus.
 #
-# Usage: scripts/bench-startup.sh [-n RUNS]
+# Usage: scripts/bench-startup.sh [-n RUNS] [-b BIN] [-j FILE]
 #   -n RUNS   number of runs per fixture (default 5). Reports per-run ms and
 #             the median for each fixture.
+#   -b BIN    benchmark this binary instead of building target/release. Lets
+#             scripts/bench-compare.sh pit a baseline build against the tree.
+#   -j FILE   also write the medians as JSON, one `{name, unit, value}` entry
+#             per fixture — the `customSmallerIsBetter` shape the CI benchmark
+#             trail ingests (.github/workflows/bench.yml).
 #
 # Fixtures (both run by default):
 #   - demo/demo.md
@@ -21,15 +26,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 RUNS=5
-while getopts "n:h" opt; do
+BIN=""
+JSON_OUT=""
+while getopts "n:b:j:h" opt; do
     case "$opt" in
     n) RUNS="$OPTARG" ;;
+    b) BIN="$OPTARG" ;;
+    j) JSON_OUT="$OPTARG" ;;
     h)
         sed -n '2,20p' "$0"
         exit 0
         ;;
     *)
-        echo "usage: $0 [-n RUNS]" >&2
+        echo "usage: $0 [-n RUNS] [-b BIN] [-j FILE]" >&2
         exit 1
         ;;
     esac
@@ -58,10 +67,15 @@ fi
 # Build
 # ---------------------------------------------------------------------------
 
-BIN="$REPO_ROOT/target/release/jumanji"
-if [ ! -x "$BIN" ] || [ -n "$(find src -type f -newer "$BIN" 2>/dev/null)" ]; then
-    echo "bench-startup: building release binary..."
-    cargo build --release
+if [ -z "$BIN" ]; then
+    BIN="$REPO_ROOT/target/release/jumanji"
+    if [ ! -x "$BIN" ] || [ -n "$(find src -type f -newer "$BIN" 2>/dev/null)" ]; then
+        echo "bench-startup: building release binary..."
+        cargo build --release
+    fi
+elif [ ! -x "$BIN" ]; then
+    echo "bench-startup: $BIN is not an executable" >&2
+    exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -208,9 +222,23 @@ bench_fixture() {
     median="$(printf '%s\n' "${times[@]}" | sort -n | awk '{a[NR]=$1} END {print (NR%2==1) ? a[(NR+1)/2] : (a[NR/2]+a[NR/2+1])/2}')"
     echo "$label median: ${median} ms (n=$RUNS)"
     echo
+    if [ -n "$JSON_OUT" ]; then
+        JSON_ENTRIES+=("{\"name\": \"startup: $label\", \"unit\": \"ms\", \"value\": $median, \"extra\": \"median of $RUNS\"}")
+    fi
 }
+JSON_ENTRIES=()
 
 echo "bench-startup: $RUNS run(s) per fixture"
 echo
 bench_fixture "demo/demo.md" "$REPO_ROOT/demo/demo.md"
 bench_fixture "wikilink-heavy (50 notes, 100 links)" "$WIKILINK_MAIN"
+
+if [ -n "$JSON_OUT" ]; then
+    {
+        echo "["
+        printf '  %s' "${JSON_ENTRIES[0]}"
+        for e in "${JSON_ENTRIES[@]:1}"; do printf ',\n  %s' "$e"; done
+        printf '\n]\n'
+    } >"$JSON_OUT"
+    echo "bench-startup: wrote $JSON_OUT"
+fi
