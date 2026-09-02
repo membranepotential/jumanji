@@ -19,30 +19,23 @@ use webkit6::{
     UserContentInjectedFrames, UserContentManager, UserScript, UserScriptInjectionTime, WebView,
 };
 
+use crate::controller::scripts::{
+    self, APPLY_GLOBAL, FIRST_FRAME_GLOBAL, OPEN_ATTRIBUTE, POST_FN, RESTORE_ANCHOR_JS,
+    RESTORING_CLASS, REVEAL_GLOBAL, capture_anchor_js, hints_build_js, js_string,
+    nearest_source_element_js,
+};
 use crate::core::RenderedDocument;
 use crate::core::config::SelectionClipboard;
+
+/// Where a reflow-preserving zoom keeps the reading position pinned. Defined
+/// in [`scripts`] (toolkit-agnostic: [`scripts::capture_anchor_js`] takes it),
+/// re-exported here because it is otherwise a `View`-only concern.
+pub use crate::controller::scripts::ZoomAnchor;
 
 /// A shell-supplied sink, installed after construction. Both link hints and
 /// navigation routing hand a single string back to the shell (a JSON hint list
 /// and a resolved target URI, respectively).
 type Sink = Rc<RefCell<Option<Box<dyn Fn(String)>>>>;
-
-/// Where a reflow-preserving zoom keeps the reading position pinned.
-///
-/// Both geometric and text zoom now reflow the page, so an anchor is captured
-/// before the change and scrolled back into view after — this picks the anchor
-/// element. One mechanism ([`capture_anchor_js`] + [`RESTORE_ANCHOR_JS`]),
-/// parameterised by the probe point.
-#[derive(Clone, Copy)]
-pub enum ZoomAnchor {
-    /// Keep the element at the top of the viewport fixed (keyboard / D-Bus
-    /// zoom, and text zoom). Only anchors when scrolled, so an exact top stays
-    /// exactly at the top.
-    Top,
-    /// Keep the element under a viewport point (CSS px) fixed — the cursor, for
-    /// Ctrl+wheel zoom ("zoom towards the cursor").
-    Point { x: f64, y: f64 },
-}
 
 /// Where a document opens: the reading position a load must land on *before*
 /// its first painted frame.
@@ -124,7 +117,7 @@ pub struct ViewportState {
     pub frontmatter_width: f64,
     /// The scroll offset the *first painted frame* of the current document was
     /// placed at, as recorded from inside the page by the restore user-script
-    /// (see [`scroll_restore_js`]); `-1` when the document carried no opening
+    /// (see [`scripts::scroll_restore_js`]); `-1` when the document carried no opening
     /// position ([`InitialPosition::Top`]) or nothing has been painted yet.
     ///
     /// The cheap in-process observable for the no-flash property — the final
@@ -164,275 +157,21 @@ pub struct ViewportState {
     pub fn_color: String,
 }
 
-/// JS that captures the anchor element into `window.__jmnj_anchor` (element +
-/// its current viewport-top offset) for the given probe point. Paired with
-/// [`RESTORE_ANCHOR_JS`], which runs after the zoom change reflows the page.
-fn capture_anchor_js(anchor: &ZoomAnchor) -> String {
-    // (x expression, y-probe list, guard) — Top probes a few px down the column
-    // centre and only when scrolled; Point probes exactly the given point.
-    let (cx, ys, guard_open, guard_close) = match anchor {
-        ZoomAnchor::Top => (
-            "(() => { const m = document.querySelector('main') || document.body; \
-              const r = m.getBoundingClientRect(); return r.left + r.width / 2; })()"
-                .to_string(),
-            "[8, 40, 80, 140]".to_string(),
-            "if (window.scrollY > 0) {",
-            "}",
-        ),
-        ZoomAnchor::Point { x, y } => (
-            format!("Math.max(1, Math.min(innerWidth - 1, {x}))"),
-            format!("[Math.max(1, Math.min(innerHeight - 1, {y}))]"),
-            "",
-            "",
-        ),
-    };
-    format!(
-        "(() => {{ window.__jmnj_anchor = null; {guard_open} \
-           const cx = Math.max(1, Math.min(innerWidth - 1, {cx})); \
-           for (const py of {ys}) {{ \
-             const c = document.elementFromPoint(cx, py); \
-             if (c && c !== document.body && c !== document.documentElement \
-                 && c.tagName !== 'MAIN') {{ \
-               window.__jmnj_anchor = {{ el: c, top: c.getBoundingClientRect().top }}; \
-               break; }} }} {guard_close} }})();"
-    )
-}
-
-/// JS that restores the reading position: scroll so the captured anchor returns
-/// to the same viewport y it had before the reflow. No-op if nothing was
-/// captured (e.g. an unscrolled Top anchor).
-const RESTORE_ANCHOR_JS: &str = "(() => { const a = window.__jmnj_anchor; \
-    if (a && a.el) { const nt = a.el.getBoundingClientRect().top; \
-      window.scrollBy({ top: nt - a.top, left: 0, behavior: 'instant' }); } \
-    window.__jmnj_anchor = null; })();";
-
-/// The nearest-`data-sourcepos` search, as a JS *expression* yielding the
-/// element whose source line is the greatest at-or-before the line `line_expr`
-/// evaluates to, or `null`.
-///
-/// `data-sourcepos` (comrak's, plus the pipeline's injected ones) opens with
-/// `startLine:…`, so `parseInt` reads the start line directly; document order
-/// makes those lines non-decreasing, so the last match ≤ the target is the
-/// nearest block at-or-above it. Factored out because forward editor sync needs
-/// it twice — once for a jump inside the loaded document
-/// ([`View::goto_source_line`]) and once from [`scroll_restore_js`], before the
-/// document has ever painted — and two copies of a rule this fiddly would drift.
-fn nearest_source_element_js(line_expr: &str) -> String {
-    format!(
-        "(t => {{ let best = null; \
-           for (const el of document.querySelectorAll('[data-sourcepos]')) {{ \
-             const l = parseInt(el.getAttribute('data-sourcepos'), 10); \
-             if (!Number.isNaN(l) && l <= t) best = el; }} \
-           return best; }})({line_expr})"
-    )
-}
-
-/// The `<html>` attribute [`View::load_document`] writes the opening position
-/// into, and [`scroll_restore_js`] reads it back out of.
-const OPEN_ATTRIBUTE: &str = "data-jmnj-open";
-
-/// The class that hides the body until the opening position has landed; the
-/// rule lives in `core/assets/style.css` beside `html.dark`, the other
-/// shell-toggled class.
-const RESTORING_CLASS: &str = "jmnj-restoring";
-
-/// The page global the restore script records its first painted offset in; read
-/// back by [`View::scroll_state`] into
-/// [`ViewportState::first_frame_scroll_y`]. A load gets a fresh JS context, so
-/// it is `undefined` again on every document.
-const FIRST_FRAME_GLOBAL: &str = "window.__jmnj_first_frame";
-
-/// The page global the restore script records the reveal in: `{y, failsafe}`,
-/// the scroll offset the body was *unhidden* at and whether the unconditional
-/// timer was what unhid it. Read back by [`View::scroll_state`] into
-/// [`ViewportState::reveal_scroll_y`] / [`ViewportState::revealed_by_failsafe`].
-const REVEAL_GLOBAL: &str = "window.__jmnj_reveal";
-
-/// The page global the restore script parks its `apply` on, so the shell can
-/// re-run *the same* placement once the load has fully finished (see
-/// [`View::settle_initial_position`]) without a second copy of the rules.
-const APPLY_GLOBAL: &str = "window.__jmnj_apply_open";
-
-/// Consecutive frames the document height must hold steady before the restore
-/// loop concedes an offset is unreachable and reveals anyway.
-///
-/// `readyState === 'complete'` is not a statement that layout is final — the
-/// height keeps growing after it while late boxes settle — and `apply` places
-/// the position by clamping against the height it finds. Conceding on
-/// `complete` alone therefore revealed the body at a clamped, near-top offset
-/// for any deep position, which is the document-switch flash: the page appears
-/// at ~0, then [`View::settle_initial_position`] jumps it down. Three frames
-/// (~50ms at 60Hz) is enough to tell "still laying out" from "genuinely too
-/// short", and the unconditional failsafe still bounds the whole affair.
-const STABLE_FRAMES: u32 = 3;
-
-/// The permanent document-start user-script that places every freshly loaded
-/// document at the position [`View::load_document`] wrote into
-/// [`OPEN_ATTRIBUTE`]. Installed once, in [`View::new`], beside the other four.
-///
-/// This is the whole no-flash mechanism, and it is deliberately split in two:
-/// the *position* travels as an inert `data-` attribute in the HTML, and the
-/// *behaviour* is a shell user-script that never changes. Applying the position
-/// from Rust after `LoadEvent::Finished` is inherently too late — the document
-/// has been parsed, laid out and composited at scroll 0 by then, and the
-/// correction needs a further UI→web IPC hop, so the unscrolled top is on
-/// screen for the whole of that window. That is the flash the reader reports
-/// when walking the jumplist.
-///
-/// Why an attribute rather than an inline `<script>`: DESIGN D3 makes the
-/// webview a *"dumb, static renderer … the same pipeline can later feed an
-/// export path (PDF/HTML) or a different front end"*. A `data-` attribute is
-/// inert markup that survives such an export untouched; a `<script>` would
-/// break D3 *and* the page CSP (`default-src 'none'`, `core::pipeline`), which
-/// has no `script-src`. WebKit user scripts are exempt from the page CSP —
-/// which is precisely the sanctioned category `install_drag_select_reset` below
-/// already names: shell viewport glue, not content-pipeline JS.
-///
-/// The rest is timing. `requestAnimationFrame` callbacks run *before* the frame
-/// they belong to is painted, so applying there means the first frame that
-/// shows content already shows it at the right offset; the loop re-arms on
-/// `DOMContentLoaded` and `load` for a document still growing (late-laid-out
-/// images have no intrinsic size until then, so the document is shorter and
-/// `scrollTo` clamps). It is bounded: it stops when the target is reached, or
-/// after one final attempt once `readyState === 'complete'` — a document too
-/// short to honour the offset must not leave an rAF chain spinning forever.
-///
-/// Belt and braces on top of the timing, [`RESTORING_CLASS`] hides the body
-/// until the position lands, so *no* frame can show the wrong one even if a
-/// paint sneaks in. The reveal is unconditional: it runs when the loop
-/// finishes, and on a timer regardless, because a page left permanently blank
-/// would be a far worse bug than the flash (CLAUDE.md: rendering failures
-/// degrade gracefully, never a blank page). The hidden interval is normally a
-/// single frame and shows the page's own `--bg`, so it is invisible.
-fn scroll_restore_js() -> String {
-    format!(
-        "(function () {{\n\
-           const root = document.documentElement;\n\
-           // Injection is at document-start, which is after the document\n\
-           // element exists — so the attribute the loader wrote is already\n\
-           // readable here. No position, nothing to hide, nothing to do.\n\
-           const spec = root.getAttribute('{attr}');\n\
-           if (!spec) return;\n\
-           const sep = spec.indexOf(':');\n\
-           const kind = spec.slice(0, sep), arg = spec.slice(sep + 1);\n\
-           root.classList.add('{cls}');\n\
-           let revealed = false;\n\
-           // `failsafe` records *why* the body was unhidden. The offset is read\n\
-           // here and nowhere else: this is the frame the reader's eye first\n\
-           // gets, so it — not the first laid-out frame, which the gate hides —\n\
-           // is what an e2e must assert on to see a flash at all.\n\
-           const reveal = (failsafe) => {{ if (revealed) return; \
-             revealed = true; \
-             {reveal_global} = {{ y: window.scrollY, failsafe: failsafe }}; \
-             root.classList.remove('{cls}'); }};\n\
-           // The failsafe, and the reason the gate is safe to have at all: it\n\
-           // is not conditional on anything above working.\n\
-           setTimeout(() => reveal(true), 400);\n\
-           // Returns whether the position is now actually reached; anything\n\
-           // short of that keeps the loop running.\n\
-           const apply = () => {{\n\
-             if (kind === 'offset') {{\n\
-               const y = parseFloat(arg);\n\
-               window.scrollTo(0, y);\n\
-               return Math.abs(window.scrollY - y) < 0.5;\n\
-             }}\n\
-             if (kind === 'anchor') {{\n\
-               const e = document.getElementById(arg);\n\
-               if (!e) return false;\n\
-               e.scrollIntoView();\n\
-               return true;\n\
-             }}\n\
-             if (kind === 'line') {{\n\
-               const best = {nearest};\n\
-               if (!best) return false;\n\
-               best.scrollIntoView({{behavior: 'instant', block: 'start'}});\n\
-               return true;\n\
-             }}\n\
-             return true;\n\
-           }};\n\
-           // Parked for the shell's post-load settle, so the late-layout\n\
-           // correction and the pre-paint placement are the same code.\n\
-           {apply_global} = apply;\n\
-           let done = false, pending = false, stable = 0, lastHeight = -1;\n\
-           const schedule = () => {{ if (done || pending) return; \
-             pending = true; requestAnimationFrame(tick); }};\n\
-           function tick() {{\n\
-             pending = false;\n\
-             if (done) return;\n\
-             // A body with no layout paints nothing, so such a frame is neither\n\
-             // a chance to place the position nor one the reader could see it in.\n\
-             const laidOut = document.body && document.body.getBoundingClientRect().height > 0;\n\
-             let reached = false;\n\
-             if (laidOut) {{\n\
-               reached = apply();\n\
-               // Read *after* applying: this is the offset this frame would\n\
-               // paint with, and the first one is what the e2e asserts on.\n\
-               if ({first} === undefined) {first} = window.scrollY;\n\
-             }}\n\
-             // Giving up is gated on the document having stopped GROWING, not\n\
-             // merely on `readyState === 'complete'`. `apply` scrolls by\n\
-             // clamping against the current height, so while the document is\n\
-             // still laying out a deep offset clamps to near the top; revealing\n\
-             // there is the flash — the body appears at ~0 and the post-load\n\
-             // settle then visibly jumps it down. `complete` does not mean the\n\
-             // height is final, so one extra frame of grace was far too little.\n\
-             const h = document.documentElement.scrollHeight;\n\
-             if (h === lastHeight) stable++; else {{ stable = 0; lastHeight = h; }}\n\
-             if (reached || (document.readyState === 'complete' && stable >= {stable_frames})) {{\n\
-               done = true;\n\
-               // Next frame, so the frame that lands the position is still the\n\
-               // hidden one and the first visible frame is already correct.\n\
-               requestAnimationFrame(() => reveal(false));\n\
-               return;\n\
-             }}\n\
-             schedule();\n\
-           }}\n\
-           schedule();\n\
-           document.addEventListener('DOMContentLoaded', schedule);\n\
-           window.addEventListener('load', schedule);\n\
-         }})();",
-        attr = OPEN_ATTRIBUTE,
-        cls = RESTORING_CLASS,
-        nearest = nearest_source_element_js("parseInt(arg, 10)"),
-        apply_global = APPLY_GLOBAL,
-        first = FIRST_FRAME_GLOBAL,
-        reveal_global = REVEAL_GLOBAL,
-        stable_frames = STABLE_FRAMES,
-    )
-}
-
-/// Install [`scroll_restore_js`] as a permanent document-start user-script. One
-/// script for the process, not one per load: the *position* varies per document
-/// and rides in the HTML, so nothing about the behaviour does.
-fn install_scroll_restore(ucm: &UserContentManager) {
-    let script = UserScript::new(
-        &scroll_restore_js(),
-        UserContentInjectedFrames::TopFrame,
-        UserScriptInjectionTime::Start,
-        &[],
-        &[],
-    );
-    ucm.add_script(&script);
-}
-
 /// Native WebView background painted behind the document, matched to the theme
 /// so unpainted regions never flash a mismatched colour (light `#ffffff`,
 /// dark `#1a1a1a` — the same values `style.css` uses for `--bg`).
 const BG_LIGHT: RGBA = RGBA::WHITE;
 const BG_DARK: RGBA = RGBA::new(0.101, 0.101, 0.101, 1.0);
 
-/// The script-message handler name the selection user-script posts to.
-const SELECTION_HANDLER: &str = "selection";
-/// The script-message handler the link-hint overlay posts its `[{label,href}]`
-/// list to.
-const HINTS_HANDLER: &str = "hints";
-/// The script-message handler the reverse-editor-sync click posts the source
-/// line to (DESIGN D7).
-const EDITOR_SYNC_HANDLER: &str = "editorsync";
-/// The script-message handler the in-page scroll listener pings so the shell can
-/// refresh the statusbar percent on wheel / touchpad / scrollbar scrolling —
-/// scrolls WebKit handles natively otherwise never reach Rust.
-const SCROLL_HANDLER: &str = "scroll";
+/// The single script-message handler every shared script
+/// ([`scripts::document_start`], [`hints_build_js`]) posts through, via the
+/// `window.__jmnj_post` prelude installed in [`View::new`]. One handler
+/// instead of one per message name: WebKitGTK is the toolkit that owns
+/// `window.webkit.messageHandlers`, so the seam that lets a non-WebKit shell
+/// share these scripts unmodified is exactly this — a single postMessage
+/// point the GTK shell demultiplexes by name (see
+/// [`View::connect_script_router`]).
+const POST_HANDLER: &str = "jmnj";
 
 #[derive(Clone)]
 pub struct View {
@@ -458,15 +197,30 @@ impl View {
     pub fn new(selection_clipboard: SelectionClipboard) -> Self {
         let ucm = UserContentManager::new();
         let last_selection: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-        install_selection_copy(&ucm, selection_clipboard, last_selection.clone());
-        install_drag_select_reset(&ucm);
         let hints_cb: Sink = Rc::new(RefCell::new(None));
-        install_hints(&ucm, hints_cb.clone());
         let editor_sync_cb: Sink = Rc::new(RefCell::new(None));
-        install_editor_sync(&ucm, editor_sync_cb.clone());
         let scroll_cb: Sink = Rc::new(RefCell::new(None));
-        install_scroll_notify(&ucm, scroll_cb.clone());
-        install_scroll_restore(&ucm);
+
+        // register_script_message_handler returns false if the name is
+        // already taken; on a fresh manager it always succeeds. The prelude
+        // script below only reaches `postMessage` after this registers the
+        // handler.
+        ucm.register_script_message_handler(POST_HANDLER, None);
+        // The prelude must be the *first* user script: scripts run in
+        // insertion order, and every script in `scripts::document_start`
+        // calls `window.__jmnj_post`, which this defines.
+        install_document_start_script(&ucm, &post_prelude_js());
+        for js in scripts::document_start() {
+            install_document_start_script(&ucm, &js);
+        }
+        connect_message_router(
+            &ucm,
+            selection_clipboard,
+            last_selection.clone(),
+            hints_cb.clone(),
+            editor_sync_cb.clone(),
+            scroll_cb.clone(),
+        );
 
         let webview = WebView::builder().user_content_manager(&ucm).build();
         // WebKitGTK copies the find match into PRIMARY as it selects it. `found-text`
@@ -571,7 +325,7 @@ impl View {
     /// the text-zoom `--font-size` (an inline style, which beats the
     /// stylesheet's `:root` rule exactly as [`View::set_text_zoom_px`]'s
     /// `style.setProperty` does), and the reading position (as
-    /// [`OPEN_ATTRIBUTE`], which [`scroll_restore_js`] acts on before the first
+    /// [`OPEN_ATTRIBUTE`], which [`scripts::scroll_restore_js`] acts on before the first
     /// paint). Applying any of them from Rust once the load has finished is too
     /// late, and that window is what the reader sees as a flash of the
     /// unscrolled, base-size top of the page.
@@ -678,7 +432,7 @@ impl View {
     /// shell via the `hints` handler. `href` is the *resolved* absolute URI, so
     /// the shell's routing sees the same value a real click would.
     pub fn request_hints(&self) {
-        self.run_js(HINTS_BUILD_JS);
+        self.run_js(&hints_build_js());
     }
 
     /// Narrow the visible hints to those whose label starts with `typed`.
@@ -953,238 +707,94 @@ impl View {
     }
 }
 
-/// Wire zathura-style copy-on-select: a user-script posts the current non-empty
-/// selection on **`mouseup`** (the end of a pointer selection gesture), and the
-/// Rust side writes it to the configured clipboard. Keying off `mouseup` — not
-/// `selectionchange` — is deliberate: WebKit's find highlight sets the DOM
-/// selection programmatically, so a `selectionchange` listener would copy every
-/// search match (and each `n`/`N` step), which is not what a copy-*on-select*
-/// feature should do. A find never synthesises `mouseup`, so search leaves the
-/// clipboard alone. An empty selection posts nothing, so a plain click (which
-/// collapses any selection) never clobbers the clipboard with `""`.
-fn install_selection_copy(
+/// The prelude every shared [`scripts::document_start`] script funnels
+/// through: defines `window.__jmnj_post` over the single [`POST_HANDLER`]
+/// script-message handler by joining the message name and payload into one
+/// string, since a WebKit script-message channel carries exactly one. This is
+/// the seam DESIGN's macOS-port research names: WKWebView-based toolkits own
+/// `window.webkit.messageHandlers` themselves, so a script that wants to be
+/// byte-identical on every toolkit cannot call it directly — it calls
+/// [`scripts::POST_FN`] instead, and only this prelude (never a shared
+/// script) knows how that maps onto WebKitGTK's bridge.
+fn post_prelude_js() -> String {
+    format!(
+        "window.{POST_FN} = (name, payload) => \
+         window.webkit.messageHandlers.{POST_HANDLER}.postMessage(name + ':' + payload);"
+    )
+}
+
+/// Install `source` as a permanent document-start, top-frame user script —
+/// the shape every [`scripts::document_start`] script (and the
+/// [`post_prelude_js`] prelude) is installed with.
+fn install_document_start_script(ucm: &UserContentManager, source: &str) {
+    let script = UserScript::new(
+        source,
+        UserContentInjectedFrames::TopFrame,
+        UserScriptInjectionTime::Start,
+        &[],
+        &[],
+    );
+    ucm.add_script(&script);
+}
+
+/// Register [`POST_HANDLER`] and route every message the shared scripts post
+/// through it to exactly what four separate WebKitGTK handlers did before
+/// this seam existed: `selection` writes the configured clipboard and
+/// remembers the last real selection (so a later search can restore PRIMARY
+/// after WebKit clobbers it with the find match — see the `found-text` hook
+/// in [`View::new`]); `scroll` and `hints` forward their payload to the
+/// shell-installed sink; `editorsync` does too, behind the same empty-payload
+/// guard the old handler had. An unrecognised name is ignored.
+///
+/// The payload is split on the *first* `:` only — [`scripts::message::HINTS`]
+/// posts `label\thref` lines, which themselves contain newlines and tabs, so
+/// only the separator the prelude inserted may be significant.
+fn connect_message_router(
     ucm: &UserContentManager,
     target: SelectionClipboard,
     last_selection: Rc<RefCell<Option<String>>>,
+    hints_cb: Sink,
+    editor_sync_cb: Sink,
+    scroll_cb: Sink,
 ) {
-    // register_script_message_handler returns false if the name is already
-    // taken; on a fresh manager it always succeeds. The user-script only reaches
-    // `postMessage` after this registers the handler.
-    ucm.register_script_message_handler(SELECTION_HANDLER, None);
-
-    const SOURCE: &str = "(function () {\n\
-        document.addEventListener('mouseup', function () {\n\
-          const sel = window.getSelection ? window.getSelection().toString() : '';\n\
-          if (sel && sel.length > 0) {\n\
-            window.webkit.messageHandlers.selection.postMessage(sel);\n\
-          }\n\
-        }, true);\n\
-      })();";
-    let script = UserScript::new(
-        SOURCE,
-        UserContentInjectedFrames::TopFrame,
-        UserScriptInjectionTime::Start,
-        &[],
-        &[],
-    );
-    ucm.add_script(&script);
-
-    ucm.connect_script_message_received(Some(SELECTION_HANDLER), move |_, value| {
-        let text = value.to_str();
-        if text.is_empty() {
+    ucm.connect_script_message_received(Some(POST_HANDLER), move |_, value| {
+        let payload = value.to_str();
+        let Some((name, msg)) = payload.split_once(':') else {
             return;
-        }
-        // Remember the last real selection so a later search can restore PRIMARY
-        // to it after WebKit clobbers it with the find match.
-        *last_selection.borrow_mut() = Some(text.to_string());
-        if let Some(display) = gtk::gdk::Display::default() {
-            let clipboard = match target {
-                SelectionClipboard::Primary => display.primary_clipboard(),
-                SelectionClipboard::Clipboard => display.clipboard(),
-            };
-            clipboard.set_text(&text);
-        }
-    });
-}
-
-/// Wire the in-page scroll listener: a passive `scroll` listener, coalesced to
-/// one report per animation frame and only firing when the *rounded* percent
-/// changes, posts `"<percent> <scrollY>"` back to Rust. This is the only
-/// signal for scrolls WebKit performs itself (wheel, touchpad, scrollbar) —
-/// keyboard scrolls are Rust-driven and refresh the statusbar directly. The
-/// percent formula mirrors [`View::scroll_state`] so the two agree. Posting
-/// `scrollY` alongside the percent lets the shell update the statusbar
-/// directly from the payload — no eval round trip back into the page just to
-/// ask for the number it already has (see `Shell`'s scroll handler).
-fn install_scroll_notify(ucm: &UserContentManager, sink: Sink) {
-    ucm.register_script_message_handler(SCROLL_HANDLER, None);
-
-    const SOURCE: &str = "(function () {\n\
-        let ticking = false, last = -1;\n\
-        window.addEventListener('scroll', function () {\n\
-          if (ticking) return;\n\
-          ticking = true;\n\
-          requestAnimationFrame(function () {\n\
-            ticking = false;\n\
-            const d = document.documentElement, b = document.body;\n\
-            const max = (b.scrollHeight || d.scrollHeight) - window.innerHeight;\n\
-            const p = max > 0 ? Math.min(100, Math.max(0, Math.round((window.scrollY / max) * 100))) : 0;\n\
-            if (p !== last) {\n\
-              last = p;\n\
-              window.webkit.messageHandlers.scroll.postMessage(p + ' ' + window.scrollY);\n\
-            }\n\
-          });\n\
-        }, { passive: true });\n\
-      })();";
-    let script = UserScript::new(
-        SOURCE,
-        UserContentInjectedFrames::TopFrame,
-        UserScriptInjectionTime::Start,
-        &[],
-        &[],
-    );
-    ucm.add_script(&script);
-
-    ucm.connect_script_message_received(Some(SCROLL_HANDLER), move |_, value| {
-        if let Some(cb) = sink.borrow().as_ref() {
-            cb(value.to_str().to_string());
-        }
-    });
-}
-
-/// Make text selection behave like zathura / a plain text area: a press inside
-/// an existing selection starts a *fresh* drag-selection instead of dragging the
-/// selected text (WebKit's default). Two capture-phase listeners, installed as a
-/// document-start user-script:
-///
-/// - `mousedown`: if the primary button presses inside the current non-collapsed
-///   selection (tested against the selection range's client rects), collapse it
-///   with `removeAllRanges()` so the native selection gesture restarts from this
-///   point rather than picking up a text drag.
-/// - `dragstart`: `preventDefault()` unconditionally — belt-and-braces so a text
-///   drag can never begin even if the mousedown hit-test misses.
-///
-/// This is shell viewport glue, not content-pipeline JS (DESIGN D3 forbids JS in
-/// the *rendering* pipeline; the shell already drives the page with JS).
-fn install_drag_select_reset(ucm: &UserContentManager) {
-    const SOURCE: &str = "(function () {\n\
-        document.addEventListener('mousedown', function (e) {\n\
-          if (e.button !== 0) return;\n\
-          const sel = window.getSelection();\n\
-          if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;\n\
-          const rects = sel.getRangeAt(0).getClientRects();\n\
-          const x = e.clientX, y = e.clientY;\n\
-          for (let i = 0; i < rects.length; i++) {\n\
-            const r = rects[i];\n\
-            if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {\n\
-              sel.removeAllRanges();\n\
-              break;\n\
-            }\n\
-          }\n\
-        }, true);\n\
-        document.addEventListener('dragstart', function (e) { e.preventDefault(); }, true);\n\
-      })();";
-    let script = UserScript::new(
-        SOURCE,
-        UserContentInjectedFrames::TopFrame,
-        UserScriptInjectionTime::Start,
-        &[],
-        &[],
-    );
-    ucm.add_script(&script);
-}
-
-/// The overlay-building script for [`View::request_hints`]. Finds visible
-/// links, assigns home-row-alphabet labels (`a`..`z`, then `aa`,`ab`,… past 26),
-/// draws a fixed-position tag over each, and posts the label→href map to Rust.
-const HINTS_BUILD_JS: &str = "(() => {\n\
-    const old=document.getElementById('__jmnj_hints'); if(old) old.remove();\n\
-    const vw=window.innerWidth, vh=window.innerHeight;\n\
-    const links=Array.prototype.slice.call(document.querySelectorAll('a[href]')).filter(a=>{\n\
-      const r=a.getBoundingClientRect();\n\
-      if(r.width<=0||r.height<=0) return false;\n\
-      if(r.bottom<0||r.top>vh||r.right<0||r.left>vw) return false;\n\
-      const s=getComputedStyle(a);\n\
-      return s.visibility!=='hidden'&&s.display!=='none';\n\
-    });\n\
-    const A='abcdefghijklmnopqrstuvwxyz', n=links.length, labels=[];\n\
-    if(n<=A.length){ for(let i=0;i<n;i++) labels.push(A[i]); }\n\
-    else { for(let i=0;i<A.length&&labels.length<n;i++) for(let j=0;j<A.length&&labels.length<n;j++) labels.push(A[i]+A[j]); }\n\
-    const overlay=document.createElement('div');\n\
-    overlay.id='__jmnj_hints';\n\
-    overlay.style.cssText='position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;';\n\
-    const out=[];\n\
-    links.forEach((a,i)=>{\n\
-      const r=a.getBoundingClientRect();\n\
-      const tag=document.createElement('span');\n\
-      tag.className='__jmnj_hint';\n\
-      tag.setAttribute('data-label',labels[i]);\n\
-      tag.textContent=labels[i];\n\
-      tag.style.cssText='position:fixed;left:'+Math.max(0,r.left)+'px;top:'+Math.max(0,r.top)+'px;'+\n\
-        'background:#ffd400;color:#000;font:bold 11px monospace;padding:0 3px;border-radius:3px;'+\n\
-        'border:1px solid #806b00;pointer-events:none;box-shadow:0 1px 2px rgba(0,0,0,.4);';\n\
-      overlay.appendChild(tag);\n\
-      out.push(labels[i]+'\\t'+a.href);\n\
-    });\n\
-    document.documentElement.appendChild(overlay);\n\
-    window.webkit.messageHandlers.hints.postMessage(out.join('\\n'));\n\
-  })();";
-
-/// Register the `hints` script-message handler: the overlay posts a JSON
-/// `[{label,href}]` string, which we forward to the shell-installed sink.
-fn install_hints(ucm: &UserContentManager, sink: Sink) {
-    ucm.register_script_message_handler(HINTS_HANDLER, None);
-    ucm.connect_script_message_received(Some(HINTS_HANDLER), move |_, value| {
-        let json = value.to_str();
-        if let Some(cb) = sink.borrow().as_ref() {
-            cb(json.to_string());
-        }
-    });
-}
-
-/// Wire reverse editor sync (DESIGN D7): a capture-phase click listener that, on
-/// a Ctrl + primary-button click, walks up from the target to the nearest
-/// `[data-sourcepos]` ancestor and posts its source line back to Rust. It acts
-/// *only* on Ctrl+click (a plain click is untouched, so link routing and text
-/// selection are unaffected), and swallows the event so a Ctrl+click on a link
-/// syncs to the editor instead of following the link.
-fn install_editor_sync(ucm: &UserContentManager, sink: Sink) {
-    ucm.register_script_message_handler(EDITOR_SYNC_HANDLER, None);
-
-    const SOURCE: &str = "(function () {\n\
-        document.addEventListener('click', function (e) {\n\
-          if (e.button !== 0 || !e.ctrlKey) return;\n\
-          let el = e.target;\n\
-          while (el && el.nodeType === 1) {\n\
-            if (el.hasAttribute('data-sourcepos')) {\n\
-              const line = parseInt(el.getAttribute('data-sourcepos'), 10);\n\
-              if (!Number.isNaN(line) && line > 0) {\n\
-                e.preventDefault();\n\
-                e.stopPropagation();\n\
-                window.webkit.messageHandlers.editorsync.postMessage(String(line));\n\
-              }\n\
-              return;\n\
-            }\n\
-            el = el.parentElement;\n\
-          }\n\
-        }, true);\n\
-      })();";
-    let script = UserScript::new(
-        SOURCE,
-        UserContentInjectedFrames::TopFrame,
-        UserScriptInjectionTime::Start,
-        &[],
-        &[],
-    );
-    ucm.add_script(&script);
-
-    ucm.connect_script_message_received(Some(EDITOR_SYNC_HANDLER), move |_, value| {
-        let line = value.to_str();
-        if line.is_empty() {
-            return;
-        }
-        if let Some(cb) = sink.borrow().as_ref() {
-            cb(line.to_string());
+        };
+        match name {
+            scripts::message::SELECTION => {
+                if msg.is_empty() {
+                    return;
+                }
+                *last_selection.borrow_mut() = Some(msg.to_string());
+                if let Some(display) = gtk::gdk::Display::default() {
+                    let clipboard = match target {
+                        SelectionClipboard::Primary => display.primary_clipboard(),
+                        SelectionClipboard::Clipboard => display.clipboard(),
+                    };
+                    clipboard.set_text(msg);
+                }
+            }
+            scripts::message::SCROLL => {
+                if let Some(cb) = scroll_cb.borrow().as_ref() {
+                    cb(msg.to_string());
+                }
+            }
+            scripts::message::HINTS => {
+                if let Some(cb) = hints_cb.borrow().as_ref() {
+                    cb(msg.to_string());
+                }
+            }
+            scripts::message::EDITOR_SYNC => {
+                if msg.is_empty() {
+                    return;
+                }
+                if let Some(cb) = editor_sync_cb.borrow().as_ref() {
+                    cb(msg.to_string());
+                }
+            }
+            _ => {}
         }
     });
 }
@@ -1225,7 +835,9 @@ fn install_navigation_policy(webview: &WebView, sink: Sink) {
 /// Local rather than borrowed from `core::highlight`: the shell writing an
 /// attribute into the tag it is itself rewriting is shell business, and reaching
 /// into a private core rendering module for eight lines would couple the layers
-/// for nothing. Same reasoning as [`js_string`] below.
+/// for nothing. Same reasoning as [`scripts::js_string`], the JS-literal
+/// counterpart — moved to [`scripts`] because every toolkit shell needs it to
+/// build the same eval'd snippets `View` does here (e.g. `scroll_to_anchor`).
 fn html_attribute(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1237,23 +849,5 @@ fn html_attribute(s: &str) -> String {
             _ => out.push(c),
         }
     }
-    out
-}
-
-/// Encode a string as a JS single-quoted string literal.
-fn js_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '<' => out.push_str("\\x3c"),
-            _ => out.push(c),
-        }
-    }
-    out.push('\'');
     out
 }
