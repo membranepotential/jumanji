@@ -52,9 +52,22 @@ restored from the previous successful `main` run and re-uploaded), with each
 run's raw output as its own artifact. `docs/TESTING.md` says how to fetch
 them.
 
-**Next:** stage 4 — a fake toolkit and fast unit tests for the controller's
-flows (hints, jumplist, completion, the deferred render); then the
-`mac-support` scaffold once the contributor's spike is green.
+**Stage 4 — the controller gets its own tests.** A fake toolkit
+(`controller::fake`: a recording viewport, a plain-state chrome, a host with
+queued timers and worker landings) and 47 scenario tests in
+`controller::tests` covering key dispatch and counts, TOC mode, hints,
+jumplist and quickmarks, `:` completion, search, zoom and wheel coalescing,
+the deferred initial render in all three outcomes, the message router, the
+automation surface and the close-time history flush — in milliseconds, no
+display. One seam: `Controller::new` delegates to a crate-private `new_in`
+that takes the config/data dirs, so tests own theirs. What stays e2e-only,
+and why: live reload and stdin do real I/O through `Host` (a fourth trait, a
+file-event source, would be needed to fake them), and TOC tree behaviour is
+each shell's widget model.
+
+**Next:** the `mac-support` scaffold once the contributor's spike is green;
+a later pass could trim the e2e suite toward what genuinely needs a real
+engine, now that the unit tests cover the flows in milliseconds.
 
 ## 2026-09-02 — macOS port proposal evaluated (issue #1)
 

@@ -20,8 +20,8 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 - **controller-extraction** (on `main`, main checkout) — stage the §5.2
   plan: scripts seam → traits → session move → fake toolkit tests → docs.
   State: **stages 1–3 landed** (session → `controller::session`, GTK shell
-  → `shell/gtk/`, wiring only; 50/50 e2e, reviewed, A/B flat). **Stage 4 in
-  flight** (Opus implementer: fake toolkit + controller unit tests). Docs
+  → `shell/gtk/`, wiring only; 50/50 e2e, reviewed, A/B flat). **Stage 4
+  (fake toolkit + 47 controller unit tests) in verification + review.** Docs
   (DESIGN D2a/D13, CLAUDE, TESTING, README) reconciled.
 - **perf guard** — `.github/workflows/{ci,bench}.yml` (Arch container; fmt/
   clippy/unit, e2e, criterion + startup trail on `gh-pages`, alerts on PRs)
@@ -45,14 +45,11 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
 ## Next
 
-1. **CI** — `.github/workflows/ci.yml`: check (fmt/clippy/unit), e2e (Xvfb,
-   Arch container recommended), bench (criterion + startup, artifact + job
-   summary, no gate). Plan in `05-macos-port.md` §5.1.
-2. **Controller extraction** — `src/controller/` (session, `Viewport`/`Chrome`/
-   `Scheduler` traits, shared user scripts via `__jmnj_post`); GTK shell becomes
-   the adapter. Staged, each step green on the 50 e2e. §5.2.
-3. **Mac scaffold** — branch `mac-support` (the contributor's branch; all
-   else lands on `main`), after 2 and after the spike. §5.3.
+1. **Mac scaffold** — branch `mac-support` (the contributor's branch; all
+   else lands on `main`), after the contributor's spike. §5.3.
+2. Reply on issue #1 (draft in the session scratchpad; Felix posts).
+3. Trim the e2e suite toward what needs a real engine (unit tests now cover
+   the flows in ms).
 4. Delete `.flash-investigation/` (gitignored) — bug closed, released, and the
    suite now defends the fix.
 
