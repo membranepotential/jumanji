@@ -45,9 +45,9 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
 ## Next
 
-1. **Mac scaffold** — branch `mac-support` (the contributor's branch; all
-   else lands on `main`), after the contributor's spike. §5.3.
-2. Reply on issue #1 (draft in the session scratchpad; Felix posts).
+1. **Mac shell** — Torsten's, on branch `mac-support`, after their spike;
+   `05-macos-port.md` §5.3 is the guide. Owner side: review PRs, keep CI green.
+2. Reply on issue #1 (drafted; Felix posts via the bot account).
 3. Trim the e2e suite toward what needs a real engine (unit tests now cover
    the flows in ms).
 4. Delete `.flash-investigation/` (gitignored) — bug closed, released, and the

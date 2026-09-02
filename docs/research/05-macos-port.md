@@ -288,11 +288,12 @@ makes this worth doing even if macOS never ships.
 Enforce the boundary the same way core's is enforced: no `gtk`, `glib`,
 `webkit6` import anywhere under `src/controller/`.
 
-### 5.3 The macOS scaffold branch
+### 5.3 The macOS shell (the contributor's, on `mac-support`)
 
-After 5.2, on the branch `mac-support` — the contributor's branch; the
-extraction and CI land on `main` like every other owner-side change — compiled
-only on macOS:
+Decided 2026-09-03: the owner does not pre-build a scaffold. Once the spike
+is green the contributor opens the `mac-support` branch and builds the shell
+against the landed contract (`src/controller/toolkit.rs`); the owner reviews
+PRs and keeps CI green. What that shell consists of, compiled only on macOS:
 
 - `Cargo.toml`: `tao` + `wry` under `[target.'cfg(target_os = "macos")'.dependencies]`;
   `gtk4` + `webkit6` (and `notify` stays shared) under the mirror cfg.
@@ -307,9 +308,10 @@ only on macOS:
 - Draft DESIGN.md amendments (dual-shell ADR, in-page chrome, JS find,
   automation story) and the README tier note, for the contributor to finish.
 
-The owner cannot run the result. The scaffold's job is to make the contributor's
-first real PR a matter of filling in impls behind types that already compile
-and traits the Linux suite already exercises.
+The owner cannot run any of it. The contract and the fake toolkit
+(`src/controller/fake.rs`) are what make this tractable from the Linux side:
+the traits the mac shell implements are the ones the Linux suite already
+exercises, and the fake shows what each method is expected to do.
 
 ## 6. Open decisions
 
