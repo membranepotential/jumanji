@@ -1,12 +1,16 @@
 # Performance: the criterion pipeline benches and the headless startup timing,
 # on every push to main and every pull request.
 #
-# Two guards, one trail:
+# Two guards, one trail, all inside the repository:
 # - Every run is compared against the stored history and an alert comment is
-#   posted on the PR when a bench regresses past the threshold.
-# - On main, the results are appended to the trail on the `gh-pages` branch
-#   (charts at https://<owner>.github.io/jumanji/dev/bench/), so a slow drift
-#   is visible even when no single change trips the alert.
+#   posted on the PR when a bench regresses past the threshold; the job
+#   summary shows the numbers either way.
+# - On main, the results are appended to the trail on the `bench-data`
+#   branch (a JSON history per bench, plus the action's stock chart page as a
+#   plain file — no GitHub Pages, nothing published), so a slow drift is
+#   visible even when no single change trips the alert.
+# - Every run uploads its raw output (criterion report, the bencher lines,
+#   the startup JSON) as a workflow artifact.
 #
 # Thresholds are deliberately loose: shared runners are noisy, and the point
 # is to catch a real regression, not to fail the build on a scheduler hiccup.
@@ -21,7 +25,6 @@ on:
 
 permissions:
   contents: write
-  deployments: write
   pull-requests: write
 
 env:
@@ -44,20 +47,20 @@ jobs:
           fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
 
-      # The benchmark action reads and writes the trail on gh-pages and needs
-      # the branch to exist; create it once, empty, if this is the first run.
-      - name: Ensure the gh-pages trail branch exists
+      # The benchmark action reads and writes the trail on its data branch and
+      # needs the branch to exist; create it once, empty, on the first run.
+      - name: Ensure the bench-data trail branch exists
         if: github.event_name == 'push'
         # An empty root commit pushed straight from the object store: no
         # checkout, so the working tree the benches run in is never touched.
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          if ! git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+          if ! git ls-remote --exit-code --heads origin bench-data >/dev/null; then
             export GIT_AUTHOR_NAME="github-actions[bot]" GIT_COMMITTER_NAME="github-actions[bot]"
             export GIT_AUTHOR_EMAIL="github-actions[bot]@users.noreply.github.com"
             export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
             root=$(git commit-tree "$(git hash-object -t tree /dev/null)" -m "bench trail")
-            git push origin "$root:refs/heads/gh-pages"
+            git push origin "$root:refs/heads/bench-data"
           fi
 
       - name: Pipeline benches (criterion, libtest-style output)
@@ -66,13 +69,24 @@ jobs:
       - name: Startup timing (headless, median of 7)
         run: scripts/bench-startup.sh -n 7 -j startup.json
 
+      - name: Upload the raw results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: |
+            pipeline.txt
+            startup.json
+            target/criterion
+          if-no-files-found: error
+
       - name: Record pipeline benches
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: pipeline
           tool: cargo
           output-file-path: pipeline.txt
-          benchmark-data-dir-path: dev/bench/pipeline
+          gh-pages-branch: bench-data
+          benchmark-data-dir-path: pipeline
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: ${{ github.event_name == 'push' }}
           save-data-file: ${{ github.event_name == 'push' }}
@@ -87,7 +101,8 @@ jobs:
           name: startup
           tool: customSmallerIsBetter
           output-file-path: startup.json
-          benchmark-data-dir-path: dev/bench/startup
+          gh-pages-branch: bench-data
+          benchmark-data-dir-path: startup
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: ${{ github.event_name == 'push' }}
           save-data-file: ${{ github.event_name == 'push' }}
