@@ -53,7 +53,10 @@ jobs:
       - name: Assert the harness tools are on PATH
         run: command -v Xvfb xdotool dbus-daemon
       - name: Run the e2e suite
-        run: cargo test --test e2e -- --nocapture 2>&1 | tee e2e.log
+        # bash for pipefail: a build failure upstream of `tee` must fail the
+        # step, not vanish behind tee's exit code.
+        shell: bash
+        run: set -o pipefail; cargo test --test e2e -- --nocapture 2>&1 | tee e2e.log
       - name: Fail if the suite skipped instead of running
         run: |
           if grep -q "skipping" e2e.log; then
