@@ -2,6 +2,33 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-09-02 — macOS port proposal evaluated (issue #1)
+
+An external contributor filed a thorough analysis proposing a second,
+macOS-only shell on tao + wry (WKWebView), with the toolkit-agnostic controller
+extracted out of `shell/app.rs` first. `docs/research/05-macos-port.md` records
+the proposal, re-verifies its technical claims against current sources, and
+evaluates it against the code as it stands.
+
+**Decided (pending owner sign-off):** the direction is sound. The shell is not
+the "thin adapter" DESIGN D2 assumed — `app.rs` carries ~1,600 lines of
+session logic and `view.rs` ~500 lines of user-script JS — so the extraction is
+the port's main cost and lands on the Linux side. It pays for itself
+regardless: a controller driven through `Viewport`/`Chrome`/`Scheduler`
+traits gets a fake viewport and fast unit tests for the flows that today need
+Xvfb. The mac shell stays `cfg(target_os = "macos")`, tier 2, never on the
+Linux release path.
+
+Two facts sharpen the issue: the JS find needs the CSS Custom Highlight API,
+which puts the mac floor at macOS 14.2 (Safari 17.2); and WKWebView eating key
+events is a recurring tao/wry issue cluster, so the mac shell must defend
+focus handoff, not just route keys. Editor pairing (D7, D-Bus) has no macOS
+story and is recorded as a headline gap, not a footnote.
+
+**Next:** CI workflows first (protects the extraction PR, gives the contributor
+checks), then the staged extraction, then a scaffold branch once the
+contributor's spike is green.
+
 ## 2026-08-12 — the e2e suite can now see a restore flash
 
 Closes STATUS "Next" #1. The v1.7.0 flash fix (the restore gate conceding only
