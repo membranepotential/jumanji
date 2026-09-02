@@ -36,7 +36,14 @@ cargo test                  # core unit tests + headless e2e (tests/e2e.rs)
 cargo test --test e2e       # just the e2e suite (real Xvfb + WebKit + D-Bus)
 cargo clippy -- -D warnings
 cargo run -- demo/demo.md
+scripts/bench-compare.sh    # perf A/B: latest tag vs. the tree (see docs/TESTING.md)
 ```
+
+CI (`.github/workflows/`): `ci.yml` runs fmt, clippy, unit tests and the e2e
+suite in an Arch container on every push/PR; `bench.yml` runs the benches —
+the pipeline instruction count gates (fails at 105 %), wall clock informs.
+Results and the trail are workflow artifacts; `docs/TESTING.md` says how to
+get them.
 
 The e2e suite drives the real app under a virtual X server and asserts via the
 D-Bus interface; it needs `xorg-server-xvfb`, `xdotool`, and `dbus`
@@ -45,15 +52,30 @@ no-op) when they're absent. See `docs/TESTING.md`.
 
 ## Architecture (enforced boundaries)
 
-- `src/core/` — **pure, no GTK imports, unit-tested.** Markdown → HTML pipeline
-  (comrak AST transform; syntect highlighting; merman mermaid → inline SVG),
-  TOC extraction, config parsing, keymap lookup (`mode × count × key-seq →
-  Action`). Everything here must be testable without a display.
-- `src/shell/` — imperative GTK layer. Window, webkit6 WebView + `app://` URI
-  scheme, capture-phase `EventControllerKey`, statusbar/inputbar, notify-based
-  live reload. As thin as possible; logic lives in core.
-- The core must never depend on the shell. New features start with types in
-  core.
+Three layers (DESIGN D2a). Dependencies point one way: shell → controller →
+core, never back.
+
+- `src/core/` — **pure, no toolkit imports, unit-tested.** Markdown → HTML
+  pipeline (comrak AST transform; syntect highlighting; merman mermaid →
+  inline SVG), TOC extraction, config parsing, keymap lookup (`mode × count ×
+  key-seq → Action`), the session models (jumplist, marks, history, vault).
+  Everything here must be testable without a display.
+- `src/controller/` — **the toolkit-agnostic imperative half, no `gtk` /
+  `glib` / `gio` / `webkit6` / `javascriptcore` imports** (grep before you
+  commit). `Controller<T: Toolkit>` owns the session state and every flow and
+  drives the window only through the traits in `toolkit.rs` (`Viewport`,
+  `Chrome`, `Host`). Viewport *behaviour* is JS the controller owns
+  (`page.rs`, `scripts.rs`) run through `Viewport::eval`, so it is identical
+  on every toolkit; the scripts post back via `window.__jmnj_post`, never
+  `webkit.messageHandlers` directly. Unit-tested against a fake toolkit.
+- `src/shell/gtk/` — the Linux shell: GTK4 widgets, the webkit6 view as
+  `Viewport`, `GtkChrome`, `GlibHost`, GTK event adapters, D-Bus. Wiring
+  only; no session logic. Native find, PRIMARY selection and D-Bus are
+  GTK-only by design. A second shell is a sibling directory under
+  `cfg(target_os = …)`, never a branch in the controller.
+- New features start with types in core, then a controller flow, then (only
+  if a native capability is needed) a trait method — which every shell and
+  the fake must then implement.
 
 ## Conventions
 

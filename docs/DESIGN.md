@@ -68,6 +68,60 @@ what native stacks make you hand-roll (see inlyne's issue tracker).
   WebKit's footprint disappoints, an egui_commonmark front end can replace the
   shell without touching the core.
 
+### D2a: Three layers — core, controller, toolkit shell (2026-09-02)
+
+**The shell was never thin.** D2's escape hatch — "a different front end can
+replace the shell without touching the core" — assumed the GTK shell would be
+adapter code. By v1.8.0 `shell/app.rs` held ~1,600 lines of session logic
+(the mode machine, hint mode, jumplist/quickmarks, `:` completion, the
+deferred initial render, the automation surface) and `shell/view.rs` ~500
+lines of JavaScript, all reachable only through the real WebKit under Xvfb.
+The macOS proposal (issue #1, `docs/research/05-macos-port.md`) made the cost
+concrete: a second shell would have had to copy all of it.
+
+So the reader is three layers, not two:
+
+- **`core/`** — unchanged. Pure, display-free, unit-tested. Markdown → HTML,
+  TOC, config, keymap.
+- **`controller/`** — the toolkit-agnostic imperative half. `Controller<T:
+  Toolkit>` owns the session state and every flow, and drives the window
+  through three small traits it defines in `controller::toolkit`:
+  `Viewport` (a webview reduced to load / eval / eval-to-JSON / zoom /
+  background / find / focus), `Chrome` (status line, input bar, TOC page) and
+  `Host` (timers, a worker thread whose result lands on the main loop, the
+  system URI handler, the selection clipboard, detached spawn, quit).
+  `controller::page` composes all viewport *behaviour* — scrolling, hints,
+  anchored zoom, the load-time `<html>` rewrite, the state snapshot — as JS
+  the controller owns and runs through `Viewport::eval`, so it is the same on
+  every toolkit by construction. `controller::scripts` holds the document-
+  start user scripts, byte-identical everywhere; they post back through a
+  shell-defined `window.__jmnj_post(name, payload)` rather than WebKit's
+  `messageHandlers`, which a wry-hosted WKWebView owns itself. Live reload
+  and stdin streaming live here too, generic over `Host`.
+- **`shell/gtk/`** — the Linux shell: GTK4 widgets, the `webkit6` view
+  implementing `Viewport`, `GtkChrome`, `GlibHost`, GTK event adapters
+  (`KeyPress`, wheel, pointer, close), and the per-instance D-Bus interface,
+  which calls the controller's automation surface (`state`, `execute_str`,
+  `goto_source_line`). Native `FindController`, PRIMARY selection and D-Bus
+  are deliberately GTK-only; a second shell provides its own or does without.
+
+**Rules.** The controller never imports `gtk`, `glib`, `gio`, `webkit6` or
+`javascriptcore` — the same rule core has, enforced by grep. Callbacks the
+controller hands a toolkit are `'static` but never `Send`: the controller is
+an `Rc<RefCell<…>>` on the main thread, and a toolkit whose native API
+demands `Send` (wry) parks the callback and sends a key. Nothing in core, the
+HTML contract (`data-jmnj-open`, `html.dark`, `jmnj-restoring`,
+`--font-size`) or the CSP changed; the extraction was a zero-behaviour-change
+refactor, proved by the 50-case e2e suite at every stage and by a startup and
+instruction-count A/B against v1.8.0 (D13).
+
+**What it buys.** The controller gets a fake toolkit and fast unit tests for
+flows that previously needed a display. A macOS shell (tao + wry) becomes
+`shell/mac/`, `cfg(target_os = "macos")`, tier 2, never on the Linux release
+path — its design questions (in-page chrome, JS find, no D-Bus, macOS 14.2
+floor) are recorded in the research note and become ADR entries only when
+that shell lands.
+
 ### D3: Content pipeline — 100% Rust, no JavaScript
 
 Markdown → HTML happens entirely in Rust before the webview sees content. The
@@ -317,7 +371,7 @@ built; the surface is fixed below.
 
 - **Forward (editor → reader).** A `--forward <LINE>` CLI flag plus a
   `GotoLine(line: u32)` method on the existing per-instance interface
-  (`org.membranepotential.jumanji.PID-<pid>`, `src/shell/dbus.rs`). The per-PID
+  (`org.membranepotential.jumanji.PID-<pid>`, `src/shell/gtk/dbus.rs`). The per-PID
   model **requires** the GTK `Application` to run with `NON_UNIQUE` (set in
   `app::run`): every `jumanji <file>` is its own independent process (zathura
   semantics). Without it, GApplication's single-instance negotiation forwards a
@@ -336,7 +390,7 @@ built; the surface is fixed below.
     overriding the restored history scroll). All of this runs before any
     GTK/WebKit init, so the forwarding path needs no display.
 - **Reverse (reader → editor).** A capture-phase Ctrl + primary-click user-script
-  (`src/shell/view.rs`) walks up from the target to the nearest `[data-sourcepos]`
+  (`src/controller/scripts.rs`) walks up from the target to the nearest `[data-sourcepos]`
   ancestor and posts its source line over the `editorsync` script-message seam;
   the shell substitutes it into `editor-command` and spawns the editor detached
   (`gio::Subprocess`, which reaps via the main loop and never blocks the UI).
@@ -904,10 +958,35 @@ carries a fixture that keeps growing for ~200 ms after `complete` (a CSS
 ~34% of the target offset, so the gate is now defended by a test that has been
 shown to fail without it.
 
+### D13: Performance regressions are judged in instructions, felt in milliseconds (2026-09-02)
+
+Two questions, two instruments (`docs/TESTING.md`, "Performance"):
+
+- **Has the pipeline got more expensive?** Instructions retired per render,
+  counted by valgrind's cachegrind through the bench binary's `--once NAME
+  --repeat K` mode (two runs differing by exactly K renders, so start-up and
+  one-time init cancel; rayon pinned to one thread). Deterministic to under
+  1 %, so it is the number that **gates**: CI fails a push or PR at 105 %.
+- **Has the reader got slower to open?** Wall clock from spawn to
+  `loaded: true` over D-Bus, headless, median of N, interleaved with the
+  baseline run by run (`scripts/bench-compare.sh`). The felt number, and the
+  one that spans WebKit's process spawn and the shell's own startup path — but
+  it moves with the machine, so it **informs**: CI comments, never fails.
+
+Rejected as the gate: criterion wall clock. Measured on byte-identical
+binaries it read anywhere from −10 % to +140 % per bench on the development
+laptop (governor `powersave`, 0.8–2.8 GHz) in every ordering tried, and
+±30 % between shared-runner instances. It stays in CI as the felt number for
+the pipeline, comment-only. The trail lives in the repository's own Actions
+as a workflow-artifact chain; a data-only branch or a Pages site were
+rejected — a branch that shares no history with `main` is not what branches
+are for, and nothing about this project should publish anywhere.
+
 ## Non-goals
 
 - Editing. Ever. Pair with an editor instead (D7).
-- Windows/macOS in v1 (the core pipeline is portable; the shell is GTK).
+- Windows in v1. macOS is not a goal of the owner either, but the layering
+  (D2a) leaves a contributor a clean, cfg-gated place to build it.
 - Pixel-perfect mermaid.js parity (graceful degradation instead).
 - Network access of any kind.
 
@@ -960,10 +1039,11 @@ Adapted from zathura; "page" becomes "section" (heading-delimited).
 
 ## Component boundaries
 
-Functional core, imperative shell. The core is pure and GTK-free.
+Functional core, toolkit-agnostic controller, imperative toolkit shell (D2a).
+The core is pure and toolkit-free; so is the controller.
 
 ```
-┌─ core (pure, no GTK, unit-tested) ─────────────────────────────┐
+┌─ core (pure, no toolkit, unit-tested) ─────────────────────────┐
 │ pipeline.rs   md text ──comrak AST──▶ transform ──▶ HTML doc   │
 │               ├─ highlight.rs  syntect adapter (two-face)      │
 │               ├─ diagram.rs    ```mermaid → merman SVG inline  │
@@ -971,13 +1051,23 @@ Functional core, imperative shell. The core is pure and GTK-free.
 │ toc.rs        heading extraction → outline tree + anchors      │
 │ config.rs     serde+toml: typed options, key tables            │
 │ keymap.rs     mode × count × key-seq → Action (pure lookup)    │
+│ jumplist.rs / marks.rs / history.rs / vault.rs  session models  │
 └────────────────────────────────────────────────────────────────┘
-┌─ shell (gtk4-rs + webkit6) ────────────────────────────────────┐
-│ app.rs        window ─ EventControllerKey(Capture) → Action    │
-│ view.rs       WebView; app:// scheme (HTML + embedded assets)  │
-│ bar.rs        statusbar Label + inputbar Entry                 │
-│ watch.rs      notify debouncer → re-render → reload w/ scroll  │
+┌─ controller (no toolkit; unit-tested against a fake) ──────────┐
+│ toolkit.rs    traits Viewport · Chrome · Host · Toolkit        │
+│ session.rs    Controller<T>: state, dispatch, hints, jumplist, │
+│               :commands, deferred render, automation surface   │
+│ page.rs       viewport behaviour as JS over Viewport::eval     │
+│ scripts.rs    document-start user scripts, __jmnj_post seam    │
+│ watch.rs      notify debouncer → re-render (generic over Host) │
 │ stdin.rs      stdin reader thread → debounced re-render (D9)   │
+└────────────────────────────────────────────────────────────────┘
+┌─ shell/gtk (gtk4-rs + webkit6; Linux) ─────────────────────────┐
+│ app.rs        window, GTK event adapters → Controller<Gtk>     │
+│ view.rs       webkit6 WebView = Viewport; script router        │
+│ chrome.rs     Bar + TocView + Stack = Chrome                   │
+│ host.rs       glib main loop + gio services = Host             │
+│ dbus.rs       per-instance automation / editor-sync interface  │
 └────────────────────────────────────────────────────────────────┘
 ```
 

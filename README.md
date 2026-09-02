@@ -264,6 +264,27 @@ cargo build --release
 some-tool | ./target/release/jumanji   # or just pipe it (renders as data streams in)
 ```
 
+## Development
+
+```sh
+cargo test                   # core + controller unit tests, then the headless e2e suite
+cargo test --test e2e        # just the e2e suite (real Xvfb + WebKit + D-Bus)
+cargo clippy -- -D warnings
+scripts/bench-compare.sh     # perf A/B: latest tag vs. your tree
+```
+
+The code is three layers — `src/core/` (pure Markdown → HTML, config,
+keymap), `src/controller/` (the toolkit-agnostic reader: session, dispatch,
+viewport behaviour as JS, generic over three small traits) and `src/shell/gtk/`
+(GTK4 + WebKitGTK, wiring only). `docs/DESIGN.md` is the decision record and
+binding; `docs/TESTING.md` covers the test layers and the performance guard.
+
+CI runs on every push and pull request: `ci` (fmt, clippy, unit tests, the
+e2e suite in an Arch container) and `bench` (criterion, startup timing, and
+the pipeline's instruction count per render, which gates at 105 %). Each bench
+run's numbers and the accumulated trail are workflow artifacts —
+`docs/TESTING.md` says how to fetch them.
+
 ## Documentation
 
 Design decisions, research, and a development log live in [`docs/`](docs/):

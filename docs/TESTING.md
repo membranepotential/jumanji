@@ -1,14 +1,18 @@
 # Testing
 
-Two layers:
+Three layers of proof, matching the three layers of code (DESIGN D2a):
 
-- **Unit tests** (`src/core/**`) — the pure functional core (pipeline, TOC,
-  config, keymap, Obsidian dialect). Run everywhere, need no display:
-  `cargo test --bin jumanji` (jumanji is a binary crate — there is no `--lib`
-  target), or just the full `cargo test`.
+- **Unit tests** (`src/core/**`, `src/controller/**`) — the pure core
+  (pipeline, TOC, config, keymap, Obsidian dialect) and the toolkit-agnostic
+  controller, the latter driven through a fake toolkit so hint mode, the
+  jumplist, `:` completion and the deferred initial render are exercised
+  without a display. Run everywhere: `cargo test --lib`, or the full
+  `cargo test`.
 - **Headless end-to-end** (`tests/e2e.rs`) — drives the *real* application: a
   real (virtual) X server, real GTK key events, real WebKit, asserting on state
-  read back over D-Bus. This document is about that layer.
+  read back over D-Bus. Most of this document is about that layer.
+- **Performance** — instruction counts that gate and wall clock that
+  informs; the last section.
 
 ## Running
 
@@ -180,10 +184,48 @@ should show startup inside the run-to-run noise and pipeline instructions at
   150 %), because shared runners move them ±30 % on their own. The job
   summary shows all the numbers either way.
 
+One caveat on the gate: the container installs Arch's *current* rust on every
+run, and a rustc upgrade shifts codegen by a few percent. An alert on a commit
+that touched nothing under `src/core`, on a run whose pacman step installed a
+newer rust than the previous run, is that — compare the two runs' pacman
+output before chasing it.
+
+### Getting at the numbers
+
+Every bench run leaves three things behind:
+
+- **The job summary** — open the run on the Actions tab (`bench` workflow);
+  each `Compare and record …` step prints a table of this run against the
+  previous one, with the ratio per bench.
+- **`bench-raw-<sha>`** — this run's raw output: `pipeline.txt` (criterion in
+  libtest format), `instructions.json`, `startup.json`, and the full
+  `target/criterion` report (open `target/criterion/report/index.html` in a
+  browser for criterion's plots).
+- **`bench-trail`** — the accumulated history, one JSON file per measurement
+  (`instructions.json`, `pipeline.json`, `startup.json`), each a map of
+  `entries` → list of `{commit, date, benches: [{name, value, unit}]}`. Only
+  a run on `main` carries it forward; a PR run compares against it and stops.
+
+From the terminal:
+
+```sh
+gh run list --workflow bench.yml --branch main --limit 10
+gh run download <run-id> -n bench-trail -D trail       # the history
+gh run download <run-id> -n bench-raw-<sha> -D raw     # one run's raw output
+python3 -c 'import json; d=json.load(open("trail/instructions.json"))
+for name, runs in d["entries"].items():
+    for r in runs:
+        print(r["commit"]["id"][:7], [(b["name"], b["value"]) for b in r["benches"]])'
+```
+
+`gh run download` without `-n` fetches every artifact of the run. Artifacts
+expire after 90 days; the chain survives because each `main` run re-uploads
+the whole trail, so the only way to lose history is 90 days without a push.
+
 ## The D-Bus interface is the automation / editor-sync surface
 
 The tests don't use a back door. They exercise the same per-instance D-Bus
-service (`src/shell/dbus.rs`) that is the foundation for the M3 editor-sync
+service (`src/shell/gtk/dbus.rs`) that is the foundation for the M3 editor-sync
 feature (DESIGN.md D7). Each running reader owns
 
 - **name** `org.membranepotential.jumanji.PID-<pid>` on the session bus,
@@ -261,4 +303,5 @@ Two things that will bite you if you extend the harness:
    last observed state on timeout. Prefer a predicate over a fixed delay so the
    test is robust to a slow, loaded machine.
 4. If your action needs a new observable, add the field to the `GetState` JSON
-   in `src/shell/app.rs` (`state_json`) and to the `State` struct + parser here.
+   in `src/controller/session.rs` (`state_json`) and to the `State` struct +
+   parser here.

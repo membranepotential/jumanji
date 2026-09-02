@@ -19,8 +19,10 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
   `Session`, Arch container for CI, `cfg(target_os)` for the mac shell.
 - **controller-extraction** (on `main`, main checkout) — stage the §5.2
   plan: scripts seam → traits → session move → fake toolkit tests → docs.
-  State: **stages 1–2 landed** (`21fae85`, `7393903`; reviewed, 50/50 e2e).
-  A/B vs v1.8.0 running. Next: stage 3 (session move) once the A/B is clean.
+  State: **stages 1–3 landed** (session → `controller::session`, GTK shell
+  → `shell/gtk/`, wiring only; 50/50 e2e, reviewed, A/B flat). **Stage 4 in
+  flight** (Opus implementer: fake toolkit + controller unit tests). Docs
+  (DESIGN D2a/D13, CLAUDE, TESTING, README) reconciled.
 - **perf guard** — `.github/workflows/{ci,bench}.yml` (Arch container; fmt/
   clippy/unit, e2e, criterion + startup trail on `gh-pages`, alerts on PRs)
   and `scripts/bench-compare.sh` (local A/B of a ref vs. the tree). State:

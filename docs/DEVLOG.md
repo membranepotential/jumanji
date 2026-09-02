@@ -2,6 +2,60 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-09-02/03 — three layers, CI, and a performance guard that can tell
+
+The day after the macOS proposal was evaluated (entry below), the owner-side
+work it asked for landed on `main`: the controller extraction, CI, and a
+regression guard for performance.
+
+**Three layers (DESIGN D2a).** `src/shell/app.rs` — 2,300 lines of session
+logic over `Rc<RefCell<Shell>>` — became `controller::session::Controller<T:
+Toolkit>`, generic over three traits in `controller::toolkit` (`Viewport`,
+`Chrome`, `Host`). Viewport behaviour is JS the controller owns
+(`controller::page`, over `Viewport::eval`); the document-start user scripts
+moved to `controller::scripts` and post back through a shell-defined
+`window.__jmnj_post`, since a wry-hosted WKWebView owns `messageHandlers`
+itself. Live reload and stdin streaming are generic over `Host`. The GTK
+shell is `src/shell/gtk/`: the webkit6 view as `Viewport`, `GtkChrome`,
+`GlibHost`, event adapters, D-Bus — wiring only. Done in three stages, each
+green on the 50-case e2e suite and reviewed for drift; the trait contract
+landed first as its own commit. Zero behaviour change: startup A/B against
+v1.8.0 within ±1 %, pipeline instruction counts within 0.7 %.
+
+**CI.** `ci.yml` runs fmt, clippy, the unit tests and the real e2e suite
+(Xvfb + WebKit + D-Bus, 50/50 in ~75 s) in an Arch container — the versions
+the reader ships on. First runs surfaced three things worth keeping: a
+path-scoped `git commit` that swept in an agent's staged `git mv` (main did
+not build for eleven minutes; fixed forward with a temp-index commit), `sh`
+hiding a build failure behind `tee` (both bench steps now run under bash
+with `pipefail`), and Arch's rust 1.98 carrying a clippy lint 1.95 lacks
+(`chunks_exact_to_as_chunks`; fixed).
+
+**The performance guard (DESIGN D13).** The first design used criterion wall
+clock as the gate. It cannot be one: on the development laptop under
+`powersave`, byte-identical pipeline binaries read −10 % to +140 % per bench
+in every ordering tried, and shared runners differ ±30 % between instances.
+The gate is now instructions retired per render, counted by cachegrind
+through a `--once NAME --repeat K` mode on the bench binary (two runs
+differing by K renders; start-up and init cancel): deterministic to under
+1 %, fails CI at 105 %. Wall clock stays as the felt number — criterion and
+the headless startup timing both comment, never fail. Locally,
+`scripts/bench-compare.sh` pits any ref against the tree: startup
+interleaved run by run, pipeline in instructions.
+
+**Where the trail lives — and where it does not.** The first cut used a
+`gh-pages` branch plus GitHub Pages, which promptly deployed to the owner's
+personal domain; torn down (deployment, environment, branch, Pages, workflow
+run). The second used a data-only `bench-data` branch; rejected as against
+the grain of git. The trail is now a workflow-artifact chain (`bench-trail`,
+restored from the previous successful `main` run and re-uploaded), with each
+run's raw output as its own artifact. `docs/TESTING.md` says how to fetch
+them.
+
+**Next:** stage 4 — a fake toolkit and fast unit tests for the controller's
+flows (hints, jumplist, completion, the deferred render); then the
+`mac-support` scaffold once the contributor's spike is green.
+
 ## 2026-09-02 — macOS port proposal evaluated (issue #1)
 
 An external contributor filed a thorough analysis proposing a second,
