@@ -331,6 +331,35 @@ walks the pages in order — so every candidate is reachable, not just the first
 few. The header is `[candidate/total] (page/pages)`; the page counter is
 omitted when everything fits on one page.
 
+### D5a.0: Anything that changes a block's height must be anchored (2026-09-13)
+
+An invariant, learned by shipping v1.9.0 without it: **"no re-render" is not
+"nothing moves".**
+
+`s` and `a` were built as class flips — the rule they gate is already in the
+stylesheet, so no pipeline pass runs and the text column does not reflow. That
+reasoning is true and was still the wrong conclusion. Flipping the class changes
+the *height* of the blocks it affects: a table re-wraps at a different measure,
+a fitted diagram sheds height by whatever factor its box demands. Everything
+after that block shifts, `scrollY` does not, and the reader's place slides out
+from under them. Both shipped doing exactly that.
+
+So: **any change that can alter a block's height is wrapped in the D5a anchor**
+(`capture_anchor_js` → apply → `RESTORE_ANCHOR_JS`), keyboard changes at the
+viewport top and pointer-driven ones at the cursor. That now covers both zoom
+axes, `ToggleWide`, `ToggleDiagramFit` and per-diagram `Ctrl`+wheel. Only
+genuinely height-neutral changes are exempt, and there is exactly one: recolor.
+
+The observable is `GetState`'s `probe_text` / `probe_top` — *what* is at the top
+of the reading column and *where*. `scroll_y` cannot express this (an anchored
+toggle is supposed to change it) and `scroll_percent` is a lossy proxy that let
+the bug through. A new toggle is not done until an e2e asserts the same content
+sits at the same offset across it, verified red with the anchor removed.
+
+The one case the anchor cannot serve is a document that shrinks below the
+current offset: the browser clamps, and there is no position left to hold. That
+is not a regression, and the tests stay clear of it by sitting mid-document.
+
 ### D5a.1: Wide blocks — pictures get the window, prose keeps the measure (2026-09-13)
 
 Bounded measure is right for prose and wrong for pictures. A 1865 px diagram

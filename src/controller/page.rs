@@ -105,6 +105,19 @@ pub struct ViewportState {
     /// box normally and the window minus the gutter when the breakout is on, so
     /// an e2e can assert the diagram really got more usable width.
     pub diagram_box_width: f64,
+    /// What is at the top of the reading column right now, and where: the
+    /// first 48 characters of the element the anchor probe would pick, and that
+    /// element's viewport-relative `top` in CSS px.
+    ///
+    /// The observable for "the reader's place did not move". Any change that
+    /// alters a block's *height* — the wide-block breakout, diagram fit,
+    /// per-diagram zoom, both zoom axes — shifts everything after it while
+    /// `scrollY` stays put, so the only honest check is that the same content
+    /// is still at the same offset afterwards. `scroll_y` cannot say that (it
+    /// is *supposed* to change) and `scroll_percent` is a lossy proxy.
+    pub probe_text: String,
+    /// See [`probe_text`](Self::probe_text).
+    pub probe_top: f64,
     /// Rendered width of the first `<math>` element (0 if none). CSS px. Lets
     /// e2e assert MathML actually laid out with nonzero geometry.
     pub math_width: f64,
@@ -186,6 +199,8 @@ struct Snapshot {
     ms: f64,
     rw: f64,
     fw: f64,
+    pt: String,
+    py: f64,
     fc: String,
     ff: f64,
     rv: f64,
@@ -207,6 +222,8 @@ impl From<Snapshot> for ViewportState {
             msup_shift_ratio: s.ms,
             fence_width: s.rw,
             frontmatter_width: s.fw,
+            probe_text: s.pt,
+            probe_top: s.py,
             first_frame_scroll_y: s.ff,
             reveal_scroll_y: s.rv,
             revealed_by_failsafe: s.rt,
@@ -234,6 +251,8 @@ impl ViewportState {
             msup_shift_ratio: 0.0,
             fence_width: 0.0,
             frontmatter_width: 0.0,
+            probe_text: String::new(),
+            probe_top: 0.0,
             // Matches the in-page sentinel: nothing was recorded.
             first_frame_scroll_y: -1.0,
             reveal_scroll_y: -1.0,
@@ -484,19 +503,37 @@ pub trait Page: Viewport + Clone + 'static {
     }
 
     /// Apply the wide-block breakout state: flip the master class on `<html>`
-    /// (DESIGN D5a). Pure JS, like the recolor's class half — the per-kind
-    /// eligibility classes the pipeline emitted stay put, so nothing re-renders
-    /// and the reading position does not move.
+    /// (DESIGN D5a.1).
+    ///
+    /// **Anchored.** No re-render happens — the rule is already in the
+    /// stylesheet — but "no re-render" is not "nothing moves": widening a block
+    /// changes its *height* (a table re-wraps at the new measure, a code block
+    /// loses wrapped rows), so every block after it shifts while `scrollY`
+    /// stays put, and the reader's place slides out from under them. Same
+    /// capture → apply → restore as [`Page::set_text_zoom_px`]; pure JS, so it
+    /// is one eval.
     fn set_wide(&self, wide: bool) {
-        self.eval(&wide_class_js(wide));
+        let capture = capture_anchor_js(&ZoomAnchor::Top);
+        self.eval(&format!(
+            "{capture}{}{RESTORE_ANCHOR_JS}",
+            wide_class_js(wide)
+        ));
     }
 
     /// Apply the diagram fit-to-width state: flip the fit class on `<html>`
-    /// (DESIGN D5a.2). A class flip like [`Page::set_wide`], for the same
-    /// reason — the rule it gates is already in the stylesheet, so nothing
-    /// re-renders and only the diagrams change size.
+    /// (DESIGN D5a.2).
+    ///
+    /// **Anchored**, and more obviously so than [`Page::set_wide`]: fitting
+    /// scales a diagram down by whatever factor its box demands, and an SVG
+    /// with a `viewBox` scales its height by the same factor — a tall diagram
+    /// can shed hundreds of pixels, pulling everything below it up past the
+    /// reader's eye. Capture → apply → restore, one eval.
     fn set_diagram_fit(&self, fit: bool) {
-        self.eval(&diagram_fit_class_js(fit));
+        let capture = capture_anchor_js(&ZoomAnchor::Top);
+        self.eval(&format!(
+            "{capture}{}{RESTORE_ANCHOR_JS}",
+            diagram_fit_class_js(fit)
+        ));
     }
 
     /// Scale the `index`-th diagram by `factor` (multiplicative, clamped in the
@@ -504,12 +541,21 @@ pub trait Page: Viewport + Clone + 'static {
     /// tick here instead of to [`Page::zoom_to`] when the pointer is over a
     /// diagram.
     ///
-    /// Deliberately *not* anchored: the diagram scrolls inside its own box, so
-    /// the page around it does not reflow and there is no reading position to
-    /// pin. And deliberately not coalesced — a class-free style write on one
-    /// element is nothing like the full-page reflow a geometric zoom step costs.
-    fn zoom_diagram(&self, index: usize, factor: f64) {
-        self.eval(&diagram_zoom_js(index, factor));
+    /// **Anchored at the cursor**, like the page zoom this tick would otherwise
+    /// have driven. A scaled diagram mostly scrolls inside its own box, but the
+    /// box itself is only height-capped while a scale is applied: the step off
+    /// 1.0 caps it and the step back to 1.0 uncaps it, and either way the box's
+    /// height changes and the page below it moves. Anchoring at the pointer
+    /// keeps what is under the cursor under the cursor.
+    ///
+    /// Still deliberately *not* coalesced — a style write on one element is
+    /// nothing like the full-page reflow a geometric zoom step costs.
+    fn zoom_diagram(&self, index: usize, factor: f64, anchor: ZoomAnchor) {
+        let capture = capture_anchor_js(&anchor);
+        self.eval(&format!(
+            "{capture}{}{RESTORE_ANCHOR_JS}",
+            diagram_zoom_js(index, factor)
+        ));
     }
 
     /// Query the current scroll offset (px), delivering it to `callback` on the
@@ -543,6 +589,25 @@ pub trait Page: Viewport + Clone + 'static {
              const fm = document.querySelector('.frontmatter'); \
              const fn = document.querySelector('.entity.name.function.python'); \
              const msup = document.querySelector('math msup'); \
+             const mr = m.getBoundingClientRect(); \
+             /* The reading-position probe. Mirrors `capture_anchor_js` exactly \
+                — same probe points, same exclusions — so what it reports is \
+                precisely the element the anchor would pin. Falling back to \
+                `main` would be worse than useless: main's box starts at the top \
+                of the document, so its `top` is just `-scrollY` and the check \
+                would silently invert into 'scrollY did not change', which is the \
+                opposite of the invariant (DESIGN D5a.0). */ \
+             let pn = null; \
+             const pcx = Math.max(1, Math.min(innerWidth - 1, mr.left + mr.width / 2)); \
+             for (const ppy of [8, 40, 80, 140]) { \
+               const c = document.elementFromPoint(pcx, ppy); \
+               if (c && c !== b && c !== d && c.tagName !== 'MAIN') { pn = c; break; } } \
+             const ptxt = pn ? (pn.textContent || '').replace(/\\s+/g, ' ').trim() : ''; \
+             /* An SVG <path> identifies nothing by text; name it by tag instead \
+                of climbing, which would walk right up into main. */ \
+             const pt = pn ? (ptxt ? ptxt.slice(0, 48) \
+                                   : '<' + pn.tagName.toLowerCase() + '>') : ''; \
+             const py = pn ? pn.getBoundingClientRect().top : 0; \
              let ms = 0; \
              if (msup && msup.children.length >= 2) { \
                const bb = msup.children[0].getBoundingClientRect(); \
@@ -555,6 +620,7 @@ pub trait Page: Viewport + Clone + 'static {
                       gb: dia ? dia.getBoundingClientRect().width : 0, \
                       mw: math ? math.getBoundingClientRect().width : 0, \
                       ms: ms, \
+                      pt: pt, py: py, \
                       rw: rf ? rf.getBoundingClientRect().width : 0, \
                       fw: fm ? fm.getBoundingClientRect().width : 0, \
                       fc: fn ? getComputedStyle(fn).color : ''";

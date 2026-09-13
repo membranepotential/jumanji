@@ -836,15 +836,16 @@ impl<T: Toolkit + 'static> Controller<T> {
     ///
     /// The step is `zoom_step` reused *multiplicatively* — `×(1 + step)` in,
     /// its reciprocal out — so the ticks feel evenly spaced across the clamp
-    /// range and out exactly undoes in. Nothing is coalesced or anchored: this
-    /// writes one custom property on one element, and the diagram scrolls
-    /// inside its own box, so there is neither a page reflow to batch nor a
-    /// reading position to pin.
+    /// range and out exactly undoes in. Not coalesced (one style write on one
+    /// element is not a page reflow) but *anchored at the cursor*: the box is
+    /// height-capped only while a scale is applied, so stepping off and back
+    /// onto 1.0 moves the page below it.
     fn zoom_diagram(&self, index: usize, dy: f64) {
         let s = self.0.borrow();
         let step = 1.0 + s.zoom_step;
         let factor = if dy < 0.0 { step } else { 1.0 / step };
-        s.view.zoom_diagram(index, factor);
+        let anchor = s.cursor_anchor();
+        s.view.zoom_diagram(index, factor, anchor);
     }
 
     /// Accumulate one Ctrl+wheel tick. Leading-edge coalescing: the first tick of a
@@ -2326,6 +2327,7 @@ fn state_json(
          \"diagram_box_width\":{diagram_box_width},\
          \"math_width\":{math_width},\"msup_shift_ratio\":{msup_shift_ratio},\
          \"fence_width\":{fence_width},\"frontmatter_width\":{frontmatter_width},\
+         \"probe_text\":{probe_text},\"probe_top\":{probe_top},\
          \"first_frame_scroll_y\":{first_frame_scroll_y},\
          \"reveal_scroll_y\":{reveal_scroll_y},\
          \"reveal_failsafe\":{reveal_failsafe},\"restoring\":{restoring},\
@@ -2348,6 +2350,8 @@ fn state_json(
         msup_shift_ratio = vs.msup_shift_ratio,
         fence_width = vs.fence_width,
         frontmatter_width = vs.frontmatter_width,
+        probe_text = json_string(&vs.probe_text),
+        probe_top = vs.probe_top,
         first_frame_scroll_y = vs.first_frame_scroll_y,
         reveal_scroll_y = vs.reveal_scroll_y,
         reveal_failsafe = vs.revealed_by_failsafe,
