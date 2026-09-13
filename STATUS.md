@@ -20,27 +20,27 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
 ## Done (recent)
 
-- **wide blocks + merman 0.8 (2026-09-13, uncommitted)** — diagrams, fences and
-  tables break out of the reading column to window width (DESIGN D5a.1); `s`
-  toggles by flipping one `<html>` class, no re-render. merman 0.7 → 0.8.0-
-  alpha.6 fixes a lexer parity bug that ate diagrams whose quoted `subgraph`
-  title held a `;` or `]`; parse errors now read as `line:col`. 438 tests green;
-  the e2e goes red without the breakout CSS. Perf vs v1.8.0: `mermaid` −47 %,
-  `demo` −46 %, everything else at or under baseline (a lazily-built renderer
-  removed a ~70 k-instruction fixed cost the bench caught).
-- **diagram fit + zoom (2026-09-13, uncommitted)** — `a` cycles fit-to-width /
-  intrinsic; Ctrl+wheel over a diagram scales that diagram, not the page
-  (DESIGN D5a.2), routed shell-side off a cached hover flag because GTK takes
-  the scroll before WebKit (D4). Stripping merman's inline `max-width` at the
-  source got the stylesheet back to zero `!important`.
+- **wide blocks + merman 0.8 (v1.9.0, 2026-09-13)** — diagrams/fences/tables
+  break out to window width (D5a.1), `s` toggles. merman 0.8 fixes a lexer
+  parity bug that ate diagrams with `;`/`]` in a quoted `subgraph` title;
+  errors read as `line:col`. Perf vs v1.8.0: `mermaid` −47 %, `demo` −46 %,
+  rest at or under baseline (a lazily-built renderer removed a ~70 k fixed
+  cost the bench caught).
+- **reading position held across toggles (2026-09-13)** — v1.9.0's `s` and `a`
+  moved the document under the reader: a class flip does not re-render but does
+  change block *heights*, so content after them shifts. Both now use D5a's
+  anchor (DESIGN D5a.0); `GetState` gained `probe_text`/`probe_top` and two e2e
+  tests that go red without it. Also fixed the v1.9.0 CI e2e failure (fixture
+  diagram too narrow to overflow a 1x container's box).
+- **diagram fit + zoom (v1.9.0)** — `a` cycles fit-to-width/intrinsic;
+  Ctrl+wheel scales one diagram, not the page (D5a.2), routed shell-side off a
+  cached hover flag (GTK takes the scroll before WebKit, D4).
 - **controller extraction (2026-09-02..12)** — session → `controller::session`,
   GTK shell → `shell/gtk/` (wiring only), fake toolkit + 51 display-free tests;
   DESIGN D2a/D13, CLAUDE, TESTING, README reconciled. 50/50 e2e, A/B flat.
-- **e2e restore-gate hole closed (2026-08-12)** — growing fixture plus
-  `reveal_scroll_y` / `reveal_failsafe`; tests go red without the gate.
-- **Perf pass (2026-08-12)** — criterion benches + headless startup timing via
-  a lib/bin split; parallel syntect, mermaid renderer reuse, startup double
-  load fixed, native-scroll statusbar updates.
+- **e2e restore-gate + perf pass (2026-08-12)** — `reveal_scroll_y` /
+  `reveal_failsafe` go red without the gate; criterion benches, parallel
+  syntect, startup double load fixed.
 - **v1.7.0** — session-scoped zoom (DESIGN D5a); document-switch flash gone.
 - **v1.6.0** — opening position rides into the load (D12); `--background`.
 - **v1.2 – v1.5** — breadcrumb, `:` completion, Obsidian dialect, Neovim sync.

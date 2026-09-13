@@ -2,6 +2,56 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-09-13 (later) — "no re-render" is not "nothing moves"
+
+v1.9.0 shipped `s` and `a` with a defect the design notes had confidently ruled
+out. Both were built as class flips: the rule they gate is already in the
+stylesheet, no pipeline pass runs, the text column does not reflow. All true,
+and the wrong conclusion — the user reported both keys moving the document under
+them within minutes of the release.
+
+Flipping the class changes the **height** of the blocks it affects. A table
+re-wraps at the new measure; a fitted diagram sheds height by whatever factor
+its box demands, and an SVG with a `viewBox` takes its height along. Everything
+after that block shifts, `scrollY` does not, and the reader's place slides away.
+The claim "nothing moves vertically" was about the column; the bug was about
+block heights, and nothing in the tests distinguished them.
+
+**The fix** is the anchor D5a has had all along — `capture_anchor_js` → apply →
+`RESTORE_ANCHOR_JS`, the same three lines text zoom uses — now wrapped around
+`set_wide`, `set_diagram_fit` and `zoom_diagram` (that last at the cursor, since
+it is a wheel gesture). On `demo/demo.md`, fitting now moves `scrollY` by 667 px
+— the height the document genuinely lost above the reader — while the element
+under the eye stays within 1 px. The scroll offset *must* change to hold a
+place; that is what made the bug invisible to every existing check.
+
+**The observable that was missing.** `scroll_y` cannot express this invariant:
+an anchored toggle is supposed to change it. `scroll_percent`, which the zoom
+tests use, is a lossy proxy that let this through. `GetState` now reports
+`probe_text` / `probe_top` — *what* is at the top of the reading column and
+*where* — mirroring `capture_anchor_js` exactly, so it names the very element
+the anchor pins. Two false starts worth recording: probing a single point lands
+on `main` whenever the gap between blocks falls at y=8, and `main`'s box starts
+at the document top, so `top` degenerates to `-scrollY` and the check silently
+inverts into "scrollY did not change" — the opposite of the invariant. And
+`elementFromPoint` happily returns an SVG `<path>`, which no text identifies.
+
+**The guard.** `s_holds_the_reading_position` and `a_holds_the_reading_position`
+assert the same content sits at the same offset across each toggle, both
+verified red with the anchor removed (`"Paragraph 03" -> "Paragraph 06"`). The
+`s` test needed a *table* in the fixture to bite at all: a diagram keeps its
+intrinsic width and overflows, so its height never changes with the breakout,
+and a diagram-only fixture passed unanchored. Unit-level, `assert_anchored`
+fails in milliseconds if a toggle is written without capture-before-restore.
+D5a.0 states the rule for everything added later.
+
+**Also fixed:** the v1.9.0 CI e2e failure. `a_fits_a_diagram_into_its_box_and_back`
+asserted its fixture diagram overflowed its box, which held on a 2x developer
+machine (572 px box) and failed in the 1x CI container (1192 px box) because the
+diagram was only ~1150 px. The fixture is now ~2275 px, clearing every box either
+scale produces. Green locally is not green in CI whenever a test can see the
+device scale factor.
+
 ## 2026-09-13 — diagrams get the whole window, and merman stops eating them
 
 Two complaints, one root cause between them: the reader was making wide
