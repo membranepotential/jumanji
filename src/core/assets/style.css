@@ -237,8 +237,9 @@ h6 {
   color: var(--fg-muted);
 }
 
-/* The empty anchor comrak injects at the start of each heading. It carries the
- * fragment id and renders nothing; keep it from disturbing layout. */
+/* The empty anchor comrak injects into each heading — since comrak 0.54 at the
+ * *end* of the heading, not the start, and carrying an `aria-label` rather than
+ * `aria-hidden`. It renders nothing either way; keep it from disturbing layout. */
 .markdown-body .anchor {
   text-decoration: none;
 }

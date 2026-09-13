@@ -129,7 +129,7 @@ webview is a dumb, static renderer: no bundled mermaid.js/highlight.js, no
 script execution needed for content, no async render races, and the same
 pipeline can later feed an export path (PDF/HTML) or a different front end.
 
-- **Parse: comrak 0.53** — full GFM (tables, task lists, strikethrough,
+- **Parse: comrak 0.55** — full GFM (tables, task lists, strikethrough,
   autolinks) + footnotes; mutable arena AST makes intercepting fences a
   first-class parse → mutate → format workflow; built-in syntect adapter.
   (pulldown-cmark: flat event stream makes fence interception awkward;
@@ -577,7 +577,7 @@ is 100% Rust (D3), so a JS math engine (KaTeX/MathJax) is out by construction.
   LaTeX — a first-class parse → mutate → format seam, identical in shape to the
   mermaid fence interception (D3). GitHub's dollar rules apply, so prose dollars
   ("costs $5 and $10") stay text (encoded in `core::math` tests as documentation).
-- **Render:** **pulldown-latex 0.7.1** (crates.io, MIT) — a pure-Rust LaTeX →
+- **Render:** **pulldown-latex 0.8.0** (crates.io, MIT) — a pure-Rust LaTeX →
   MathML Core renderer (~95% KaTeX coverage). `core::math` walks the AST and
   replaces each `Math` node with an inline raw-HTML `<math>` fragment (inline
   display style for `$…$`, block for `$$…$$`), mirroring `diagram.rs`.

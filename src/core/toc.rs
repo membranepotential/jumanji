@@ -2,13 +2,12 @@
 //!
 //! Walks the AST in document order and produces one [`Heading`] per heading.
 //! Anchors are computed with the *same* [`comrak::Anchorizer`] algorithm and
-//! the *same* text-collection ([`comrak::html::collect_text`]) that comrak's
+//! the *same* text-collection ([`AstNode::collect_text`]) that comrak's
 //! HTML renderer uses, so the anchors here are byte-for-byte the fragment ids
 //! the rendered HTML actually contains — including duplicate-heading suffixes
 //! (`-1`, `-2`, …).
 
 use comrak::Anchorizer;
-use comrak::html::collect_text;
 use comrak::nodes::{AstNode, NodeValue};
 
 use super::Heading;
@@ -24,7 +23,7 @@ pub fn extract<'a>(root: &'a AstNode<'a>) -> Vec<Heading> {
             NodeValue::Heading(heading) => heading.level,
             _ => continue,
         };
-        let text = collect_text(node);
+        let text = node.collect_text();
         let slug = anchorizer.anchorize(&text);
         headings.push(Heading {
             level,

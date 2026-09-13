@@ -1,6 +1,6 @@
 @namespace m url('http://www.w3.org/1998/Math/MathML');
 
-/* Vendored from pulldown-latex 0.7.1 (github.com/carloskiki/pulldown-latex,
+/* Vendored from pulldown-latex 0.8.0 (github.com/carloskiki/pulldown-latex,
    MIT — see LICENSE.pulldown-latex). Three jumanji edits, all marked `jumanji:`:
    (1) the vendored-font url() refs below are rewritten to base64 `data:` URIs
        at runtime by `core::math` (jumanji serves no external resources — no

@@ -25,7 +25,6 @@
 //! titles as `Bold title`.
 
 use comrak::Arena;
-use comrak::html::collect_text_append;
 use comrak::nodes::{AstNode, NodeValue};
 
 use super::highlight::escape_html;
@@ -144,7 +143,7 @@ fn take_marker<'a>(quote: &'a AstNode<'a>) -> Option<Marker> {
             // Everything from here on is markup, not plain source text.
             literal_len = Some(text.len());
         }
-        collect_text_append(node, &mut text);
+        node.collect_text_append(&mut text);
     }
     // The marker must lie entirely within the *leading run of `Text` nodes*, so
     // a quote opening with `` `[!note]` `` (a `Code` node) is not a callout.

@@ -8,7 +8,7 @@
 //!
 //! **Three nodes, not one.** The label is emitted as a real `Text` node between
 //! two `HtmlInline`s rather than folded into the opening tag, because
-//! `comrak::html::collect_text` — which both `core::toc` and comrak's own
+//! `AstNode::collect_text` — which both `core::toc` and comrak's own
 //! heading-id renderer use — skips `HtmlInline`. A heading containing a
 //! wikilink would otherwise get a silently truncated anchor, and the TOC, the
 //! emitted `id` and Obsidian's own slug would stop agreeing.
@@ -19,7 +19,6 @@
 //! jumanji is a reader, so a dead link is never a note-creation affordance.
 
 use comrak::Arena;
-use comrak::html::collect_text;
 use comrak::nodes::{AstNode, NodeValue};
 
 use super::highlight::escape_html;
@@ -47,7 +46,7 @@ pub fn transform_wikilinks<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>, vaul
         // children say something other than the target". comrak keeps the alias
         // as literal text rather than parsing it as inlines, which is what
         // Obsidian does too — no markdown inside link text.
-        let written = collect_text(node);
+        let written = node.collect_text();
         let label = match written {
             alias if alias != raw && !alias.is_empty() => alias,
             _ => match obsidian::display_label(&reference) {

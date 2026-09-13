@@ -6,13 +6,13 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.103"
 clap = { version = "4.6.1", features = ["derive"] }
-comrak = "0.53.0"
+comrak = "0.55.0"
 gtk = { version = "0.11.4", package = "gtk4", features = ["v4_14"] }
 ignore = "0.4.33"
 merman = { version = "0.8.0-alpha.6", features = ["complete-svg"] }
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
-pulldown-latex = "0.7.1"
+pulldown-latex = "0.8.0"
 rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"

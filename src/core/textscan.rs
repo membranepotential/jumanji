@@ -26,7 +26,6 @@
 use std::ops::Range;
 
 use comrak::Arena;
-use comrak::html::collect_text;
 use comrak::nodes::{AstNode, NodeValue};
 
 use super::highlight::escape_html;
@@ -249,7 +248,7 @@ fn strip_comment_regions<'a>(root: &'a AstNode<'a>) {
 }
 
 fn is_comment_marker<'a>(node: &'a AstNode<'a>) -> bool {
-    matches!(node.data.borrow().value, NodeValue::Paragraph) && collect_text(node).trim() == "%%"
+    matches!(node.data.borrow().value, NodeValue::Paragraph) && node.collect_text().trim() == "%%"
 }
 
 // --- embeds ----------------------------------------------------------------
@@ -381,7 +380,7 @@ fn attach_standalone_ids<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>) {
         if !matches!(node.data.borrow().value, NodeValue::Paragraph) {
             continue;
         }
-        let text = collect_text(node);
+        let text = node.collect_text();
         let Some(id) = text.trim().strip_prefix('^') else {
             continue;
         };
