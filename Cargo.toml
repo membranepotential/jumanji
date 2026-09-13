@@ -9,7 +9,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 comrak = "0.53.0"
 gtk = { version = "0.11.4", package = "gtk4", features = ["v4_14"] }
 ignore = "0.4.33"
-merman = { version = "0.7.0", features = ["render"] }
+merman = { version = "0.8.0-alpha.6", features = ["complete-svg"] }
 notify = "8.2.0"
 notify-debouncer-full = "0.7.0"
 pulldown-latex = "0.7.1"

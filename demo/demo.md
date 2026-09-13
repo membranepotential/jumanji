@@ -52,7 +52,7 @@ wrecking the page layout:
 |---|---|---|---|---|---|
 | Parser | comrak | 0.53 | GFM + footnotes → AST | pulldown-cmark's event stream makes fence interception awkward | n/a |
 | Highlighting | syntect + two-face | 5.3 / 0.5 | classed HTML + theme CSS | tree-sitter has no theme format | plain `<pre>` |
-| Diagrams | merman | 0.7 | mermaid → inline SVG | mmdc needs ~200 MB of Chromium | highlighted fence + error note |
+| Diagrams | merman | 0.8 | mermaid → inline SVG | mmdc needs ~200 MB of Chromium | highlighted fence + error note |
 | Webview | webkit6 | 0.6 | typesetting only | wry is still GTK3 on Linux | — |
 
 ## Code
