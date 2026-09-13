@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use comrak::nodes::{Ast, AstNode, LineColumn, NodeHtmlBlock, NodeValue};
 use comrak::{Arena, Options as ComrakOptions, format_html, parse_document};
 
+use super::config::{DIAGRAM_FIT_CLASS, WIDE_CLASS, WideBlocks};
 use super::highlight::escape_html;
 use super::vault::Vault;
 use super::{
@@ -21,7 +22,7 @@ use super::{
 };
 
 /// The stylesheet is embedded at compile time; nothing is fetched at runtime.
-const BASE_CSS: &str = include_str!("assets/style.css");
+pub(crate) const BASE_CSS: &str = include_str!("assets/style.css");
 
 /// Content Security Policy for the rendered page. Network is fully locked out;
 /// only inline styles/SVG, local (`file:`/`data:`) images, and the base64
@@ -29,6 +30,18 @@ const BASE_CSS: &str = include_str!("assets/style.css");
 /// data:` is harmless when a document has no math (nothing references a font).
 const CSP: &str =
     "default-src 'none'; img-src file: data:; style-src 'unsafe-inline'; font-src data:";
+
+/// The opening `<html>` tag as [`assemble`] emits it, up to and including the
+/// quote that opens its class list. The attribute is always present (possibly
+/// empty), so a shell can splice its own runtime state — the `dark` class, the
+/// opening position — in with a single anchored rewrite instead of guessing at
+/// the tag's shape. See `controller::page::Page::load_document`.
+pub const HTML_OPEN: &str = "<html lang=\"en\"";
+
+/// The class attribute that always follows [`HTML_OPEN`]. Split out so the
+/// rewrite can insert other attributes between the two without respelling
+/// either.
+pub const HTML_CLASS_OPEN: &str = " class=\"";
 
 /// Rendering options, constructed by the shell from [`super::config`].
 #[derive(Debug, Clone)]
@@ -55,6 +68,21 @@ pub struct Options {
     /// command's stdout (run via `sh -c`, fence body on stdin). Keys are
     /// lowercase; empty = the built-in pipeline only. See `super::fence`.
     pub renderers: BTreeMap<String, String>,
+    /// Whether the wide-block breakout is on: emits the master
+    /// [`WIDE_CLASS`] onto `<html>` (DESIGN D5a). Mirrored from the session so
+    /// a re-render preserves whatever `s` last set — the runtime toggle itself
+    /// is a class flip, not a re-render.
+    pub wide: bool,
+    /// Which block kinds are *eligible* to break out: one
+    /// `jmnj-wide-<kind>` class each on `<html>`, ANDed with the master class
+    /// by the stylesheet.
+    pub wide_blocks: WideBlocks,
+    /// Whether diagrams open fit to their box rather than at their intrinsic
+    /// width: emits [`DIAGRAM_FIT_CLASS`] onto `<html>` (DESIGN D5a.2).
+    /// Mirrored from the session like [`wide`](Self::wide), and for the same
+    /// reason — the runtime toggle is a class flip, so a later re-render must
+    /// carry whatever `a` last set.
+    pub diagram_fit: bool,
 }
 
 impl Default for Options {
@@ -67,8 +95,28 @@ impl Default for Options {
             font_size_px: 18,
             extra_css: Vec::new(),
             renderers: BTreeMap::new(),
+            wide: true,
+            wide_blocks: WideBlocks::default(),
+            diagram_fit: false,
         }
     }
+}
+
+/// The `<html>` class list: the wide-block master class when the breakout is
+/// on, then one `jmnj-wide-<kind>` per eligible kind, then the diagram-fit
+/// class when fit mode is on. Emitting eligibility and state as separate
+/// classes is what lets each runtime toggle (`Action::ToggleWide`,
+/// `Action::ToggleDiagramFit`) be a single class flip instead of a re-render.
+fn html_classes(opts: &Options) -> String {
+    let mut classes: Vec<String> = Vec::new();
+    if opts.wide {
+        classes.push(WIDE_CLASS.to_string());
+    }
+    classes.extend(opts.wide_blocks.classes());
+    if opts.diagram_fit {
+        classes.push(DIAGRAM_FIT_CLASS.to_string());
+    }
+    classes.join(" ")
 }
 
 /// Emit the `:root` custom-property overrides the stylesheet consumes:
@@ -422,7 +470,7 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options, has_math: bool) -> Stri
 
     format!(
         "<!doctype html>\n\
-         <html lang=\"en\">\n\
+         {html_open}{class_open}{classes}\">\n\
          <head>\n\
          <meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
@@ -441,6 +489,9 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options, has_math: bool) -> Stri
          </main>\n\
          </body>\n\
          </html>\n",
+        html_open = HTML_OPEN,
+        class_open = HTML_CLASS_OPEN,
+        classes = html_classes(opts),
         csp = CSP,
         title = title,
         base = BASE_CSS,
@@ -458,6 +509,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::core::config::{DIAGRAM_ZOOM_CLASS, DIAGRAM_ZOOM_VAR, WideBlock};
 
     /// A vault rooted at a directory that does not exist: the scan finds
     /// nothing, so every `[[…]]` is unresolved — which is exactly what a
@@ -539,6 +591,121 @@ mod tests {
         let escaped = css_font_family("Ev\"il</style>");
         assert_eq!(escaped, "\"Ev\\\"il</style>\"");
         assert!(!escaped.contains("\"Ev\"il"));
+    }
+
+    #[test]
+    fn the_html_tag_carries_the_wide_block_classes() {
+        // Default: the breakout is on, and diagrams/fences/tables are eligible.
+        let html = render_str("# x\n");
+        assert!(
+            html.contains(
+                "<html lang=\"en\" class=\"jmnj-wide jmnj-wide-diagrams \
+                 jmnj-wide-fences jmnj-wide-tables\">"
+            ),
+            "{}",
+            &html[..200]
+        );
+    }
+
+    #[test]
+    fn the_wide_classes_track_the_render_options() {
+        let classes = |opts: &Options| {
+            let html = render("# x\n", opts, &test_vault()).html;
+            let (_, rest) = html.split_once("class=\"").expect("a class attribute");
+            let (list, _) = rest.split_once('"').expect("a closed class attribute");
+            list.to_string()
+        };
+
+        // Master off: the eligibility classes stay (nothing re-renders when the
+        // runtime toggle flips them back on), only the gate is gone.
+        assert_eq!(
+            classes(&Options {
+                wide: false,
+                ..Options::default()
+            }),
+            "jmnj-wide-diagrams jmnj-wide-fences jmnj-wide-tables"
+        );
+        assert_eq!(
+            classes(&Options {
+                wide_blocks: WideBlocks::none(),
+                ..Options::default()
+            }),
+            "jmnj-wide"
+        );
+        assert_eq!(
+            classes(&Options {
+                wide: false,
+                wide_blocks: WideBlocks::none(),
+                ..Options::default()
+            }),
+            ""
+        );
+        assert_eq!(
+            classes(&Options {
+                wide_blocks: WideBlocks::all(),
+                ..Options::default()
+            }),
+            "jmnj-wide jmnj-wide-diagrams jmnj-wide-fences jmnj-wide-tables \
+             jmnj-wide-code jmnj-wide-math"
+        );
+    }
+
+    #[test]
+    fn the_html_tag_carries_the_diagram_fit_class_only_when_the_option_is_on() {
+        let classes = |opts: &Options| {
+            let html = render("# x\n", opts, &test_vault()).html;
+            let (_, rest) = html.split_once("class=\"").expect("a class attribute");
+            let (list, _) = rest.split_once('"').expect("a closed class attribute");
+            list.to_string()
+        };
+
+        // Off by default: intrinsic is the decided behaviour (DESIGN D5a.2).
+        assert!(!classes(&Options::default()).contains(DIAGRAM_FIT_CLASS));
+        assert_eq!(
+            classes(&Options {
+                diagram_fit: true,
+                ..Options::default()
+            }),
+            "jmnj-wide jmnj-wide-diagrams jmnj-wide-fences jmnj-wide-tables \
+             jmnj-diagram-fit"
+        );
+        // Independent of the breakout: the two switches answer different
+        // questions ("how wide may the box be" vs "how big is the picture").
+        assert_eq!(
+            classes(&Options {
+                wide: false,
+                wide_blocks: WideBlocks::none(),
+                diagram_fit: true,
+                ..Options::default()
+            }),
+            "jmnj-diagram-fit"
+        );
+    }
+
+    #[test]
+    fn the_stylesheet_carries_a_rule_for_every_diagram_zoom_hook() {
+        // The Stage-B drift guard, extended to D5a.2: a class or custom property
+        // the Rust names but no rule consumes would silently do nothing.
+        for hook in [
+            format!("html.{DIAGRAM_FIT_CLASS} "),
+            format!(".{DIAGRAM_ZOOM_CLASS} {{"),
+            format!("var({DIAGRAM_ZOOM_VAR}"),
+        ] {
+            assert!(BASE_CSS.contains(&hook), "no stylesheet rule for {hook}");
+        }
+    }
+
+    #[test]
+    fn the_stylesheet_gates_every_kind_on_the_class_the_options_emit() {
+        // The one place the Rust names and the stylesheet meet. A kind whose
+        // class no rule consumes would be emitted and silently do nothing.
+        for kind in WideBlock::ALL {
+            let selector = format!("html.{WIDE_CLASS}.{}", kind.css_class());
+            assert!(
+                BASE_CSS.contains(&selector),
+                "no stylesheet rule for {selector}"
+            );
+        }
     }
 
     #[test]

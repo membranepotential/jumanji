@@ -19,6 +19,7 @@
 //! scripts themselves.
 
 use crate::controller::page::ZoomAnchor;
+use crate::core::config::{DIAGRAM_FIT_CLASS, DIAGRAM_ZOOM_CLASS, DIAGRAM_ZOOM_VAR, WIDE_CLASS};
 
 /// The function every shared script posts through:
 /// `window.__jmnj_post(name, payload)`. Defined by each shell in its own
@@ -45,6 +46,17 @@ pub mod message {
     /// A Ctrl+click reverse editor sync (DESIGN D7) — the payload is the
     /// clicked element's source line, as a decimal string.
     pub const EDITOR_SYNC: &str = "editorsync";
+    /// The pointer entered or left a `.mermaid` box — the payload is the
+    /// diagram's index in document order, as a decimal string, or `""` for
+    /// "over no diagram".
+    ///
+    /// The controller caches this and routes the next `Ctrl`+wheel tick off the
+    /// cached value. It has to be a *cached flag* rather than a query, because
+    /// GTK dispatches the scroll capture-phase from the toplevel, before WebKit
+    /// ever sees it (DESIGN D4): a `wheel` listener in the page would never
+    /// fire, and asking the page per tick would put an IPC round trip inside the
+    /// gesture. See `Controller::on_wheel_zoom`.
+    pub const DIAGRAM_HOVER: &str = "diagramhover";
 }
 
 /// Build a `window.__jmnj_post('<name>', <payload_expr>);` statement. Keeps
@@ -125,6 +137,109 @@ pub const OPEN_ATTRIBUTE: &str = "data-jmnj-open";
 /// rule lives in `core/assets/style.css` beside `html.dark`, the other
 /// shell-toggled class.
 pub const RESTORING_CLASS: &str = "jmnj-restoring";
+
+/// Flip the wide-block breakout master class on `<html>` (DESIGN D5a).
+///
+/// The whole of `Action::ToggleWide`: the per-kind `jmnj-wide-<kind>` classes
+/// the pipeline emitted say what *may* break out, and this one class says
+/// whether it does — so the toggle costs a class flip and no re-render, and
+/// nothing in the document moves vertically. The class name is
+/// [`WIDE_CLASS`](crate::core::config::WIDE_CLASS), owned by core because the
+/// pipeline emits it too (core cannot depend on the controller).
+pub fn wide_class_js(on: bool) -> String {
+    format!("document.documentElement.classList.toggle('{WIDE_CLASS}', {on});")
+}
+
+/// Flip the diagram fit-to-width class on `<html>` (DESIGN D5a.2).
+///
+/// The whole of `Action::ToggleDiagramFit`, and the same shape
+/// [`wide_class_js`] has: one document-wide class the stylesheet reads, flipped
+/// in place, so the toggle costs no re-render. The class name is
+/// [`DIAGRAM_FIT_CLASS`](crate::core::config::DIAGRAM_FIT_CLASS), owned by core
+/// because the pipeline emits it too.
+pub fn diagram_fit_class_js(on: bool) -> String {
+    format!("document.documentElement.classList.toggle('{DIAGRAM_FIT_CLASS}', {on});")
+}
+
+/// The smallest per-diagram Ctrl+wheel scale. Below a quarter of intrinsic a
+/// diagram's labels are unreadable, so going further only loses the reader
+/// their place.
+pub const DIAGRAM_ZOOM_MIN: f64 = 0.25;
+
+/// The largest per-diagram Ctrl+wheel scale. Eight times intrinsic is already
+/// past the point where merman's vector output stops adding detail, and the
+/// zoomed box (bounded height, both scrollers) gets harder to navigate the
+/// larger the canvas inside it grows.
+pub const DIAGRAM_ZOOM_MAX: f64 = 8.0;
+
+/// Scale the `index`-th `.mermaid` box by `factor`, clamped to
+/// [`DIAGRAM_ZOOM_MIN`]…[`DIAGRAM_ZOOM_MAX`].
+///
+/// **Multiplicative**, so successive ticks feel evenly spaced (an additive step
+/// is a huge jump near 0.25 and imperceptible near 8) and so zooming out exactly
+/// undoes zooming in. The current scale is read back off the element rather than
+/// tracked in the session: it is transient DOM state that a reload is *supposed*
+/// to drop (a look-closer gesture, unlike D5a's session-scoped page zoom), so
+/// the DOM is its only honest home.
+///
+/// The box also gains [`DIAGRAM_ZOOM_CLASS`](crate::core::config::DIAGRAM_ZOOM_CLASS)
+/// whenever the scale is off 1, which is what bounds its height and gives it
+/// scrollers — a diagram at 400% must not make the document four times taller
+/// or push the page sideways.
+pub fn diagram_zoom_js(index: usize, factor: f64) -> String {
+    format!(
+        "(() => {{ const el = document.querySelectorAll('.mermaid')[{index}];            if (!el) return;            const cur = parseFloat(el.style.getPropertyValue('{DIAGRAM_ZOOM_VAR}'));            const base = Number.isFinite(cur) && cur > 0 ? cur : 1;            let next = base * {factor};            if (!Number.isFinite(next)) next = {DIAGRAM_ZOOM_MAX};            next = Math.min({DIAGRAM_ZOOM_MAX}, Math.max({DIAGRAM_ZOOM_MIN}, next));            el.style.setProperty('{DIAGRAM_ZOOM_VAR}', String(next));            el.classList.toggle('{DIAGRAM_ZOOM_CLASS}', Math.abs(next - 1) > 0.001); }})();"
+    )
+}
+
+/// Clear every per-diagram scale, returning all diagrams to intrinsic width and
+/// their boxes to unzoomed geometry.
+///
+/// Part of `=` (`Action::ZoomReset`): D5a makes `=` the reset for *both* zoom
+/// axes, and leaving a diagram stuck at 4× after it would be a lie.
+pub fn diagram_zoom_reset_js() -> String {
+    format!(
+        "document.querySelectorAll('.mermaid').forEach(el => {{ \
+           el.style.removeProperty('{DIAGRAM_ZOOM_VAR}'); \
+           el.classList.remove('{DIAGRAM_ZOOM_CLASS}'); }});"
+    )
+}
+
+/// Wire the pointer-over-diagram flag: a capture-phase `mouseover` / `mouseout`
+/// pair posts the index of the `.mermaid` box under the pointer (or `""` for
+/// none) via [`message::DIAGRAM_HOVER`], and only when it changes.
+///
+/// This exists because the obvious implementation is impossible. GTK dispatches
+/// scroll events capture-phase from the toplevel, *before* WebKit sees them
+/// (DESIGN D4) — which is what makes `Ctrl`+wheel page zoom work at all — so a
+/// `wheel` listener inside the page would never fire, and the routing decision
+/// has to be made shell-side and synchronously. Posting the flag on pointer
+/// movement (rare, and already coalesced by the change check) lets the
+/// controller decide from a cached value with no round trip inside the gesture.
+fn diagram_hover_js() -> String {
+    format!(
+        "(function () {{
+        let last = null;
+        const report = (v) => {{ if (v === last) return; last = v; {post} }};
+        const boxOf = (node) => (node && node.closest ? node.closest('.mermaid') : null);
+        const indexOf = (box) => {{
+          const all = document.querySelectorAll('.mermaid');
+          for (let i = 0; i < all.length; i++) if (all[i] === box) return String(i);
+          return '';
+        }};
+        document.addEventListener('mouseover', function (e) {{
+          const box = boxOf(e.target);
+          report(box ? indexOf(box) : '');
+        }}, true);
+        document.addEventListener('mouseout', function (e) {{
+          // Moving between two elements *inside* the same box is not a leave.
+          if (boxOf(e.relatedTarget)) return;
+          report('');
+        }}, true);
+      }})();",
+        post = post_call(message::DIAGRAM_HOVER, "v")
+    )
+}
 
 /// The page global the restore script records its first painted offset in; read
 /// back by a shell's scroll-state snapshot into `ViewportState::first_frame_scroll_y`.
@@ -413,7 +528,8 @@ fn editor_sync_js() -> String {
 
 /// The scripts every shell installs at document start in the top frame, in
 /// this order, on every document: selection copy, drag-select reset, editor
-/// sync, scroll notify, then the scroll-restore no-flash gate. Order matters
+/// sync, the pointer-over-diagram flag, scroll notify, then the scroll-restore
+/// no-flash gate. Order matters
 /// only in that scripts run in insertion order and each of these is
 /// independent of the others, so this is simply the one canonical order every
 /// shell uses.
@@ -426,6 +542,7 @@ pub fn document_start() -> Vec<String> {
         selection_copy_js(),
         DRAG_SELECT_RESET.to_string(),
         editor_sync_js(),
+        diagram_hover_js(),
         scroll_notify_js(),
         scroll_restore_js(),
     ]

@@ -65,6 +65,8 @@ webview sees a keypress, so the vim layer is absolute. See
 | `m<x>` / `'<x>` | set / jump to quickmark `x` |
 | `Ctrl-o` / `Ctrl-i`, `Backspace` | jumplist back / forward — spans documents, so `Ctrl-o` / `Backspace` returns to the previous file after following a link |
 | `Ctrl-r` | recolor (dark mode) |
+| `s` | wide blocks: break diagrams, rendered fences and tables out to window width |
+| `a` | diagrams: fit to width / intrinsic size (see below) |
 | `r` | reload file |
 | `:` | command line (`open`, `set`, any action; `Tab` completes) |
 | `Esc` | abort / back to normal mode |
@@ -72,7 +74,8 @@ webview sees a keypress, so the vim layer is absolute. See
 
 Counts work as prefixes (`5j`). Every binding is remappable in the config file.
 
-Mouse: wheel scrolls, `Ctrl`+wheel zooms geometrically, `Ctrl`+`Shift`+wheel
+Mouse: wheel scrolls, `Ctrl`+wheel zooms geometrically — or scales just the
+diagram under the pointer, if there is one — `Ctrl`+`Shift`+wheel
 zooms the text, the back/forward side buttons walk the jumplist (same as
 `Ctrl-o` / `Ctrl-i`), and links are clickable (external links open in your
 browser — jumanji itself never touches the network). Scroll position and zoom are
@@ -206,6 +209,9 @@ zoom-step = 0.1
 default-recolor = false # start in dark mode
 show-frontmatter = false # show YAML frontmatter as a properties table
 page-width = 960        # px, content column width
+wide-blocks = "diagrams,fences,tables"  # kinds that may break out (see below)
+wide = true             # start with the breakout on (`s` toggles it)
+diagram-fit = false     # start with diagrams fit to width (`a` toggles it)
 background = false      # detach from the terminal at startup (see below)
 editor-command = "$EDITOR +%l %f"  # reverse editor sync (Ctrl+click), %l line / %f file
 
@@ -217,6 +223,49 @@ editor-command = "$EDITOR +%l %f"  # reverse editor sync (Ctrl+click), %l line /
 d2 = "d2 - -"            # ```d2 fences rendered with d2lang.com
 dot = "dot -Tsvg"        # ```dot fences rendered with Graphviz
 ```
+
+### Wide blocks
+
+A 1800 px diagram read through a 960 px column is mostly scrollbar, while the
+rest of a wide monitor sits empty. `s` (or `:toggle wide`) lets the selected
+block kinds break out of the reading column and span the window instead, less a
+small gutter; prose keeps its bounded measure. Toggling is instant — nothing
+re-renders and the reading position does not move.
+
+`wide-blocks` picks which kinds are eligible: `none`, `all`, or any
+comma-separated mix of
+
+| kind | blocks |
+|---|---|
+| `diagrams` | mermaid diagrams |
+| `fences` | output of external fence renderers |
+| `tables` | GFM tables |
+| `code` | highlighted code blocks |
+| `math` | display math (`$$…$$`) |
+
+Both keys are also runtime `:set` targets (`:set wide-blocks all`, `:set wide
+false`), and both take effect on the next render. Only top-level blocks break
+out — one nested in a list, a callout or a blockquote stays in its container,
+and on a window narrower than the reading column the breakout does nothing at
+all. The page itself never scrolls horizontally either way.
+
+### Diagram zoom
+
+Two affordances for a diagram that is still bigger than the window after the
+breakout:
+
+- **`a`** (or `:toggle diagram fit`) switches every diagram in the document
+  between **fit to width** — scaled down so all of it is visible — and its
+  intrinsic size, which is the default. A diagram already smaller than its box
+  is never blown up to fill it. Instant, like `s`: nothing re-renders.
+- **`Ctrl`+wheel over a diagram** scales *that* diagram instead of zooming the
+  page, in `zoom-step` multiples between 0.25× and 8×. A scaled-up diagram
+  scrolls inside its own box (which is why the page still never scrolls
+  horizontally), and `=` clears the scales along with both zoom axes. It is a
+  look-closer gesture, so it does not survive a reload.
+
+`diagram-fit` sets the startup state and is a runtime `:set` target
+(`:set diagram-fit true`).
 
 ### Running in the background
 

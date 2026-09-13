@@ -103,6 +103,11 @@ struct State {
     /// First `.mermaid svg` rendered width in CSS px (0 if none). Device size is
     /// `diagram_width × zoom`.
     diagram_width: f64,
+    /// First `.mermaid` *box* width in CSS px (0 if none) — the scroll
+    /// container, not the diagram in it. The wide-block breakout's observable
+    /// (DESIGN D5a): the reading column's content box normally, the window
+    /// minus the gutter when the breakout is on.
+    diagram_box_width: f64,
     /// First `<math>` rendered width in CSS px (0 if none). Nonzero proves the
     /// MathML actually laid out.
     math_width: f64,
@@ -146,6 +151,16 @@ struct State {
     /// not be `InspiredGithub`'s near-black light colour (`rgb(50, 50, 50)`).
     fn_color: String,
     dark: bool,
+    /// Whether the wide-block breakout master switch is on (`s`).
+    wide: bool,
+    /// Whether diagrams are in fit-to-width mode (`a`, DESIGN D5a.2).
+    diagram_fit: bool,
+    /// Whether the pointer is currently inside a `.mermaid` box, as the page
+    /// last posted it. The input `Ctrl`+wheel routes on: with it set the tick
+    /// scales the diagram, without it the page. Exposed so a test can *find*
+    /// the diagram by sweeping the pointer instead of guessing coordinates that
+    /// depend on the host's device scale factor.
+    diagram_hover: bool,
     zoom: f64,
     text_zoom: f64,
     mode: String,
@@ -170,6 +185,7 @@ impl State {
             viewport_width: field(json, "viewport_width")?.parse().ok()?,
             doc_scroll_width: field(json, "doc_scroll_width")?.parse().ok()?,
             diagram_width: field(json, "diagram_width")?.parse().ok()?,
+            diagram_box_width: field(json, "diagram_box_width")?.parse().ok()?,
             math_width: field(json, "math_width")?.parse().ok()?,
             msup_shift_ratio: field(json, "msup_shift_ratio")?.parse().ok()?,
             fence_width: field(json, "fence_width")?.parse().ok()?,
@@ -180,6 +196,9 @@ impl State {
             restoring: field(json, "restoring")? == "true",
             fn_color: field_str(json, "fn_color")?,
             dark: field(json, "dark")? == "true",
+            wide: field(json, "wide")? == "true",
+            diagram_fit: field(json, "diagram_fit")? == "true",
+            diagram_hover: field(json, "diagram_hover")? == "true",
             zoom: field(json, "zoom")?.parse().ok()?,
             text_zoom: field(json, "text_zoom")?.parse().ok()?,
             mode: field_str(json, "mode")?,
@@ -932,6 +951,372 @@ fn narrow_viewport_zoom_reflows_without_page_overflow() {
     assert!(
         dev1 >= dev0 * 1.3,
         "diagram device width should grow with zoom: {dev0} -> {dev1}"
+    );
+}
+
+/// A document whose one diagram is far wider than the reading column (~1725 px
+/// intrinsic, well past both the 960 px column and any window Xvfb gives us) —
+/// the case the wide-block breakout exists for. Written into a throwaway vault
+/// so the test does not ride on whatever `demo/demo.md` happens to contain.
+fn wide_diagram_fixture() -> String {
+    "# Wide diagram\n\n\
+     ```mermaid\n\
+     graph LR\n  \
+       A[Ingest source] --> B[Parse markdown]\n  \
+       B --> C[Transform AST]\n  \
+       C --> D[Highlight fences]\n  \
+       D --> E[Render diagrams]\n  \
+       E --> F[Extract the TOC]\n  \
+       F --> G[Assemble the page]\n  \
+       G --> H[Load in the viewport]\n\
+     ```\n\n\
+     Prose after the diagram.\n"
+        .to_string()
+}
+
+#[test]
+fn wide_blocks_break_a_diagram_out_of_the_reading_column() {
+    // DESIGN D5a's wide-block breakout: a diagram spans the window (less a
+    // gutter) instead of being scrolled through a porthole with the rest of the
+    // window sitting empty — and the page still never scrolls horizontally,
+    // which is the invariant the whole mechanism is built around.
+    //
+    // The reading column is narrowed to 300 px through the private config
+    // rather than the window being widened: the CSS viewport an Xvfb window
+    // yields depends on the device scale factor the host X server reports (2×
+    // on a HiDPI developer machine, 1× in the CI container), and the one thing
+    // this test needs is a viewport reliably *wider* than the column.
+    let Some(_g) = setup_guard() else { return };
+    let dir = temp_vault("wideblocks");
+    let file = dir.join("wide.md");
+    fs::write(&file, wide_diagram_fixture()).expect("write fixture");
+    let id = std::process::id();
+    let config_home = std::env::temp_dir().join(format!("jumanji-e2e-wide-cfg-{id}"));
+    let data_home = std::env::temp_dir().join(format!("jumanji-e2e-wide-data-{id}"));
+    let _ = fs::remove_dir_all(&config_home);
+    fs::create_dir_all(config_home.join("jumanji")).expect("create config dir");
+    fs::write(
+        config_home.join("jumanji").join("config.toml"),
+        "[options]\npage-width = 300\n",
+    )
+    .expect("write config");
+
+    let h = Harness::launch_in(file, config_home.clone(), data_home.clone());
+    // The window follows `page-width` at launch, so widen it: no WM under Xvfb,
+    // so size the X window directly. In X pixels — how many CSS px that is
+    // depends on the scale factor, which is exactly why the assertions below
+    // are all relative.
+    h.xdotool(["windowsize", "--sync", &h.window_id, "1240", "800"]);
+    let on = {
+        let prev = std::cell::Cell::new(-1.0_f64);
+        h.wait_for_state("layout stable after resize", SETTLE, move |s| {
+            let stable = s.diagram_box_width > 0.0
+                && (s.diagram_box_width - prev.get()).abs() < 1.0
+                && s.viewport_width > s.content_width + 100.0;
+            prev.set(s.diagram_box_width);
+            stable
+        })
+    };
+
+    // Fixture self-check: the diagram really is bigger than the column, so the
+    // extra width the breakout hands it is width the reader can use.
+    assert!(
+        on.content_width < on.viewport_width - 100.0,
+        "the column ({}) must leave empty window ({}) to break out into",
+        on.content_width,
+        on.viewport_width
+    );
+    assert!(
+        on.diagram_width > on.content_width,
+        "fixture diagram ({}) should be wider than the reading column ({})",
+        on.diagram_width,
+        on.content_width
+    );
+    // (a) The invariant that must never break, breakout or not.
+    assert!(
+        on.doc_scroll_width <= on.viewport_width + 1.0,
+        "no page h-scroll with the breakout on: scrollWidth {} vs viewport {}",
+        on.doc_scroll_width,
+        on.viewport_width
+    );
+    // (b) The feature itself: the diagram's box is wider than the reading
+    // column allows, and reaches the window edges bar the gutter. Without the
+    // breakout CSS the box is the column's content box and this goes red.
+    assert!(on.wide, "the breakout ships on");
+    assert!(
+        on.diagram_box_width > on.content_width,
+        "the diagram should break out past the reading column: box {} vs column {}",
+        on.diagram_box_width,
+        on.content_width
+    );
+    assert!(
+        on.diagram_box_width >= on.viewport_width - 60.0,
+        "the broken-out diagram should reach the window edges less a gutter: \
+         box {} vs viewport {}",
+        on.diagram_box_width,
+        on.viewport_width
+    );
+
+    // `s` is a class flip, so the box snaps back inside the column — and the
+    // page still does not scroll horizontally on the way.
+    h.key(&["s"]);
+    let off = h.wait_for_state("breakout off", SETTLE, |s| !s.wide);
+    assert!(
+        off.diagram_box_width < off.content_width,
+        "with the breakout off the diagram is column-bound again: box {} vs \
+         column {}",
+        off.diagram_box_width,
+        off.content_width
+    );
+    assert!(
+        off.doc_scroll_width <= off.viewport_width + 1.0,
+        "no page h-scroll with the breakout off: scrollWidth {} vs viewport {}",
+        off.doc_scroll_width,
+        off.viewport_width
+    );
+
+    h.key(&["s"]);
+    let again = h.wait_for_state("breakout on again", SETTLE, |s| s.wide);
+    assert!(
+        again.diagram_box_width > again.content_width,
+        "the toggle is symmetric: box {} vs column {}",
+        again.diagram_box_width,
+        again.content_width
+    );
+
+    drop(h);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&config_home);
+    let _ = fs::remove_dir_all(&data_home);
+}
+
+/// A document whose one diagram is far wider than the reading column *and*
+/// tall enough for a pointer sweep to reliably land inside its box: three
+/// parallel chains, so the box is a few hundred pixels tall whatever device
+/// scale factor the host X server reports.
+fn tall_wide_diagram_fixture() -> String {
+    "# Diagram zoom\n\n\
+     ```mermaid\n\
+     graph LR\n  \
+       A1[Ingest source] --> B1[Parse markdown]\n  \
+       B1 --> C1[Transform the AST]\n  \
+       C1 --> D1[Highlight fences]\n  \
+       D1 --> E1[Render diagrams]\n  \
+       A2[Extract the TOC] --> B2[Assemble the page]\n  \
+       B2 --> C2[Load in the viewport]\n  \
+       C2 --> D2[Paint the first frame]\n  \
+       D2 --> E2[Ready to read]\n  \
+       A3[Watch the file] --> B3[Rescan the vault]\n  \
+       B3 --> C3[Re-render the document]\n  \
+       C3 --> D3[Restore the position]\n  \
+       D3 --> E3[Reveal the body]\n\
+     ```\n\n\
+     Prose after the diagram.\n"
+        .to_string()
+}
+
+/// A reader launched on a wide-diagram fixture with the reading column narrowed
+/// to 300 px through a private config and the window widened past it — the same
+/// arrangement (and for the same reason) as the wide-block test: the CSS
+/// viewport an Xvfb window yields depends on the host's device scale factor, so
+/// every assertion has to be relative and the one thing that must be reliable is
+/// a viewport wider than the column. Dropping it removes the throwaway tree.
+struct DiagramReader {
+    h: Harness,
+    dirs: Vec<PathBuf>,
+}
+
+impl DiagramReader {
+    fn launch(name: &str) -> Self {
+        let dir = temp_vault(name);
+        let file = dir.join("diagram.md");
+        fs::write(&file, tall_wide_diagram_fixture()).expect("write fixture");
+        let id = std::process::id();
+        let config_home = std::env::temp_dir().join(format!("jumanji-e2e-{name}-cfg-{id}"));
+        let data_home = std::env::temp_dir().join(format!("jumanji-e2e-{name}-data-{id}"));
+        let _ = fs::remove_dir_all(&config_home);
+        let _ = fs::remove_dir_all(&data_home);
+        fs::create_dir_all(config_home.join("jumanji")).expect("create config dir");
+        fs::write(
+            config_home.join("jumanji").join("config.toml"),
+            "[options]\npage-width = 300\n",
+        )
+        .expect("write config");
+
+        let h = Harness::launch_in(file, config_home.clone(), data_home.clone());
+        // The window follows `page-width` at launch, so widen it: no WM under
+        // Xvfb, so size the X window directly.
+        h.xdotool(["windowsize", "--sync", &h.window_id, "1240", "800"]);
+        Self {
+            h,
+            dirs: vec![dir, config_home, data_home],
+        }
+    }
+
+    /// Wait until the layout has stopped moving after the resize, and return the
+    /// settled state.
+    fn settled(&self) -> State {
+        let prev = std::cell::Cell::new(-1.0_f64);
+        self.h
+            .wait_for_state("layout stable after resize", SETTLE, move |s| {
+                let stable = s.diagram_width > 0.0
+                    && (s.diagram_width - prev.get()).abs() < 1.0
+                    && s.viewport_width > s.content_width + 100.0;
+                prev.set(s.diagram_width);
+                stable
+            })
+    }
+
+    /// Park the pointer inside the diagram's box, by sweeping down the window
+    /// until the page says the pointer is inside one. Guessing a y would be
+    /// guessing the host's device scale factor; `diagram_hover` is the
+    /// observable that makes the search exact. Polls rather than
+    /// `wait_for_state`, which panics on a timeout — a miss is the normal case
+    /// here, not a failure.
+    fn hover_the_diagram(&self) -> bool {
+        for y in (40..760).step_by(24) {
+            self.h.mouse_move(300, y);
+            let deadline = Instant::now() + Duration::from_millis(200);
+            loop {
+                if self.h.get_state().diagram_hover {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+        false
+    }
+}
+
+impl Drop for DiagramReader {
+    fn drop(&mut self) {
+        for dir in &self.dirs {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[test]
+fn a_fits_a_diagram_into_its_box_and_back() {
+    // DESIGN D5a.2's fit mode: `a` answers "show me the whole thing" by scaling
+    // every diagram down to its box, and pressing it again returns to D5a's
+    // intrinsic size. Without the `html.jmnj-diagram-fit` rule the diagram never
+    // shrinks and the first wait times out.
+    let Some(_g) = setup_guard() else { return };
+    let r = DiagramReader::launch("diagfit");
+    let intrinsic = r.settled();
+
+    // Fixture self-check: intrinsic really does overflow its box, which is the
+    // case fit mode exists for.
+    assert!(
+        !intrinsic.diagram_fit,
+        "fit ships off (D5a keeps intrinsic)"
+    );
+    assert!(
+        intrinsic.diagram_width > intrinsic.diagram_box_width,
+        "fixture diagram ({}) should overflow its box ({})",
+        intrinsic.diagram_width,
+        intrinsic.diagram_box_width
+    );
+
+    r.h.key(&["a"]);
+    let fit = r.h.wait_for_state("fit mode on", SETTLE, |s| {
+        s.diagram_fit && s.diagram_width < intrinsic.diagram_width
+    });
+    assert!(
+        fit.diagram_width <= fit.diagram_box_width,
+        "a fitted diagram must sit inside its box: {} vs {}",
+        fit.diagram_width,
+        fit.diagram_box_width
+    );
+    // The box itself did not move — fit scales the picture, not the breakout.
+    assert!(
+        (fit.diagram_box_width - intrinsic.diagram_box_width).abs() < 1.0,
+        "the box should be untouched: {} vs {}",
+        fit.diagram_box_width,
+        intrinsic.diagram_box_width
+    );
+    assert!(
+        fit.doc_scroll_width <= fit.viewport_width + 1.0,
+        "no page h-scroll in fit mode: scrollWidth {} vs viewport {}",
+        fit.doc_scroll_width,
+        fit.viewport_width
+    );
+
+    // A class flip both ways, so the intrinsic width comes back exactly.
+    r.h.key(&["a"]);
+    let back =
+        r.h.wait_for_state("fit mode off", SETTLE, |s| !s.diagram_fit);
+    assert!(
+        (back.diagram_width - intrinsic.diagram_width).abs() < 1.0,
+        "leaving fit mode should restore the intrinsic width: {} vs {}",
+        back.diagram_width,
+        intrinsic.diagram_width
+    );
+}
+
+#[test]
+fn ctrl_wheel_over_a_diagram_zooms_the_diagram_not_the_page() {
+    // DESIGN D5a.2's other half. GTK sees the scroll capture-phase before WebKit
+    // (D4), so the routing happens shell-side off the hover flag the page posts;
+    // this is the test that the whole chain — page listener, cached flag,
+    // controller routing, `--dz` — actually moves the diagram and leaves the
+    // page zoom alone. Needs a real pointer + XTEST wheel, like the other
+    // `ctrl_wheel` tests.
+    let Some(_g) = setup_guard() else { return };
+    let r = DiagramReader::launch("diagzoom");
+    let before = r.settled();
+    assert_eq!(before.zoom, 1.0, "starts at page zoom 1.0");
+
+    assert!(
+        r.hover_the_diagram(),
+        "never found the diagram by sweeping the pointer down the window"
+    );
+
+    r.h.ctrl_wheel(true, 3, 5); // three ticks in, over the diagram
+    let zoomed = r.h.wait_for_state("the diagram grew", SETTLE, |s| {
+        s.diagram_width > before.diagram_width + 1.0
+    });
+    // (a) The feature: the diagram scaled, the page did not.
+    assert!(
+        zoomed.diagram_width > before.diagram_width,
+        "the diagram should have grown: {} vs {}",
+        zoomed.diagram_width,
+        before.diagram_width
+    );
+    assert_eq!(
+        zoomed.zoom, 1.0,
+        "a tick over a diagram must not zoom the page"
+    );
+    // (b) The invariant the whole mechanism is built around: a diagram scaled
+    // past its box scrolls inside the box, never sideways off the page.
+    assert!(
+        zoomed.doc_scroll_width <= zoomed.viewport_width + 1.0,
+        "no page h-scroll with a zoomed diagram: scrollWidth {} vs viewport {}",
+        zoomed.doc_scroll_width,
+        zoomed.viewport_width
+    );
+    assert!(
+        (zoomed.diagram_box_width - before.diagram_box_width).abs() < 1.0,
+        "the box must stay put while the diagram inside it grows: {} vs {}",
+        zoomed.diagram_box_width,
+        before.diagram_box_width
+    );
+
+    // `=` resets zoom as a whole (D5a), diagram scales included.
+    r.h.key(&["equal"]);
+    let reset =
+        r.h.wait_for_state("= cleared the diagram scale", SETTLE, |s| {
+            (s.diagram_width - before.diagram_width).abs() < 1.0
+        });
+    assert!(
+        (reset.diagram_width - before.diagram_width).abs() < 1.0,
+        "= must return the diagram to intrinsic: {} vs {}",
+        reset.diagram_width,
+        before.diagram_width
     );
 }
 

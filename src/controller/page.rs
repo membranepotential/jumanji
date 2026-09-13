@@ -14,10 +14,12 @@ use serde::Deserialize;
 
 use crate::controller::scripts::{
     APPLY_GLOBAL, FIRST_FRAME_GLOBAL, OPEN_ATTRIBUTE, RESTORE_ANCHOR_JS, RESTORING_CLASS,
-    REVEAL_GLOBAL, capture_anchor_js, hints_build_js, js_string, nearest_source_element_js,
+    REVEAL_GLOBAL, capture_anchor_js, diagram_fit_class_js, diagram_zoom_js, diagram_zoom_reset_js,
+    hints_build_js, js_string, nearest_source_element_js, wide_class_js,
 };
 use crate::controller::toolkit::Viewport;
 use crate::core::RenderedDocument;
+use crate::core::pipeline::{HTML_CLASS_OPEN, HTML_OPEN};
 
 /// Where a reflow-preserving zoom keeps the reading position pinned.
 ///
@@ -97,6 +99,12 @@ pub struct ViewportState {
     /// Rendered width of the first `.mermaid svg` (0 if none). CSS px, so its
     /// device size is `diagram_width × zoom`.
     pub diagram_width: f64,
+    /// Rendered width of the first `.mermaid` *box* — the scroll container, not
+    /// the diagram inside it (0 if none). CSS px. The observable for the
+    /// wide-block breakout (DESIGN D5a): it equals the reading column's content
+    /// box normally and the window minus the gutter when the breakout is on, so
+    /// an e2e can assert the diagram really got more usable width.
+    pub diagram_box_width: f64,
     /// Rendered width of the first `<math>` element (0 if none). CSS px. Lets
     /// e2e assert MathML actually laid out with nonzero geometry.
     pub math_width: f64,
@@ -173,6 +181,7 @@ struct Snapshot {
     vw: f64,
     dw: f64,
     gw: f64,
+    gb: f64,
     mw: f64,
     ms: f64,
     rw: f64,
@@ -193,6 +202,7 @@ impl From<Snapshot> for ViewportState {
             viewport_width: s.vw,
             doc_scroll_width: s.dw,
             diagram_width: s.gw,
+            diagram_box_width: s.gb,
             math_width: s.mw,
             msup_shift_ratio: s.ms,
             fence_width: s.rw,
@@ -219,6 +229,7 @@ impl ViewportState {
             viewport_width: 0.0,
             doc_scroll_width: 0.0,
             diagram_width: 0.0,
+            diagram_box_width: 0.0,
             math_width: 0.0,
             msup_shift_ratio: 0.0,
             fence_width: 0.0,
@@ -288,9 +299,6 @@ pub trait Page: Viewport + Clone + 'static {
         font_size_px: Option<f64>,
     ) {
         let mut attrs = String::new();
-        if dark {
-            attrs.push_str(" class=\"dark\"");
-        }
         if let Some(px) = font_size_px {
             attrs.push_str(&format!(" style=\"--font-size: {px}px\""));
         }
@@ -300,12 +308,16 @@ pub trait Page: Viewport + Clone + 'static {
             // heading's text can.
             attrs.push_str(&format!(" {OPEN_ATTRIBUTE}=\"{}\"", html_attribute(&open)));
         }
-        let html = if attrs.is_empty() {
+        // The recolor class joins the class list the pipeline already emitted
+        // (the wide-block classes) rather than a second `class` attribute — a
+        // duplicate would be dropped by the parser, taking the breakout with it.
+        let dark_class = if dark { "dark " } else { "" };
+        let html = if attrs.is_empty() && dark_class.is_empty() {
             doc.html.clone()
         } else {
             doc.html.replacen(
-                "<html lang=\"en\">",
-                &format!("<html lang=\"en\"{attrs}>"),
+                &format!("{HTML_OPEN}{HTML_CLASS_OPEN}"),
+                &format!("{HTML_OPEN}{attrs}{HTML_CLASS_OPEN}{dark_class}"),
                 1,
             )
         };
@@ -417,16 +429,24 @@ pub trait Page: Viewport + Clone + 'static {
         });
     }
 
-    /// Reset both zoom axes to 100%, anchored once at the top of the viewport.
-    /// A single capture spans both changes (geometric + text) so the reflow from
-    /// each is corrected together rather than fighting two anchors.
+    /// Reset both zoom axes to 100% *and* every per-diagram Ctrl+wheel scale,
+    /// anchored once at the top of the viewport. A single capture spans all
+    /// three changes so their combined reflow is corrected together rather than
+    /// three anchors fighting over it.
+    ///
+    /// The diagram scales belong here rather than in a call of their own for
+    /// exactly that reason, and they belong in `=` at all because D5a makes it
+    /// the reset for zoom as a whole — a diagram left at 4× after a reset would
+    /// be a lie.
     fn reset_zoom(&self, font_base_px: f64) {
         let view = self.clone();
         let capture = capture_anchor_js(&ZoomAnchor::Top);
+        let clear_diagrams = diagram_zoom_reset_js();
         self.eval_json(&capture, move |_| {
             view.set_zoom_level(1.0);
             view.eval(&format!(
                 "document.documentElement.style.setProperty('--font-size', '{font_base_px}px');\
+                 {clear_diagrams}\
                  {RESTORE_ANCHOR_JS}"
             ));
         });
@@ -463,6 +483,35 @@ pub trait Page: Viewport + Clone + 'static {
         ));
     }
 
+    /// Apply the wide-block breakout state: flip the master class on `<html>`
+    /// (DESIGN D5a). Pure JS, like the recolor's class half — the per-kind
+    /// eligibility classes the pipeline emitted stay put, so nothing re-renders
+    /// and the reading position does not move.
+    fn set_wide(&self, wide: bool) {
+        self.eval(&wide_class_js(wide));
+    }
+
+    /// Apply the diagram fit-to-width state: flip the fit class on `<html>`
+    /// (DESIGN D5a.2). A class flip like [`Page::set_wide`], for the same
+    /// reason — the rule it gates is already in the stylesheet, so nothing
+    /// re-renders and only the diagrams change size.
+    fn set_diagram_fit(&self, fit: bool) {
+        self.eval(&diagram_fit_class_js(fit));
+    }
+
+    /// Scale the `index`-th diagram by `factor` (multiplicative, clamped in the
+    /// script). The per-diagram half of `Ctrl`+wheel: the controller routes the
+    /// tick here instead of to [`Page::zoom_to`] when the pointer is over a
+    /// diagram.
+    ///
+    /// Deliberately *not* anchored: the diagram scrolls inside its own box, so
+    /// the page around it does not reflow and there is no reading position to
+    /// pin. And deliberately not coalesced — a class-free style write on one
+    /// element is nothing like the full-page reflow a geometric zoom step costs.
+    fn zoom_diagram(&self, index: usize, factor: f64) {
+        self.eval(&diagram_zoom_js(index, factor));
+    }
+
     /// Query the current scroll offset (px), delivering it to `callback` on the
     /// main loop. Used to preserve position across a reload.
     fn scroll_position<F: FnOnce(f64) + 'static>(&self, callback: F) {
@@ -487,7 +536,8 @@ pub trait Page: Viewport + Clone + 'static {
              const max = (b.scrollHeight || d.scrollHeight) - window.innerHeight; \
              const p = max > 0 ? Math.round((window.scrollY / max) * 100) : 0; \
              const m = document.querySelector('main') || b; \
-             const svg = document.querySelector('.mermaid svg'); \
+             const dia = document.querySelector('.mermaid'); \
+             const svg = dia ? dia.querySelector('svg') : null; \
              const math = document.querySelector('math'); \
              const rf = document.querySelector('.rendered-fence svg'); \
              const fm = document.querySelector('.frontmatter'); \
@@ -502,6 +552,7 @@ pub trait Page: Viewport + Clone + 'static {
                       w: m.offsetWidth, vw: window.innerWidth, \
                       dw: Math.max(d.scrollWidth, b.scrollWidth), \
                       gw: svg ? svg.getBoundingClientRect().width : 0, \
+                      gb: dia ? dia.getBoundingClientRect().width : 0, \
                       mw: math ? math.getBoundingClientRect().width : 0, \
                       ms: ms, \
                       rw: rf ? rf.getBoundingClientRect().width : 0, \

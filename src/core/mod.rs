@@ -89,6 +89,17 @@ pub enum Action {
     /// Show/hide the document's YAML frontmatter, which is hidden by default
     /// (DESIGN D11). Re-renders; the reading position is preserved.
     ToggleFrontmatter,
+    /// Toggle the wide-block breakout master switch (DESIGN D5a): the
+    /// configured kinds (`wide-blocks`) either span the window, minus a gutter,
+    /// or sit inside the reading column. A class flip on `<html>`, like
+    /// [`Recolor`](Self::Recolor) — no re-render, so nothing moves vertically.
+    ToggleWide,
+    /// Toggle diagram fit-to-width (DESIGN D5a.2): every diagram either scales
+    /// down to its box so all of it is visible, or renders at its intrinsic
+    /// width and scrolls inside the box. Document-wide, and — like
+    /// [`ToggleWide`](Self::ToggleWide) — a class flip on `<html>`, so nothing
+    /// re-renders.
+    ToggleDiagramFit,
     CommandLine,
     /// Enter link-hint mode and jump to the chosen link (hint interaction and
     /// overlay live in the shell; the keymap only fires the entry action).

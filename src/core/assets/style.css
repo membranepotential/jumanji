@@ -21,6 +21,11 @@
   --main-pad-x: 1.5rem;
   --mermaid-pad: 1.25rem;
 
+  /* The margin a broken-out block keeps to each window edge. Equal to the
+   * reading column's own side padding, which is what makes the breakout
+   * self-cancelling on a narrow window — see the wide-blocks section below. */
+  --wide-gutter: var(--main-pad-x);
+
   --bg: #ffffff;
   --fg: #1f2328;
   --fg-muted: #59636e;
@@ -131,6 +136,64 @@ main.markdown-body {
    * scroll — the one thing that must never happen. Code blocks (white-space:
    * pre) and diagrams keep their own overflow-x scrollers and are unaffected. */
   overflow-wrap: break-word;
+}
+
+/* ---- Wide blocks (DESIGN D5a) -------------------------------------------- */
+
+/* Bounded measure is right for prose and wrong for pictures. A diagram that
+ * renders 1800 px wide is otherwise scrolled through a ~910 px porthole while a
+ * thousand pixels of window sit empty. These rules let the selected block kinds
+ * break out of the reading column to the window width, less a gutter.
+ *
+ * Two class levels, both on <html> and both emitted by the pipeline: one
+ * `jmnj-wide-<kind>` per *eligible* kind (from the `wide-blocks` option), and
+ * the master `jmnj-wide` that says the breakout is *on*. Only the master is
+ * touched at runtime (`s` / `toggle wide`), so the toggle is a class flip with
+ * no re-render — the same contract `html.dark` has with recolor.
+ *
+ * Mechanism, and why this one:
+ *
+ * - `50%` in the margin resolves against `main`'s *content box*, `50vw` against
+ *   the viewport. When the window is wider than the reading column the sum is
+ *   negative and pulls the element's left edge out to the viewport edge plus
+ *   the gutter; `width: calc(100vw - 2 * gutter)` then reaches the mirror
+ *   position on the right. Only `width` is set — adding `margin-right` would
+ *   over-constrain the box, and in LTR the right margin is what gets ignored.
+ *
+ * - No media query is needed, because the rule cancels itself out on a narrow
+ *   window. There `main` is `width: 100%`, so its content box is
+ *   `100vw - 2 * --main-pad-x`; with `--wide-gutter == --main-pad-x` the margin
+ *   computes to exactly 0 and the width back to exactly that content-box width.
+ *   A window narrower than the column therefore keeps today's geometry to the
+ *   pixel — there is no narrow-window regression to guard against.
+ *
+ * - The no-page-h-scroll invariant holds either way. If `100vw` includes a
+ *   classic scrollbar (WebKitGTK with overlay scrollbars off), the element is
+ *   offset half a scrollbar left and half a scrollbar wide of the ideal, which
+ *   the 2 × 1.5rem gutter absorbs: both edges stay inside the client width. The
+ *   blocks keep their own `overflow-x: auto`, so content wider still scrolls
+ *   inside the (now much larger) box, never the page.
+ *
+ * - Margins, not CSS grid. Grid items do not collapse their margins, so making
+ *   `main` a grid would change the vertical rhythm of every block in every
+ *   document to buy the same horizontal effect.
+ *
+ * - Only *top-level* blocks break out (the `>` combinators below; display math
+ *   is a `<span class=math-scroll>` inside its paragraph, which is exactly as
+ *   wide as `main`'s content box, so it counts as top level). The whole
+ *   argument above rests on `50%` resolving against a containing block that is
+ *   centred on the viewport, which is true of `main` and of a `<p>` in it but
+ *   not of a list item: `ul` indents by 1.6em, which would push a broken-out
+ *   table past the gutter and give the page a horizontal scrollbar. A block
+ *   nested in a list, a callout or a blockquote keeps its in-column geometry,
+ *   which is also the right reading of it — those are bounded contexts. */
+html.jmnj-wide.jmnj-wide-diagrams main.markdown-body > .mermaid,
+html.jmnj-wide.jmnj-wide-fences main.markdown-body > .rendered-fence,
+html.jmnj-wide.jmnj-wide-tables main.markdown-body > .table-wrap,
+html.jmnj-wide.jmnj-wide-code main.markdown-body > pre.code,
+html.jmnj-wide.jmnj-wide-math main.markdown-body > p > .math-scroll {
+  width: calc(100vw - 2 * var(--wide-gutter));
+  margin-left: calc(50% - 50vw + var(--wide-gutter));
 }
 
 /* ---- Headings ------------------------------------------------------------ */
@@ -617,9 +680,55 @@ details[open] > summary {
    * `.mermaid` (overflow-x: auto), never the page. Text zoom rewrites the body
    * `--font-size` only, so it leaves diagrams untouched by construction. When
    * the intrinsic width can't be parsed the pipeline omits `--dw` and this falls
-   * back to the svg's own `auto` width. */
+   * back to the svg's own `auto` width.
+   *
+   * `--dz` is the per-diagram Ctrl+wheel scale (DESIGN D5a.2), written on the
+   * `.mermaid` box by the controller's zoom script and defaulting to 1, so an
+   * untouched diagram is exactly its intrinsic width. Two declarations rather
+   * than one `calc(var(--dw, auto) * …)`, which would be invalid: the first is
+   * the no-`--dw` fallback and the second wins whenever `--dw` is set. */
   width: var(--dw, auto);
+  width: calc(var(--dw) * var(--dz, 1));
   height: auto;
+}
+
+/* ---- Diagram fit-to-width (`a`, DESIGN D5a.2) ---------------------------- */
+
+/* "Show me the whole thing": scale a diagram down to its box so none of it is
+ * off-screen. `min()`, not a bare `100%` — a diagram *smaller* than its box must
+ * keep its intrinsic size rather than being blown up to fill the width. merman's
+ * SVG root carries a `viewBox`, so `height: auto` keeps the aspect ratio for
+ * free.
+ *
+ * This rule deliberately **wins over `--dz`**: fit is a document-wide statement
+ * that everything must be visible, and honouring a per-diagram scale under it
+ * would immediately reintroduce the overflow fit exists to remove. The scale is
+ * not discarded, only overridden — turning fit back off restores it. */
+html.jmnj-diagram-fit .mermaid svg {
+  width: min(100%, var(--dw, 100%));
+}
+
+/* ---- Diagram Ctrl+wheel zoom (DESIGN D5a.2) ------------------------------ */
+
+/* The box a diagram has been scaled *up* in. The no-page-h-scroll invariant is
+ * absolute and the document must not grow four times taller either, so a zoomed
+ * diagram scrolls inside its own box on both axes and the box's height is
+ * bounded. Only applied while `--dz` is off 1, so an untouched diagram keeps
+ * exactly the geometry it has today: no max-height, no vertical scroller.
+ *
+ * `text-align: left` because the unzoomed box centres its diagram, and a centred
+ * child wider than its scroll container puts the child's left edge outside the
+ * scrollable region — unreachable. Centring is what a diagram that fits wants;
+ * a zoomed one wants all of itself reachable.
+ *
+ * Gated on fit mode being *off*, so the cascade tells one story: fit already
+ * overrides the scale on the svg above, and the box must follow it rather than
+ * keep a scroller for a diagram that is, by then, fully visible. The scale
+ * itself survives — leaving fit restores both halves together. */
+html:not(.jmnj-diagram-fit) .mermaid.jmnj-diagram-zoomed {
+  max-height: 80vh;
+  overflow: auto;
+  text-align: left;
 }
 
 /* ---- External fence renderers (DESIGN D6.2) ------------------------------ */

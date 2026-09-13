@@ -19,11 +19,15 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::fake::{FakeChrome, FakeHost, FakeToolkit, FakeViewport, TimerEvent, ViewCall};
-use super::scripts::{js_string, message, nearest_source_element_js};
+use super::scripts::{
+    DIAGRAM_ZOOM_MAX, DIAGRAM_ZOOM_MIN, js_string, message, nearest_source_element_js,
+};
 use super::session::{Controller, Dirs, KeyOutcome};
 use super::toolkit::{Chrome, Prompt};
 use crate::core::Action;
-use crate::core::config::{Options, SelectionClipboard};
+use crate::core::config::{
+    DIAGRAM_FIT_CLASS, DIAGRAM_ZOOM_CLASS, DIAGRAM_ZOOM_VAR, Options, SelectionClipboard,
+};
 use crate::core::editor::EditorCommand;
 use crate::core::keymap::{Key, KeyPress, Keymap};
 use crate::core::source::Source;
@@ -756,6 +760,244 @@ fn text_zoom_sets_the_font_size_in_pixels() {
     r.execute(Action::TextZoomIn, 1);
     let expected = options.font_size_px as f64 * (1.0 + options.text_zoom_step);
     assert!((font_size_px(&r.view) - expected).abs() < 1e-9);
+}
+
+/// The `<html>` class list of the most recently loaded document.
+fn loaded_classes(view: &FakeViewport) -> String {
+    let (html, _) = view.loads().pop().expect("a loaded document");
+    let (_, rest) = html.split_once("class=\"").expect("a class attribute");
+    let (list, _) = rest.split_once('"').expect("a closed class attribute");
+    list.to_string()
+}
+
+#[test]
+fn s_flips_the_wide_block_class_and_leaves_the_document_alone() {
+    // Opened but not yet finished, so the load is still on the recording: the
+    // breakout ships on, so the document went out carrying the master class and
+    // the first press must turn it off.
+    let r = Reader::open(DOC);
+    assert_eq!(
+        loaded_classes(&r.view),
+        "jmnj-wide jmnj-wide-diagrams jmnj-wide-fences jmnj-wide-tables"
+    );
+    r.finish_load();
+    assert!(r.state().contains("\"wide\":true"));
+
+    r.press('s');
+    assert_eq!(
+        eval_containing(&r.view, "jmnj-wide"),
+        "document.documentElement.classList.toggle('jmnj-wide', false);"
+    );
+    // The point of the class model: eligibility is already in the document, so
+    // the toggle costs no re-render and nothing moves vertically.
+    assert!(
+        r.view.loads().is_empty(),
+        "the toggle re-rendered: {:?}",
+        r.view.loads()
+    );
+    assert!(r.state().contains("\"wide\":false"));
+
+    r.view.clear();
+    r.press('s');
+    assert_eq!(
+        eval_containing(&r.view, "jmnj-wide"),
+        "document.documentElement.classList.toggle('jmnj-wide', true);"
+    );
+    assert!(r.state().contains("\"wide\":true"));
+}
+
+// ---------------------------------------------------------------------------
+// Diagram fit and per-diagram zoom (DESIGN D5a.2)
+// ---------------------------------------------------------------------------
+
+/// The per-diagram scale the page was told to apply, and the diagram it was
+/// aimed at: the whole contract of one Ctrl+wheel tick over a diagram.
+fn diagram_zoom_call(view: &FakeViewport) -> (usize, f64) {
+    let js = eval_containing(view, DIAGRAM_ZOOM_VAR);
+    let index = number_after(&js, ".mermaid')[").expect("a diagram index") as usize;
+    let factor = number_after(&js, "base * ").expect("a scale factor");
+    (index, factor)
+}
+
+#[test]
+fn a_flips_the_diagram_fit_class_and_leaves_the_document_alone() {
+    // Fit ships off (intrinsic is D5a's decided behaviour), so the document
+    // went out without the class and the first press must turn it on.
+    let r = Reader::open(DOC);
+    assert!(!loaded_classes(&r.view).contains(DIAGRAM_FIT_CLASS));
+    r.finish_load();
+    assert!(r.state().contains("\"diagram_fit\":false"));
+
+    r.press('a');
+    assert_eq!(
+        eval_containing(&r.view, DIAGRAM_FIT_CLASS),
+        "document.documentElement.classList.toggle('jmnj-diagram-fit', true);"
+    );
+    // Same contract `s` has: the rule is already in the stylesheet, so the
+    // toggle costs no re-render.
+    assert!(
+        r.view.loads().is_empty(),
+        "the toggle re-rendered: {:?}",
+        r.view.loads()
+    );
+    assert!(r.state().contains("\"diagram_fit\":true"));
+
+    r.view.clear();
+    r.press('a');
+    assert_eq!(
+        eval_containing(&r.view, DIAGRAM_FIT_CLASS),
+        "document.documentElement.classList.toggle('jmnj-diagram-fit', false);"
+    );
+    assert!(r.state().contains("\"diagram_fit\":false"));
+}
+
+#[test]
+fn a_re_render_keeps_whatever_the_diagram_fit_toggle_last_set() {
+    // The mirror into the render options, the same one `s` needs: without it a
+    // live reload would quietly drop fit mode.
+    let r = Reader::loaded(DOC);
+    r.press('a');
+    r.view.clear();
+    r.press('r');
+    r.land_work();
+    assert!(
+        loaded_classes(&r.view).contains(DIAGRAM_FIT_CLASS),
+        "the re-rendered document must still carry the fit class: {:?}",
+        loaded_classes(&r.view)
+    );
+    assert!(r.state().contains("\"diagram_fit\":true"));
+}
+
+#[test]
+fn ctrl_wheel_over_a_diagram_scales_that_diagram_and_not_the_page() {
+    let r = Reader::loaded(DOC);
+    // The page reports the pointer entering the second diagram's box.
+    r.message(message::DIAGRAM_HOVER, "1");
+    assert!(r.state().contains("\"diagram_hover\":true"));
+
+    r.wheel_zoom(-1.0, false);
+    let (index, factor) = diagram_zoom_call(&r.view);
+    assert_eq!(index, 1, "the tick must land on the hovered diagram");
+    let step = 1.0 + Options::default().zoom_step;
+    assert!((factor - step).abs() < 1e-9, "scroll up zooms in: {factor}");
+    assert!(
+        r.view.zoom_levels().is_empty(),
+        "the page must not zoom under the pointer: {:?}",
+        r.view.zoom_levels()
+    );
+
+    // Out is the reciprocal of in, so the two exactly undo each other.
+    r.view.clear();
+    r.wheel_zoom(1.0, false);
+    let (_, out) = diagram_zoom_call(&r.view);
+    assert!(
+        (out - 1.0 / step).abs() < 1e-9,
+        "scroll down zooms out: {out}"
+    );
+
+    // And the script clamps, so no burst can run away.
+    let js = eval_containing(&r.view, DIAGRAM_ZOOM_VAR);
+    assert!(js.contains(&DIAGRAM_ZOOM_MIN.to_string()));
+    assert!(js.contains(&DIAGRAM_ZOOM_MAX.to_string()));
+}
+
+#[test]
+fn ctrl_wheel_away_from_a_diagram_still_zooms_the_page() {
+    let r = Reader::loaded(DOC);
+    // Entered a diagram, then left it: the page posts the empty payload, which
+    // is how "over no diagram" is spelled.
+    r.message(message::DIAGRAM_HOVER, "0");
+    r.message(message::DIAGRAM_HOVER, "");
+    assert!(r.state().contains("\"diagram_hover\":false"));
+    r.view.clear();
+
+    r.wheel_zoom(-1.0, false);
+    let levels = r.view.zoom_levels();
+    assert_eq!(levels.len(), 1, "{levels:?}");
+    assert!((levels[0] - 1.1).abs() < 1e-9, "{levels:?}");
+    assert!(
+        !r.view.evaled(DIAGRAM_ZOOM_VAR),
+        "no diagram was under the pointer: {:?}",
+        r.view.evals()
+    );
+}
+
+#[test]
+fn ctrl_shift_wheel_over_a_diagram_is_still_text_zoom() {
+    // The hover flag routes the *geometric* axis only: Ctrl+Shift is the text
+    // axis, which has nothing to do with diagram size.
+    let r = Reader::loaded(DOC);
+    r.message(message::DIAGRAM_HOVER, "0");
+    r.view.clear();
+
+    r.wheel_zoom(-1.0, true);
+    let options = Options::default();
+    let expected = options.font_size_px as f64 * (1.0 + options.text_zoom_step);
+    assert!((font_size_px(&r.view) - expected).abs() < 1e-9);
+    assert!(!r.view.evaled(DIAGRAM_ZOOM_VAR));
+}
+
+#[test]
+fn zoom_reset_clears_the_per_diagram_scales_too() {
+    // D5a makes `=` the reset for zoom as a whole; a diagram left at 4× after
+    // it would be a lie.
+    let r = Reader::loaded(DOC);
+    r.message(message::DIAGRAM_HOVER, "0");
+    r.wheel_zoom(-1.0, false);
+    r.view.clear();
+
+    r.press('=');
+    let js = eval_containing(&r.view, "removeProperty");
+    assert!(js.contains(DIAGRAM_ZOOM_VAR), "{js}");
+    assert!(js.contains(DIAGRAM_ZOOM_CLASS), "{js}");
+    // Under the same anchor as the two zoom axes, not a second one.
+    assert!(js.contains("--font-size"), "{js}");
+    assert_eq!(r.view.zoom_levels(), vec![1.0]);
+}
+
+#[test]
+fn every_document_installs_the_pointer_over_diagram_listener() {
+    // The flag has to come from the page, because GTK sees the scroll first
+    // (D4) — so the listener belongs in the permanent document-start set, not
+    // in something a flow has to remember to install.
+    let installed = super::scripts::document_start()
+        .iter()
+        .any(|js| js.contains(message::DIAGRAM_HOVER) && js.contains(".mermaid"));
+    assert!(
+        installed,
+        "no pointer-over-diagram listener at document start"
+    );
+}
+
+#[test]
+fn a_re_render_keeps_whatever_the_wide_toggle_last_set() {
+    // The mirror into the render options: without it, the next re-render (a
+    // live reload, `r`, a `:set`) would quietly put the breakout back on.
+    let r = Reader::loaded(DOC);
+    r.press('s');
+    r.view.clear();
+    r.press('r');
+    r.land_work();
+    assert_eq!(
+        loaded_classes(&r.view),
+        "jmnj-wide-diagrams jmnj-wide-fences jmnj-wide-tables",
+        "the re-rendered document must not carry the master class again"
+    );
+    assert!(r.state().contains("\"wide\":false"));
+}
+
+#[test]
+fn setting_wide_blocks_re_renders_with_the_new_eligibility() {
+    let r = Reader::loaded(DOC);
+    r.view.clear();
+    r.press(':');
+    r.submit_input("set wide-blocks all");
+    r.land_work();
+    assert_eq!(
+        loaded_classes(&r.view),
+        "jmnj-wide jmnj-wide-diagrams jmnj-wide-fences jmnj-wide-tables \
+         jmnj-wide-code jmnj-wide-math"
+    );
 }
 
 #[test]

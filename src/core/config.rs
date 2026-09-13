@@ -5,7 +5,8 @@
 //! surfaces an error (the caller prints it to stderr) and still yields
 //! defaults, so the reader always opens.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -33,6 +34,194 @@ impl SelectionClipboard {
                 "expected \"primary\" or \"clipboard\", got {other:?}"
             )),
         }
+    }
+}
+
+/// The `<html>` class that gates every wide-block breakout: the master switch
+/// [`Action::ToggleWide`](crate::core::Action::ToggleWide) flips at runtime,
+/// exactly the contract `html.dark` has with the recolor. Each eligible kind
+/// also carries `{WIDE_CLASS}-<kind>`; the stylesheet ANDs the two, so the
+/// per-kind classes say *what may* break out and this one says *whether it
+/// does*. The pipeline emits both onto `<html>`; the controller only ever
+/// touches this one.
+pub const WIDE_CLASS: &str = "jmnj-wide";
+
+/// The `<html>` class that puts every diagram in **fit-to-width** mode: the
+/// stylesheet caps `.mermaid svg` at `min(100%, var(--dw))`, so a diagram wider
+/// than its box is scaled down to show all of it, and one already narrower is
+/// left at its intrinsic size rather than being blown up (DESIGN D5a.2).
+///
+/// Document-wide, and the same two-part contract [`WIDE_CLASS`] has: the
+/// pipeline emits it when the `diagram-fit` option is on, and
+/// [`Action::ToggleDiagramFit`](crate::core::Action::ToggleDiagramFit) flips it
+/// at runtime as a class flip — no re-render.
+pub const DIAGRAM_FIT_CLASS: &str = "jmnj-diagram-fit";
+
+/// The per-diagram Ctrl+wheel scale, as a CSS custom property on one `.mermaid`
+/// box: the stylesheet multiplies the intrinsic width `--dw` by it, so `1` (the
+/// default) is exactly today's geometry.
+///
+/// Transient DOM state, not session state — a look-closer gesture does not
+/// survive a reload — so unlike `--dw` the pipeline never emits it; the
+/// controller's zoom script is the only writer. The name lives here because
+/// `assets/style.css` is the reader.
+pub const DIAGRAM_ZOOM_VAR: &str = "--dz";
+
+/// The class a `.mermaid` **box** carries while its [`DIAGRAM_ZOOM_VAR`] scale
+/// is off 1: it bounds the box's height and gives it scrollers on both axes, so
+/// a diagram zoomed to 400% scrolls *inside its box* instead of making the
+/// document four times taller or pushing the page sideways. At scale 1 the
+/// class is absent and the box keeps exactly its unzoomed geometry.
+pub const DIAGRAM_ZOOM_CLASS: &str = "jmnj-diagram-zoomed";
+
+/// One kind of block that may break out of the reading column to window width.
+///
+/// Bounded measure is right for prose and wrong for pictures: a 1800 px diagram
+/// scrolled through a 912 px porthole wastes the window it is being read in
+/// (DESIGN D5a). These are the block kinds that carry their own `overflow-x`
+/// scroller today, i.e. the ones for which "wider" means "more of it visible".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WideBlock {
+    /// Mermaid diagrams (`.mermaid`).
+    Diagrams,
+    /// External fence-renderer output (`.rendered-fence`, DESIGN D6.2).
+    Fences,
+    /// GFM tables (`.table-wrap`).
+    Tables,
+    /// Highlighted code blocks (`pre.code`).
+    Code,
+    /// Display math (`.math-scroll`).
+    Math,
+}
+
+impl WideBlock {
+    /// Every kind, in the canonical order the config spelling and [`Display`]
+    /// use.
+    ///
+    /// [`Display`]: std::fmt::Display
+    pub const ALL: [WideBlock; 5] = [
+        WideBlock::Diagrams,
+        WideBlock::Fences,
+        WideBlock::Tables,
+        WideBlock::Code,
+        WideBlock::Math,
+    ];
+
+    /// The kind's canonical name: its config spelling, and — suffixed onto
+    /// [`WIDE_CLASS`] — its `<html>` class. One place, so the Rust and the
+    /// stylesheet cannot drift.
+    pub const fn name(self) -> &'static str {
+        match self {
+            WideBlock::Diagrams => "diagrams",
+            WideBlock::Fences => "fences",
+            WideBlock::Tables => "tables",
+            WideBlock::Code => "code",
+            WideBlock::Math => "math",
+        }
+    }
+
+    /// The `<html>` class the pipeline emits when this kind is eligible.
+    pub fn css_class(self) -> String {
+        format!("{WIDE_CLASS}-{}", self.name())
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|k| k.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// Which block kinds are eligible to break out of the reading column.
+///
+/// A set, not a flag per kind: the config value is one comma-separated list
+/// (`none`, `all`, or `diagrams,tables`), and [`Display`] round-trips it, so
+/// the `:set` echo and the file spelling agree by construction.
+///
+/// [`Display`]: std::fmt::Display
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideBlocks(BTreeSet<WideBlock>);
+
+impl Default for WideBlocks {
+    /// The shipped default, `diagrams,fences,tables`: the kinds that are
+    /// pictures or grids. Code and math stay in the column, where a reader
+    /// wants them next to the prose that explains them.
+    fn default() -> Self {
+        Self(
+            [WideBlock::Diagrams, WideBlock::Fences, WideBlock::Tables]
+                .into_iter()
+                .collect(),
+        )
+    }
+}
+
+impl WideBlocks {
+    /// No kind breaks out (`none`).
+    pub fn none() -> Self {
+        Self(BTreeSet::new())
+    }
+
+    /// Every kind breaks out (`all`).
+    pub fn all() -> Self {
+        Self(WideBlock::ALL.into_iter().collect())
+    }
+
+    /// Parse the config value: `none`, `all`, or a comma-separated list of kind
+    /// names. Case-insensitive and whitespace-tolerant (a trailing comma is
+    /// fine); an unknown name is an error that names the offending token.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        if s.is_empty() || s.eq_ignore_ascii_case("none") {
+            return Ok(Self::none());
+        }
+        if s.eq_ignore_ascii_case("all") {
+            return Ok(Self::all());
+        }
+        let mut kinds = BTreeSet::new();
+        for token in s.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            let kind = WideBlock::parse(token).ok_or_else(|| {
+                let valid: Vec<&str> = WideBlock::ALL.iter().map(|k| k.name()).collect();
+                format!(
+                    "unknown block kind {token:?}: expected \"none\", \"all\", or a \
+                     comma-separated list of {}",
+                    valid.join(", ")
+                )
+            })?;
+            kinds.insert(kind);
+        }
+        Ok(Self(kinds))
+    }
+
+    /// The kinds in this set, in canonical order.
+    pub fn iter(&self) -> impl Iterator<Item = WideBlock> + '_ {
+        self.0.iter().copied()
+    }
+
+    /// The `<html>` classes the pipeline emits for this set, in canonical
+    /// order. The master [`WIDE_CLASS`] is not among them — it is the runtime
+    /// state, not the eligibility.
+    pub fn classes(&self) -> impl Iterator<Item = String> + '_ {
+        self.iter().map(WideBlock::css_class)
+    }
+}
+
+impl fmt::Display for WideBlocks {
+    /// The canonical spelling, which [`WideBlocks::parse`] round-trips: `none`
+    /// for the empty set, `all` for the full one, else the kind names in
+    /// canonical order.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return f.write_str("none");
+        }
+        if self.0.len() == WideBlock::ALL.len() {
+            return f.write_str("all");
+        }
+        let names: Vec<&str> = self.iter().map(|k| k.name()).collect();
+        f.write_str(&names.join(","))
     }
 }
 
@@ -65,6 +254,22 @@ pub struct Options {
     pub font_mono: String,
     /// Base body font size in pixels; also the text-zoom 100% reference.
     pub font_size_px: u32,
+    /// Which block kinds may break out of the reading column to window width
+    /// when the master switch is on (DESIGN D5a). Default:
+    /// `diagrams,fences,tables`.
+    pub wide_blocks: WideBlocks,
+    /// The breakout master switch's initial state — what `s`
+    /// ([`Action::ToggleWide`](crate::core::Action::ToggleWide)) starts out
+    /// flipping. On by default: a diagram scrolled through a porthole while the
+    /// window sits empty is the behaviour worth defaulting away from.
+    pub wide: bool,
+    /// Whether diagrams open in fit-to-width mode — scaled down to their box
+    /// instead of rendered at their intrinsic width (DESIGN D5a.2). What `a`
+    /// ([`Action::ToggleDiagramFit`](crate::core::Action::ToggleDiagramFit))
+    /// starts out flipping. **Off** by default: intrinsic is D5a's decided
+    /// behaviour (a shrunk-to-fit diagram is unreadably small), and the
+    /// wide-block breakout already recovers most of the missing width.
+    pub diagram_fit: bool,
     /// Which clipboard a selection is copied to on select.
     pub selection_clipboard: SelectionClipboard,
     /// Reverse editor sync (DESIGN D7): the command spawned on Ctrl+click, with
@@ -92,6 +297,9 @@ impl Default for Options {
             font_body: String::new(),
             font_mono: String::new(),
             font_size_px: 18,
+            wide_blocks: WideBlocks::default(),
+            wide: true,
+            diagram_fit: false,
             selection_clipboard: SelectionClipboard::Primary,
             editor_command: EditorCommand::default(),
             renderers: BTreeMap::new(),
@@ -139,6 +347,26 @@ impl Options {
             }
             "show-frontmatter" => {
                 self.show_frontmatter = parse_scalar::<bool>(value, "show-frontmatter")?;
+                Ok(SetEffect::Rerender)
+            }
+            "wide-blocks" => {
+                // Re-render rather than a class flip: the pipeline emits the
+                // per-kind classes, so a changed *set* is only honest after the
+                // document carries the new ones. The reading position survives a
+                // re-render (as `toggle frontmatter` relies on too).
+                self.wide_blocks =
+                    WideBlocks::parse(unquote(value)).map_err(|m| format!("wide-blocks: {m}"))?;
+                Ok(SetEffect::Rerender)
+            }
+            "wide" => {
+                self.wide = parse_scalar::<bool>(value, "wide")?;
+                Ok(SetEffect::Rerender)
+            }
+            "diagram-fit" => {
+                // Re-render for the same reason `wide` does: the pipeline emits
+                // the class, so the next render must agree with the live state.
+                // The *toggle* (`a`) is still a class flip with no re-render.
+                self.diagram_fit = parse_scalar::<bool>(value, "diagram-fit")?;
                 Ok(SetEffect::Rerender)
             }
             "scroll-step" => {
@@ -246,6 +474,13 @@ impl Config {
             })?,
             None => defaults.editor_command,
         };
+        let wide_blocks = match raw_opts.wide_blocks {
+            Some(s) => WideBlocks::parse(&s).map_err(|message| ConfigError::OptionValue {
+                key: "wide-blocks",
+                message,
+            })?,
+            None => defaults.wide_blocks.clone(),
+        };
         let options = Options {
             scroll_step_px: raw_opts.scroll_step.unwrap_or(defaults.scroll_step_px),
             zoom_step: raw_opts.zoom_step.unwrap_or(defaults.zoom_step),
@@ -259,6 +494,9 @@ impl Config {
             font_body: raw_opts.font_body.unwrap_or(defaults.font_body),
             font_mono: raw_opts.font_mono.unwrap_or(defaults.font_mono),
             font_size_px: raw_opts.font_size.unwrap_or(defaults.font_size_px),
+            wide_blocks,
+            wide: raw_opts.wide.unwrap_or(defaults.wide),
+            diagram_fit: raw_opts.diagram_fit.unwrap_or(defaults.diagram_fit),
             selection_clipboard,
             editor_command,
             // Normalise fence-language keys to lowercase so the lookup (which
@@ -456,6 +694,8 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
         "reload" => Reload,
         "toggle toc" | "toc" => ToggleToc,
         "toggle frontmatter" | "frontmatter" => ToggleFrontmatter,
+        "toggle wide" | "wide" => ToggleWide,
+        "toggle diagram fit" | "diagram fit" => ToggleDiagramFit,
         "command" | "command line" => CommandLine,
         "follow link" => FollowLink,
         "show link target" => ShowLinkTarget,
@@ -506,6 +746,9 @@ pub fn option_keys() -> &'static [&'static str] {
         "font-body",
         "font-mono",
         "font-size",
+        "wide-blocks",
+        "wide",
+        "diagram-fit",
         "selection-clipboard",
     ]
 }
@@ -536,6 +779,8 @@ pub fn action_names() -> &'static [&'static str] {
         "reload",
         "toggle toc",
         "toggle frontmatter",
+        "toggle wide",
+        "toggle diagram fit",
         "follow link",
         "show link target",
         "mark set",
@@ -587,6 +832,11 @@ struct RawOptions {
     font_mono: Option<String>,
     #[serde(rename = "font-size")]
     font_size: Option<u32>,
+    #[serde(rename = "wide-blocks")]
+    wide_blocks: Option<String>,
+    wide: Option<bool>,
+    #[serde(rename = "diagram-fit")]
+    diagram_fit: Option<bool>,
     #[serde(rename = "selection-clipboard")]
     selection_clipboard: Option<String>,
     #[serde(rename = "editor-command")]
@@ -1017,6 +1267,142 @@ mod tests {
     fn show_frontmatter_reads_from_the_config_file() {
         let c = Config::parse("[options]\nshow-frontmatter = true\n").unwrap();
         assert!(c.options.show_frontmatter);
+    }
+
+    #[test]
+    fn wide_blocks_parses_none_all_and_lists() {
+        assert_eq!(WideBlocks::parse("none").unwrap(), WideBlocks::none());
+        assert_eq!(WideBlocks::parse("  NONE ").unwrap(), WideBlocks::none());
+        assert_eq!(WideBlocks::parse("").unwrap(), WideBlocks::none());
+        assert_eq!(WideBlocks::parse("all").unwrap(), WideBlocks::all());
+        assert_eq!(WideBlocks::parse("All").unwrap(), WideBlocks::all());
+        // Case-insensitive, whitespace-tolerant, order-independent, and a
+        // trailing comma is a typo the reader should survive.
+        let expected: Vec<WideBlock> = vec![WideBlock::Diagrams, WideBlock::Tables];
+        for spelling in ["diagrams,tables", " Tables , DIAGRAMS ", "tables,diagrams,"] {
+            let parsed = WideBlocks::parse(spelling).unwrap();
+            assert_eq!(
+                parsed.iter().collect::<Vec<_>>(),
+                expected,
+                "parsing {spelling:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_blocks_rejects_an_unknown_kind_by_name() {
+        let err = WideBlocks::parse("diagrams,widgets").unwrap_err();
+        assert!(err.contains("widgets"), "{err}");
+        // The message has to be actionable: every valid spelling in it.
+        for valid in [
+            "none", "all", "diagrams", "fences", "tables", "code", "math",
+        ] {
+            assert!(err.contains(valid), "{err} should list {valid}");
+        }
+    }
+
+    #[test]
+    fn wide_blocks_display_round_trips_through_parse() {
+        for set in [
+            WideBlocks::none(),
+            WideBlocks::all(),
+            WideBlocks::default(),
+            WideBlocks::parse("code").unwrap(),
+            WideBlocks::parse("math,code,fences").unwrap(),
+        ] {
+            let shown = set.to_string();
+            assert_eq!(
+                WideBlocks::parse(&shown).unwrap(),
+                set,
+                "{shown:?} did not round-trip"
+            );
+        }
+        assert_eq!(WideBlocks::none().to_string(), "none");
+        assert_eq!(WideBlocks::all().to_string(), "all");
+        assert_eq!(WideBlocks::default().to_string(), "diagrams,fences,tables");
+    }
+
+    #[test]
+    fn a_wide_block_names_its_own_css_class() {
+        // The stylesheet spells these out; the Rust must agree with it, and
+        // this is the one place the two meet.
+        assert_eq!(WideBlock::Diagrams.css_class(), "jmnj-wide-diagrams");
+        assert_eq!(WideBlock::Math.css_class(), "jmnj-wide-math");
+        assert_eq!(
+            WideBlocks::default().classes().collect::<Vec<_>>(),
+            vec!["jmnj-wide-diagrams", "jmnj-wide-fences", "jmnj-wide-tables"]
+        );
+    }
+
+    #[test]
+    fn wide_options_default_on_and_read_from_the_config_file() {
+        let d = Options::default();
+        assert!(d.wide, "the breakout ships on");
+        assert_eq!(d.wide_blocks, WideBlocks::default());
+
+        let c = Config::parse("[options]\nwide = false\nwide-blocks = \"all\"\n").unwrap();
+        assert!(!c.options.wide);
+        assert_eq!(c.options.wide_blocks, WideBlocks::all());
+
+        let err = Config::parse("[options]\nwide-blocks = \"widgets\"\n").unwrap_err();
+        assert!(err.to_string().contains("widgets"), "{err}");
+    }
+
+    #[test]
+    fn wide_options_are_set_targets_that_re_render() {
+        let mut o = Options::default();
+        // The pipeline emits the per-kind classes, so a changed *set* only
+        // takes effect through a re-render.
+        assert_eq!(o.set("wide-blocks", "code").unwrap(), SetEffect::Rerender);
+        assert_eq!(o.wide_blocks, WideBlocks::parse("code").unwrap());
+        assert_eq!(o.set("wide", "false").unwrap(), SetEffect::Rerender);
+        assert!(!o.wide);
+        assert!(
+            o.set("wide-blocks", "widgets")
+                .unwrap_err()
+                .contains("wide-blocks")
+        );
+        assert!(o.set("wide", "sometimes").is_err());
+    }
+
+    #[test]
+    fn toggle_wide_parses_under_both_spellings() {
+        assert_eq!(parse_action("toggle wide").unwrap(), Action::ToggleWide);
+        assert_eq!(parse_action("wide").unwrap(), Action::ToggleWide);
+        assert!(action_names().contains(&"toggle wide"));
+        assert!(option_keys().contains(&"wide-blocks"));
+        assert!(option_keys().contains(&"wide"));
+    }
+
+    #[test]
+    fn diagram_fit_is_off_by_default_and_is_a_set_target_that_re_renders() {
+        // Off by default: DESIGN D5a decided intrinsic, and the wide-block
+        // breakout already recovers most of the width fit would buy.
+        assert!(!Options::default().diagram_fit);
+        assert!(
+            Config::parse("[options]\ndiagram-fit = true\n")
+                .unwrap()
+                .options
+                .diagram_fit
+        );
+        let mut o = Options::default();
+        assert_eq!(o.set("diagram-fit", "true").unwrap(), SetEffect::Rerender);
+        assert!(o.diagram_fit);
+        assert!(o.set("diagram-fit", "sometimes").is_err());
+        assert!(option_keys().contains(&"diagram-fit"));
+    }
+
+    #[test]
+    fn toggle_diagram_fit_parses_under_both_spellings() {
+        assert_eq!(
+            parse_action("toggle diagram fit").unwrap(),
+            Action::ToggleDiagramFit
+        );
+        assert_eq!(
+            parse_action("diagram fit").unwrap(),
+            Action::ToggleDiagramFit
+        );
+        assert!(action_names().contains(&"toggle diagram fit"));
     }
 
     #[test]

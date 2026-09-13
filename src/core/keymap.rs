@@ -203,6 +203,14 @@ impl Default for Keymap {
         km.bind(n, c('N'), SearchPrevious);
         km.bind(n, ctrl('r'), Recolor);
         km.bind(n, c('r'), Reload);
+        // Zathura's `s` is "adjust window to width"; here it is the wide-block
+        // breakout switch, which is the same intent applied to the blocks that
+        // have more to show than the reading column can hold (DESIGN D5a).
+        km.bind(n, c('s'), ToggleWide);
+        // Zathura's `a` is "adjust to best fit"; here it fits the diagrams,
+        // which are the only blocks with an intrinsic size to fit (DESIGN
+        // D5a.2). The natural sibling of `s`.
+        km.bind(n, c('a'), ToggleDiagramFit);
         km.bind(
             n,
             KeySequence::single(KeyPress::new(Key::Tab, false, false)),
@@ -409,6 +417,21 @@ mod tests {
             m.feed(KeyPress::char('j'), &km),
             MatchResult::Matched {
                 action: Action::Scroll(Direction::Down),
+                count: None
+            }
+        );
+    }
+
+    #[test]
+    fn a_is_bound_to_diagram_fit() {
+        // Zathura's "adjust to best fit", and the sibling of `s`. `a` was
+        // unbound before D5a.2, so nothing was displaced.
+        let km = km();
+        let mut m = Matcher::new(Mode::Normal);
+        assert_eq!(
+            m.feed(KeyPress::char('a'), &km),
+            MatchResult::Matched {
+                action: Action::ToggleDiagramFit,
                 count: None
             }
         );

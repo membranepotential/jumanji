@@ -199,6 +199,25 @@ struct Session<T: Toolkit> {
     toc: Vec<Heading>,
     section: usize,
     dark: bool,
+    /// Whether the wide-block breakout is on (DESIGN D5a). Mirrored into
+    /// `options.wide` and `render_opts.wide` on every change, so a later
+    /// re-render emits the master class and preserves what `s` last set.
+    wide: bool,
+    /// Whether diagrams are in fit-to-width mode (DESIGN D5a.2). Mirrored into
+    /// `options.diagram_fit` and `render_opts.diagram_fit` on every change, for
+    /// the same reason [`Session::wide`] is: a later re-render must emit the
+    /// class `a` last set.
+    diagram_fit: bool,
+    /// The `.mermaid` box the pointer is inside, by index in document order, as
+    /// the page last posted it ([`message::DIAGRAM_HOVER`]); `None` when the
+    /// pointer is over no diagram.
+    ///
+    /// A *cache*, and it has to be: GTK dispatches the scroll capture-phase from
+    /// the toplevel, before WebKit sees it (DESIGN D4), so `Ctrl`+wheel must be
+    /// routed synchronously — the page cannot be asked mid-gesture. Purely a
+    /// routing input, so a stale value costs at worst one tick going to the
+    /// wrong target, never correctness.
+    hovered_diagram: Option<usize>,
     /// Whether the initial load has finished. Key/automation actions are no-ops
     /// before this; the D-Bus `loaded` flag lets clients (tests, editor
     /// integrations) wait for a driveable window.
@@ -356,6 +375,9 @@ impl<T: Toolkit + 'static> Controller<T> {
                 // copy them once here; live reload re-runs the pipeline (and thus
                 // the renderers) for free.
                 renderers: options.renderers.clone(),
+                wide: options.wide,
+                wide_blocks: options.wide_blocks.clone(),
+                diagram_fit: options.diagram_fit,
             },
             keymap,
             // Empty until the first background scan lands (kicked off below). A
@@ -389,6 +411,9 @@ impl<T: Toolkit + 'static> Controller<T> {
             toc: Vec::new(),
             section: 0,
             dark: options.default_recolor,
+            wide: options.wide,
+            diagram_fit: options.diagram_fit,
+            hovered_diagram: None,
             loaded: false,
             last_scroll: 0.0,
             input: Input::None,
@@ -499,6 +524,12 @@ impl<T: Toolkit + 'static> Controller<T> {
                     return;
                 }
                 self.on_editor_sync(payload);
+            }
+            // An empty (or unparseable) payload is "over no diagram", which is
+            // what the page posts on every leave — so the parse failure *is*
+            // the encoding, not an error to report.
+            message::DIAGRAM_HOVER => {
+                self.0.borrow_mut().hovered_diagram = payload.parse::<usize>().ok();
             }
             _ => {}
         }
@@ -772,6 +803,13 @@ impl<T: Toolkit + 'static> Controller<T> {
     /// Text zoom applies immediately and top-anchored; geometric zoom is
     /// coalesced and cursor-anchored, because each step is a full reflow and a
     /// physical burst should become one apply rather than one per tick.
+    ///
+    /// A plain `Ctrl`+wheel **over a diagram** scales that diagram instead of
+    /// the page (DESIGN D5a.2). The decision is made here, from the hover flag
+    /// the page posts and [`Session::hovered_diagram`] caches, because GTK
+    /// dispatches the scroll capture-phase from the toplevel before WebKit sees
+    /// it (D4): the page never gets a `wheel` event to decide with, and a round
+    /// trip per tick is not an option.
     pub fn on_wheel_zoom(&self, dy: f64, text: bool) {
         if text {
             let action = if dy < 0.0 {
@@ -781,8 +819,32 @@ impl<T: Toolkit + 'static> Controller<T> {
             };
             self.execute(action, 1);
         } else {
-            self.accumulate_wheel_zoom(dy);
+            // Read the cache out before branching: the routing decision is
+            // synchronous by necessity (D4 — GTK saw the scroll first, and the
+            // page cannot be asked mid-gesture), and both arms want the borrow.
+            let hovered = self.0.borrow().hovered_diagram;
+            match hovered {
+                Some(index) => self.zoom_diagram(index, dy),
+                None => self.accumulate_wheel_zoom(dy),
+            }
         }
+    }
+
+    /// One `Ctrl`+wheel tick over the `index`-th diagram: scale that diagram
+    /// instead of the page (DESIGN D5a.2). Negative `dy` is a scroll up, which
+    /// zooms in, matching the page-zoom axis.
+    ///
+    /// The step is `zoom_step` reused *multiplicatively* — `×(1 + step)` in,
+    /// its reciprocal out — so the ticks feel evenly spaced across the clamp
+    /// range and out exactly undoes in. Nothing is coalesced or anchored: this
+    /// writes one custom property on one element, and the diagram scrolls
+    /// inside its own box, so there is neither a page reflow to batch nor a
+    /// reading position to pin.
+    fn zoom_diagram(&self, index: usize, dy: f64) {
+        let s = self.0.borrow();
+        let step = 1.0 + s.zoom_step;
+        let factor = if dy < 0.0 { step } else { 1.0 / step };
+        s.view.zoom_diagram(index, factor);
     }
 
     /// Accumulate one Ctrl+wheel tick. Leading-edge coalescing: the first tick of a
@@ -958,8 +1020,8 @@ impl<T: Toolkit + 'static> Controller<T> {
     /// reports, delivered to `callback` once the viewport snapshot lands.
     pub fn state(&self, callback: impl FnOnce(String) + 'static) {
         #[rustfmt::skip]
-        let (view, file, trail, dark, zoom, text_zoom, section, toc_len, loaded, mode,
-             vault_files) = {
+        let (view, file, trail, dark, wide, diagram_fit, diagram_hover, zoom, text_zoom, section,
+             toc_len, loaded, mode, vault_files) = {
             let s = self.0.borrow();
             // Report `stdin` for a stream, not its CWD sentinel path: it is
             // honest, and it keeps the D-Bus forward-search (which matches on
@@ -974,6 +1036,9 @@ impl<T: Toolkit + 'static> Controller<T> {
                 file,
                 s.trail_string(),
                 s.dark,
+                s.wide,
+                s.diagram_fit,
+                s.hovered_diagram.is_some(),
                 s.zoom,
                 s.text_zoom,
                 s.section,
@@ -989,6 +1054,9 @@ impl<T: Toolkit + 'static> Controller<T> {
                 &trail,
                 &vs,
                 dark,
+                wide,
+                diagram_fit,
+                diagram_hover,
                 zoom,
                 text_zoom,
                 section,
@@ -1173,6 +1241,28 @@ impl<T: Toolkit + 'static> Controller<T> {
                 let dark = s.dark;
                 s.view.set_dark(dark);
                 s.chrome.set_dark(dark);
+            }
+            Action::ToggleWide => {
+                // A class flip, not a re-render (the pipeline already emitted
+                // the per-kind eligibility classes) — so nothing reflows
+                // vertically and the reading position is untouched. The mirror
+                // into the options keeps a *later* re-render honest.
+                let wide = !s.wide;
+                s.wide = wide;
+                s.options.wide = wide;
+                s.render_opts.wide = wide;
+                s.view.set_wide(wide);
+            }
+            Action::ToggleDiagramFit => {
+                // A class flip like `s`, and for the same reason: the rule is
+                // already in the stylesheet, so only the diagrams resize and
+                // nothing else in the document moves. The mirror into the
+                // options keeps a *later* re-render honest.
+                let fit = !s.diagram_fit;
+                s.diagram_fit = fit;
+                s.options.diagram_fit = fit;
+                s.render_opts.diagram_fit = fit;
+                s.view.set_diagram_fit(fit);
             }
             Action::Reload => {
                 drop(s);
@@ -1716,6 +1806,11 @@ impl<T: Toolkit + 'static> Controller<T> {
                     s.render_opts.font_body = o.font_body.clone();
                     s.render_opts.font_mono = o.font_mono.clone();
                     s.render_opts.font_size_px = o.font_size_px;
+                    s.render_opts.wide = o.wide;
+                    s.render_opts.wide_blocks = o.wide_blocks.clone();
+                    s.render_opts.diagram_fit = o.diagram_fit;
+                    s.wide = o.wide;
+                    s.diagram_fit = o.diagram_fit;
                     s.font_base_px = o.font_size_px as f64;
                 }
                 self.render_and_load(true);
@@ -2196,18 +2291,25 @@ fn expand_env_token(token: &str) -> String {
 
 /// Serialize the reader state as the compact JSON object [`Controller::state`]
 /// returns. The viewport widths (`viewport_width`, `doc_scroll_width`,
-/// `diagram_width`, `math_width`) let e2e tests assert the reflow invariants and
+/// `diagram_width`, `diagram_box_width`, `math_width`) let e2e tests assert the
+/// reflow invariants, the wide-block breakout (DESIGN D5a) and
 /// that MathML laid out with nonzero geometry; `fn_color` lets e2e assert the
 /// dark-mode syntax-highlight scoping fix; `first_frame_scroll_y` and
 /// `reveal_scroll_y` let e2e assert the no-flash property (the *first* painted
 /// frame's offset and the offset the body was unhidden at, not just the final
-/// one); the rest are unchanged.
+/// one); `diagram_fit` is D5a.2's fit-to-width switch and `diagram_hover`
+/// whether the pointer is inside a diagram — the flag `Ctrl`+wheel routes on,
+/// and the only way an e2e can find a diagram without guessing at the host's
+/// device scale factor; the rest are unchanged.
 #[allow(clippy::too_many_arguments)]
 fn state_json(
     file: &str,
     trail: &str,
     vs: &ViewportState,
     dark: bool,
+    wide: bool,
+    diagram_fit: bool,
+    diagram_hover: bool,
     zoom: f64,
     text_zoom: f64,
     section: usize,
@@ -2221,13 +2323,16 @@ fn state_json(
          \"scroll_y\":{scroll_y},\"scroll_percent\":{scroll_percent},\
          \"content_width\":{content_width},\"viewport_width\":{viewport_width},\
          \"doc_scroll_width\":{doc_scroll_width},\"diagram_width\":{diagram_width},\
+         \"diagram_box_width\":{diagram_box_width},\
          \"math_width\":{math_width},\"msup_shift_ratio\":{msup_shift_ratio},\
          \"fence_width\":{fence_width},\"frontmatter_width\":{frontmatter_width},\
          \"first_frame_scroll_y\":{first_frame_scroll_y},\
          \"reveal_scroll_y\":{reveal_scroll_y},\
          \"reveal_failsafe\":{reveal_failsafe},\"restoring\":{restoring},\
          \"fn_color\":{fn_color},\
-         \"dark\":{dark},\"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
+         \"dark\":{dark},\"wide\":{wide},\"diagram_fit\":{diagram_fit},\
+         \"diagram_hover\":{diagram_hover},\
+         \"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded},\
          \"vault_files\":{vault_files}}}",
         file = json_string(file),
@@ -2238,6 +2343,7 @@ fn state_json(
         viewport_width = vs.viewport_width,
         doc_scroll_width = vs.doc_scroll_width,
         diagram_width = vs.diagram_width,
+        diagram_box_width = vs.diagram_box_width,
         math_width = vs.math_width,
         msup_shift_ratio = vs.msup_shift_ratio,
         fence_width = vs.fence_width,

@@ -235,8 +235,12 @@ feature (DESIGN.md D7). Each running reader owns
 with two methods:
 
 - `GetState() -> (s)` — a JSON snapshot: `file`, `scroll_y`, `scroll_percent`,
-  `dark`, `zoom` (geometric), `text_zoom`, `mode`, `section`, `toc_len`,
-  `loaded`, plus the restore-gate trio — `first_frame_scroll_y` (the offset the
+  `dark`, `wide` (the wide-block breakout switch, D5a), `diagram_fit` and
+  `diagram_hover` (D5a.2's fit switch, and whether the pointer is inside a
+  diagram — the flag `Ctrl`+wheel routes on, which is also how a test *finds* a
+  diagram without guessing at the host's device scale factor), `zoom` (geometric),
+  `text_zoom`, `mode`, `section`, `toc_len`, `loaded`, plus the restore-gate
+  trio — `first_frame_scroll_y` (the offset the
   first *painted* frame was placed at, hidden or not), `reveal_scroll_y` (the
   offset the body was *unhidden* at: the first frame the reader can see) and
   `reveal_failsafe` (whether the 400 ms timer, not the position landing, is
