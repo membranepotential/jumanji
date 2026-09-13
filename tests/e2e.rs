@@ -108,6 +108,12 @@ struct State {
     /// (DESIGN D5a): the reading column's content box normally, the window
     /// minus the gutter when the breakout is on.
     diagram_box_width: f64,
+    /// What sits at the top of the reading column, and where: the first 48
+    /// characters of the probed element and its viewport-relative `top`.
+    /// Together they are the observable for "the reader's place did not move" —
+    /// `scroll_y` is *supposed* to change when an anchored toggle reflows.
+    probe_text: String,
+    probe_top: f64,
     /// First `<math>` rendered width in CSS px (0 if none). Nonzero proves the
     /// MathML actually laid out.
     math_width: f64,
@@ -186,6 +192,8 @@ impl State {
             doc_scroll_width: field(json, "doc_scroll_width")?.parse().ok()?,
             diagram_width: field(json, "diagram_width")?.parse().ok()?,
             diagram_box_width: field(json, "diagram_box_width")?.parse().ok()?,
+            probe_text: field_str(json, "probe_text")?,
+            probe_top: field(json, "probe_top")?.parse().ok()?,
             math_width: field(json, "math_width")?.parse().ok()?,
             msup_shift_ratio: field(json, "msup_shift_ratio")?.parse().ok()?,
             fence_width: field(json, "fence_width")?.parse().ok()?,
@@ -1090,29 +1098,73 @@ fn wide_blocks_break_a_diagram_out_of_the_reading_column() {
     let _ = fs::remove_dir_all(&data_home);
 }
 
-/// A document whose one diagram is far wider than the reading column *and*
-/// tall enough for a pointer sweep to reliably land inside its box: three
-/// parallel chains, so the box is a few hundred pixels tall whatever device
-/// scale factor the host X server reports.
+/// A document whose one diagram is far wider than *any* box it can be given,
+/// and tall enough for a pointer sweep to reliably land inside it: three
+/// parallel chains of ten nodes.
+///
+/// The width matters more than it looks. The breakout ships on, so the box is
+/// not the (narrowed) reading column — it is the window less the gutter, and
+/// how many CSS pixels that is depends on the device scale factor the host X
+/// server reports: the 1240x800 window below is 1240 CSS px at 1x but 620 at
+/// 2x. An earlier five-node version rendered ~1150 px, which overflowed the
+/// 572 px box on a 2x developer machine and *fitted inside* the 1192 px box in
+/// the 1x CI container, so the fixture self-check failed there and only there.
+/// Ten nodes render ~2400 px, which overflows every box either scale can
+/// produce, with room to spare.
 fn tall_wide_diagram_fixture() -> String {
-    "# Diagram zoom\n\n\
-     ```mermaid\n\
-     graph LR\n  \
-       A1[Ingest source] --> B1[Parse markdown]\n  \
-       B1 --> C1[Transform the AST]\n  \
-       C1 --> D1[Highlight fences]\n  \
-       D1 --> E1[Render diagrams]\n  \
-       A2[Extract the TOC] --> B2[Assemble the page]\n  \
-       B2 --> C2[Load in the viewport]\n  \
-       C2 --> D2[Paint the first frame]\n  \
-       D2 --> E2[Ready to read]\n  \
-       A3[Watch the file] --> B3[Rescan the vault]\n  \
-       B3 --> C3[Re-render the document]\n  \
-       C3 --> D3[Restore the position]\n  \
-       D3 --> E3[Reveal the body]\n\
-     ```\n\n\
-     Prose after the diagram.\n"
-        .to_string()
+    let mut chains = String::new();
+    for (row, label) in [(1, "Ingest"), (2, "Extract"), (3, "Watch")] {
+        chains.push_str(&format!(
+            "  N{row}0[{label} the source] --> N{row}1[Parse markdown]\n"
+        ));
+        for (col, step) in [
+            "Transform the AST",
+            "Highlight fences",
+            "Render diagrams",
+            "Assemble the page",
+            "Load in the viewport",
+            "Paint the first frame",
+            "Restore the position",
+            "Reveal the body",
+        ]
+        .iter()
+        .enumerate()
+        {
+            chains.push_str(&format!(
+                "  N{row}{} --> N{row}{}[{step}]\n",
+                col + 1,
+                col + 2
+            ));
+        }
+    }
+    // Numbered paragraphs after the diagram, and enough of them that a reader
+    // can sit *below* it with document still to spare. Both matter: the height
+    // a fitted diagram sheds is only felt by content after it, and an anchor
+    // cannot hold a position the shortened document no longer reaches — scroll
+    // to the bottom and the browser clamps, which is not a regression.
+    let mut prose = String::new();
+    for n in 1..=40 {
+        prose.push_str(&format!(
+            "Paragraph {n:02} of the prose that follows the diagram.\n\n"
+        ));
+    }
+    // A table between the diagram and the prose, because a table is the block
+    // whose *height* actually depends on its width: at the narrow reading
+    // column these cells wrap over many lines, at window width over few. A
+    // diagram does not do this (it keeps its intrinsic width and overflows), so
+    // a diagram-only fixture cannot catch the breakout dragging the page.
+    let mut table = String::from(
+        "| Stage | What it does | Why it is there | What it costs |\n\
+         |---|---|---|---|\n",
+    );
+    for n in 1..=6 {
+        table.push_str(&format!(
+            "| Stage {n:02} | transforms the syntax tree in place and hands it on \
+             | keeps the pass boundary honest so the next one can assume it \
+             | one traversal of the document and a little allocation |\n"
+        ));
+    }
+    format!("# Diagram zoom\n\n```mermaid\ngraph LR\n{chains}```\n\n{table}\n{prose}")
 }
 
 /// A reader launched on a wide-diagram fixture with the reading column narrowed
@@ -1167,6 +1219,27 @@ impl DiagramReader {
             })
     }
 
+    /// Scroll until a prose paragraph *after* the diagram is under the probe,
+    /// with document still left below. Stepping until the probe says so beats
+    /// guessing a scroll count: how far the diagram reaches depends on the
+    /// host's device scale factor, and overshooting to the bottom would park
+    /// the reader where a shrinking document clamps and no anchor can hold.
+    fn scroll_to_prose(&self) -> State {
+        for _ in 0..30 {
+            let s = self.h.get_state();
+            if s.probe_text.starts_with("Paragraph") && s.scroll_percent < 70 {
+                return s;
+            }
+            self.h.execute_action("scroll down", 4);
+            std::thread::sleep(Duration::from_millis(60));
+        }
+        let s = self.h.get_state();
+        panic!(
+            "never landed on prose below the diagram (probe {:?}, {}%)",
+            s.probe_text, s.scroll_percent
+        );
+    }
+
     /// Park the pointer inside the diagram's box, by sweeping down the window
     /// until the page says the pointer is inside one. Guessing a y would be
     /// guessing the host's device scale factor; `diagram_hover` is the
@@ -1197,6 +1270,78 @@ impl Drop for DiagramReader {
             let _ = fs::remove_dir_all(dir);
         }
     }
+}
+
+/// Assert that a layout-changing toggle did not move the reader's place: the
+/// same content must still be at (nearly) the same viewport offset afterwards.
+///
+/// A few px of slack, because the anchor restores by scrolling and the scroll
+/// offset is quantised; anything larger is the page sliding under the reader.
+fn assert_place_held(what: &str, before: &State, after: &State) {
+    assert!(
+        !before.probe_text.is_empty(),
+        "{what}: nothing was under the probe to begin with — the fixture must be \
+         scrolled to real content"
+    );
+    assert_eq!(
+        before.probe_text, after.probe_text,
+        "{what}: different content is at the top of the column now ({:?} -> {:?})",
+        before.probe_text, after.probe_text
+    );
+    let drift = (after.probe_top - before.probe_top).abs();
+    assert!(
+        drift <= 4.0,
+        "{what}: the reading position moved {drift} px ({:?} was at {}, now at {})",
+        before.probe_text,
+        before.probe_top,
+        after.probe_top
+    );
+}
+
+/// Regression: `s` used to move the document under the reader.
+///
+/// The breakout does not re-render, which is why this was missed — but "no
+/// re-render" is not "nothing moves". Widening a block changes its *height*
+/// (a table re-wraps at the new measure), so everything after it shifts while
+/// `scrollY` stays put. Goes red if `Page::set_wide` drops its anchor.
+#[test]
+fn s_holds_the_reading_position() {
+    let Some(_g) = setup_guard() else { return };
+    let r = DiagramReader::launch("widepos");
+    r.settled();
+    let before = r.scroll_to_prose();
+
+    r.h.key(&["s"]);
+    let after = r.h.wait_for_state("breakout off", SETTLE, |s| !s.wide);
+    assert_place_held("toggling the breakout with `s`", &before, &after);
+
+    r.h.key(&["s"]);
+    let back = r.h.wait_for_state("breakout on again", SETTLE, |s| s.wide);
+    assert_place_held("toggling the breakout back", &after, &back);
+}
+
+/// Regression: `a` used to move the document under the reader, and worse than
+/// `s` did — fitting scales a diagram down by whatever factor its box demands,
+/// and an SVG with a `viewBox` sheds height by the same factor, so a tall
+/// diagram above the reader yanks everything below it upwards. Goes red if
+/// `Page::set_diagram_fit` drops its anchor.
+#[test]
+fn a_holds_the_reading_position() {
+    let Some(_g) = setup_guard() else { return };
+    let r = DiagramReader::launch("fitpos");
+    r.settled();
+    // Land *below* the diagram, so the height it sheds is height above the
+    // reader — the case that actually drags the page.
+    let before = r.scroll_to_prose();
+
+    r.h.key(&["a"]);
+    let fitted = r.h.wait_for_state("fit mode on", SETTLE, |s| s.diagram_fit);
+    assert_place_held("fitting diagrams with `a`", &before, &fitted);
+
+    r.h.key(&["a"]);
+    let back =
+        r.h.wait_for_state("fit mode off", SETTLE, |s| !s.diagram_fit);
+    assert_place_held("returning to intrinsic size", &fitted, &back);
 }
 
 #[test]

@@ -770,6 +770,28 @@ fn loaded_classes(view: &FakeViewport) -> String {
     list.to_string()
 }
 
+/// A script that can change a block's height must capture the reading anchor
+/// before it and restore it after (DESIGN D5a.0). Cheap unit-level guard for
+/// the invariant the `*_holds_the_reading_position` e2e tests prove end to end;
+/// this one fails in milliseconds if a toggle is written unanchored.
+fn assert_anchored(what: &str, script: &str) {
+    assert!(
+        script.contains("__jmnj_anchor"),
+        "{what}: not anchored — a height change must capture the reading \
+         position first (DESIGN D5a.0): {script}"
+    );
+    assert!(
+        script.contains("scrollBy"),
+        "{what}: captures an anchor but never restores it: {script}"
+    );
+    let capture = script.find("__jmnj_anchor").expect("capture present");
+    let restore = script.rfind("scrollBy").expect("restore present");
+    assert!(
+        capture < restore,
+        "{what}: the anchor must be captured before the change, not after: {script}"
+    );
+}
+
 #[test]
 fn s_flips_the_wide_block_class_and_leaves_the_document_alone() {
     // Opened but not yet finished, so the load is still on the recording: the
@@ -784,12 +806,15 @@ fn s_flips_the_wide_block_class_and_leaves_the_document_alone() {
     assert!(r.state().contains("\"wide\":true"));
 
     r.press('s');
-    assert_eq!(
-        eval_containing(&r.view, "jmnj-wide"),
-        "document.documentElement.classList.toggle('jmnj-wide', false);"
+    let script = eval_containing(&r.view, "jmnj-wide");
+    assert!(
+        script.contains("document.documentElement.classList.toggle('jmnj-wide', false);"),
+        "the toggle should flip the master class: {script}"
     );
+    assert_anchored("s / ToggleWide", &script);
     // The point of the class model: eligibility is already in the document, so
-    // the toggle costs no re-render and nothing moves vertically.
+    // the toggle costs no re-render. It still moves content — see
+    // `assert_anchored` above and DESIGN D5a.0.
     assert!(
         r.view.loads().is_empty(),
         "the toggle re-rendered: {:?}",
@@ -799,10 +824,12 @@ fn s_flips_the_wide_block_class_and_leaves_the_document_alone() {
 
     r.view.clear();
     r.press('s');
-    assert_eq!(
-        eval_containing(&r.view, "jmnj-wide"),
-        "document.documentElement.classList.toggle('jmnj-wide', true);"
+    let back = eval_containing(&r.view, "jmnj-wide");
+    assert!(
+        back.contains("document.documentElement.classList.toggle('jmnj-wide', true);"),
+        "the toggle should flip the master class back: {back}"
     );
+    assert_anchored("s / ToggleWide (back on)", &back);
     assert!(r.state().contains("\"wide\":true"));
 }
 
@@ -829,10 +856,12 @@ fn a_flips_the_diagram_fit_class_and_leaves_the_document_alone() {
     assert!(r.state().contains("\"diagram_fit\":false"));
 
     r.press('a');
-    assert_eq!(
-        eval_containing(&r.view, DIAGRAM_FIT_CLASS),
-        "document.documentElement.classList.toggle('jmnj-diagram-fit', true);"
+    let script = eval_containing(&r.view, DIAGRAM_FIT_CLASS);
+    assert!(
+        script.contains("document.documentElement.classList.toggle('jmnj-diagram-fit', true);"),
+        "the toggle should flip the fit class: {script}"
     );
+    assert_anchored("a / ToggleDiagramFit", &script);
     // Same contract `s` has: the rule is already in the stylesheet, so the
     // toggle costs no re-render.
     assert!(
@@ -844,10 +873,12 @@ fn a_flips_the_diagram_fit_class_and_leaves_the_document_alone() {
 
     r.view.clear();
     r.press('a');
-    assert_eq!(
-        eval_containing(&r.view, DIAGRAM_FIT_CLASS),
-        "document.documentElement.classList.toggle('jmnj-diagram-fit', false);"
+    let back = eval_containing(&r.view, DIAGRAM_FIT_CLASS);
+    assert!(
+        back.contains("document.documentElement.classList.toggle('jmnj-diagram-fit', false);"),
+        "the toggle should flip the fit class back: {back}"
     );
+    assert_anchored("a / ToggleDiagramFit (back off)", &back);
     assert!(r.state().contains("\"diagram_fit\":false"));
 }
 
