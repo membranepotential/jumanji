@@ -137,14 +137,34 @@ pipeline can later feed an export path (PDF/HTML) or a different front end.
 - **Highlight: syntect 5.3 + two-face** (bat's extended syntax/theme set).
   Proven, themeable, no JS. (tree-sitter-highlight: DIY per-language quality,
   no theme format.)
-- **Mermaid: merman 0.7** — pure-Rust reimplementation of Mermaid.js (native
+- **Mermaid: merman 0.8** — pure-Rust reimplementation of Mermaid.js (native
   parser, Rust ports of Dagre/fCoSE layout, 23+ diagram types, golden-snapshot
-  parity tests against Mermaid 11.15). Adopted by Zed for the same purpose.
+  parity tests against Mermaid 11.16). Adopted by Zed for the same purpose.
   Pre-1.0: parity gaps are possible, so diagram rendering errors must degrade
   gracefully (show the fence as a highlighted code block + error note).
   - Rejected: mmdc (needs Puppeteer + ~200 MB Chromium), QuickJS/boa + resvg
     (mermaid.js needs a layout-capable DOM — `getBBox()` — and resvg can't
     render `foreignObject`), kroki/mermaid.ink (network).
+  - **On a pre-1.0 alpha, deliberately (2026-09-13).** 0.7.0 could not lex a
+    `;` inside a quoted `subgraph` title — mermaid.js accepts it (its lexer
+    pushes a `string` state on `"` and swallows everything to the closing
+    quote), so this was a parity bug, not strictness, and it silently broke
+    real documents. There is no 0.7.x patch; 0.8.0-alpha.6 fixes it. **A parity
+    gap that eats a user's diagram outranks the stability of the version
+    number** — the graceful-degradation rule above is what makes an alpha
+    survivable here, and the diagram unit tests plus the CI instruction gate
+    are what make the bump checkable. `semicolon_in_quoted_subgraph_title_parses`
+    in `core::diagram` is the regression, red on 0.7.0.
+  - **The renderer is built lazily,** on the first mermaid fence rather than
+    per document: constructing it costs ~70 k instructions, and most documents
+    have no diagram, so the eager construction (0.7's too) was a fixed tax on
+    every render — visible as +4.6 % on the `prose_10k` bench and proportionally
+    less on larger ones (D13). Lazily, that bench sits 4.3 % *under* v1.8.0.
+  - **Parse failures are reported as `line:col`, not a byte offset.** merman
+    says `Unexpected character at 964`; nobody counts bytes. 0.8's
+    `RenderError::Parse` carries a structured `SourceSpan`, so `describe`
+    resolves it against the fence body and quotes the offending line. Columns
+    count characters, not bytes — a column is what the author sees.
 - **Serving:** the implementation went with a fully self-contained page instead
   of the `app://` scheme sketched here — CSS is inlined (`style-src
   'unsafe-inline'`), math fonts are base64 `data:` URIs (D8), and there is no URI
@@ -310,6 +330,108 @@ echo shows the page holding the selection with `▸` on it, and repeated `Tab`
 walks the pages in order — so every candidate is reachable, not just the first
 few. The header is `[candidate/total] (page/pages)`; the page counter is
 omitted when everything fits on one page.
+
+### D5a.1: Wide blocks — pictures get the window, prose keeps the measure (2026-09-13)
+
+Bounded measure is right for prose and wrong for pictures. A 1865 px diagram
+read through a 912 px column is mostly scrollbar while the rest of a wide
+monitor sits empty. Selected block kinds therefore break out of the reading
+column to the window width less a gutter:
+
+```css
+width:       calc(100vw - 2 * var(--wide-gutter));
+margin-left: calc(50% - 50vw + var(--wide-gutter));
+```
+
+- **Margins, not CSS grid.** Grid items do not collapse margins, so making
+  `main` a grid would change the vertical rhythm of every block in every
+  document to buy a horizontal effect.
+- **No media query, because the rule cancels itself out.** `50%` resolves
+  against `main`'s content box, `50vw` against the viewport. On a window
+  narrower than the column `main` is `width: 100%`, so its content box is
+  `100vw - 2 * --main-pad-x`; with `--wide-gutter == --main-pad-x` the margin
+  computes to exactly 0 and the width back to exactly that content box —
+  today's geometry to the pixel, so there is no narrow-window regression to
+  guard against.
+- **The no-page-h-scroll invariant holds either way.** If `100vw` includes a
+  classic scrollbar, the element is offset half a scrollbar left and half a
+  scrollbar narrow of ideal, which the 2 × 1.5 rem gutter absorbs. The blocks
+  keep their own `overflow-x: auto`, so anything wider still scrolls inside the
+  (now much larger) box, never the page.
+- **Only top-level blocks break out** (`main.markdown-body > …`). The argument
+  above rests on `50%` resolving against a containing block centred on the
+  viewport — true of `main` and of a `<p>` in it, false for a list item, whose
+  `ul` indent of 1.6em would push a broken-out table past the gutter and give
+  the page a horizontal scrollbar. A block inside a list, callout or blockquote
+  keeps in-column geometry, which is also the right reading of it: those are
+  bounded contexts.
+
+**Two class levels on `<html>`, both emitted by the pipeline:** one
+`jmnj-wide-<kind>` per kind the `wide-blocks` option makes *eligible*, and the
+master `jmnj-wide` saying the breakout is *on*. Only the master is touched at
+runtime (`s` → `Action::ToggleWide`), so the toggle costs a class flip, no
+re-render and no vertical movement — the same contract `html.dark` has with
+recolor. A changed *set* re-renders, which is the honest way to change what the
+document declares. `WIDE_CLASS` and each kind's class name live in
+`core::config` (the pipeline emits them, `controller::scripts` flips them; core
+cannot depend on the controller), and a pipeline test asserts the stylesheet
+carries a rule for every class the Rust emits, so the two cannot drift.
+
+Defaults: `wide-blocks = diagrams,fences,tables`, `wide = true`. `code` and
+`math` are configurable but ship off — code is text, where a bounded measure
+helps, and centred display math reads wrong full-bleed.
+
+Consequence for the shell: the recolor class must **join** the pipeline's class
+list rather than arrive as a second `class` attribute, which the parser would
+drop — taking the breakout with it. `load_document` anchors its rewrite on
+`pipeline::HTML_OPEN` / `HTML_CLASS_OPEN` so the tag's shape has one spelling.
+`GetState` gained `diagram_box_width` (the `.mermaid` *box*, not the SVG in it)
+because the existing `diagram_width` is the SVG at intrinsic width and does not
+move when the box widens — there was otherwise no observable for the feature.
+
+### D5a.2: Diagram fit and per-diagram zoom (2026-09-13)
+
+The breakout (D5a.1) gives a diagram the window; these two give the reader
+control of the picture inside it.
+
+**`a`** (zathura's "adjust to best fit", previously unbound) toggles a
+document-wide `jmnj-diagram-fit` class capping `.mermaid svg` at
+`min(100%, var(--dw))` — `min()`, so a diagram *smaller* than its box is never
+blown up. Same two-part contract as `jmnj-wide`: the pipeline emits it from
+`diagram-fit` (default **false** — D5a decided intrinsic, and the breakout
+already recovers most of the width), the runtime toggle is a class flip.
+
+**`Ctrl`+wheel over a diagram** scales that diagram instead of the page,
+multiplicatively in `zoom-step` steps, clamped 0.25×…8×, through a per-element
+`--dz` the stylesheet multiplies into `--dw`. Transient DOM state, not session
+state — a look-closer gesture, unlike D5a's session-scoped page zoom — so the
+DOM is its only home and a reload drops it. `=` clears it along with both zoom
+axes, inside the same anchored capture, because a diagram left at 4× after a
+reset would make `=` a lie.
+
+**The routing had to be shell-side and synchronous.** GTK dispatches the scroll
+capture-phase from the toplevel before WebKit sees it (D4), so a page `wheel`
+listener never fires, and a per-tick round trip is unaffordable. The page
+instead posts a pointer-over-diagram index through the existing
+`window.__jmnj_post` bridge (`message::DIAGRAM_HOVER`, a `mouseover`/`mouseout`
+pair in `scripts.rs`) and the controller caches it; each tick reads the cache.
+No `Viewport` method — this is not a native capability. A stale cache costs one
+tick going to the wrong target, never correctness.
+
+**Two consequences.** Scaling up must not grow the document or the page: at
+`--dz != 1` the box takes `max-height: 80vh` and both scrollers (plus
+`text-align: left`, since a centred child wider than its scroller has an
+unreachable left edge); at 1 the geometry is untouched. And merman writes the
+intrinsic width onto the SVG root as an **inline** `max-width:<N>px` — the very
+declaration `--dw` is parsed from — which clamped every scale above 1 back to
+intrinsic. The fix is at the source: `core::diagram` now **moves** that
+declaration onto `--dw` rather than copying it, deleting the inline one (root
+tag only; a `<foreignObject>` label's own styles are left alone). The
+alternative, `max-width: none !important`, would also have outranked the user's
+themes — and those are emitted last precisely so they win.
+
+Fit wins over `--dz` throughout, box included: fit is a statement that
+everything must be visible. The scale survives and returns when fit goes off.
 
 ### D6: Extensibility — pipeline seams, not a plugin ABI
 

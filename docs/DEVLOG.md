@@ -2,6 +2,116 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-09-13 — diagrams get the whole window, and merman stops eating them
+
+Two complaints, one root cause between them: the reader was making wide
+pictures hard to read. A 1865 px mermaid diagram was being scrolled through a
+~910 px porthole while a thousand pixels of window sat empty, and some
+diagrams did not render at all.
+
+**Wide blocks (DESIGN D5a.1).** Bounded measure is right for prose and wrong
+for pictures. Selected block kinds now break out of the reading column to the
+window width less a gutter — `width: calc(100vw - 2 * --wide-gutter)` and
+`margin-left: calc(50% - 50vw + --wide-gutter)`.
+
+Three things about that mechanism are load-bearing. It uses **margins, not CSS
+grid**: grid items do not collapse margins, so making `main` a grid would have
+changed the vertical rhythm of every block in every document to buy a
+horizontal effect. It needs **no media query**, because it cancels itself out —
+on a window narrower than the column `main` is `width: 100%`, so with
+`--wide-gutter == --main-pad-x` the margin computes to exactly 0 and the width
+back to exactly the content box, today's geometry to the pixel. And only
+**top-level** blocks break out: the whole argument rests on `50%` resolving
+against a containing block centred on the viewport, which holds for `main` and
+a `<p>` in it but not for a list item, whose 1.6em indent would push a
+broken-out table past the gutter and give the page a horizontal scrollbar.
+
+Two class levels on `<html>`, both emitted by the pipeline: one
+`jmnj-wide-<kind>` per kind the `wide-blocks` option makes *eligible*, and the
+master `jmnj-wide` saying the breakout is *on*. Only the master moves at
+runtime (`s`, `Action::ToggleWide`), so the toggle is a class flip with no
+re-render and no vertical movement — the contract `html.dark` already has with
+recolor. A changed *set* re-renders, which is the honest way to change what the
+document declares. Defaults: `wide-blocks = diagrams,fences,tables`, `wide =
+true`. Config-only kinds `code` and `math` exist and ship off; code is text,
+where bounded measure helps, and centred display math reads wrong full-bleed.
+
+One incidental fix fell out: `load_document` used to splice the recolor class
+in as a *second* `class` attribute on `<html>`. With the pipeline now emitting
+one of its own, a duplicate would have been dropped by the parser — taking the
+breakout with it. The recolor class joins the existing list instead, anchored
+on `HTML_OPEN`/`HTML_CLASS_OPEN` so there is one spelling of the tag's shape.
+
+**merman 0.7 → 0.8.0-alpha.6 (DESIGN D3).** Diagrams were failing with
+`Diagram parse error (flowchart-v2): LexError { "Unexpected character at 964" }`
+on documents that are valid mermaid. Bisected to a lexer bug: merman 0.7 could
+not read a `;` — or a `]` — inside a **quoted `subgraph` title**. mermaid.js
+accepts both (its lexer pushes a `string` state on `"` and swallows everything
+to the closing quote), and the same characters in a *node* label were always
+fine, so this was a parity gap, not strictness. A sweep of the rest of ASCII
+punctuation found no others: those two were the whole hole.
+
+There is no 0.7.x patch, and 0.8 is still an alpha — but **a parity gap that
+eats a user's diagram outranks the stability of a version number**, and the
+graceful-degradation rule is what makes an alpha survivable. 0.8.0-alpha.6
+renders the reporting document clean. The port is contained to
+`core::diagram`: `HeadlessRenderer` → `Renderer` + `RenderRequest::svg`,
+feature `render` → `complete-svg`, and the per-fence diagram id moves from a
+mutated renderer field into the operation-scoped `SvgRequest`. The SVG root
+still carries `max-width:<N>px`, so D5a's `--dw` intrinsic-width model is
+untouched. The dependency tree got *smaller*: 400 → 344 packages.
+
+Parse failures now read as `line:col` with the offending line quoted, not as a
+raw byte offset — nobody counts bytes. 0.8's `RenderError::Parse` carries a
+structured `SourceSpan`, so this is resolved properly rather than scraped out
+of a message. Columns count characters, not bytes.
+
+**A fixed cost the bench found.** The first A/B against v1.8.0 read −47 % on
+`mermaid` and −46 % on `demo` (merman 0.8 renders a diagram in half the
+instructions) but **+4.6 % on `prose_10k`** — a document with no diagram in it.
+The pattern across the suite gave it away as a *fixed* per-render cost of
+~70 k instructions: 0.1 % of `prose_500k`, 1 % of `math_heavy`, nothing on
+`code_heavy`. It was `transform_mermaid` constructing its `Renderer`
+eagerly — on every document, diagram or not, in 0.7 as well. Built lazily on the
+first mermaid fence instead, `prose_10k` turns from +4.6 % to **−4.3 %**: now
+cheaper than the release, because the old eager cost is gone too.
+
+**Evidence.** 383 lib + 2 bin + 53 e2e green. The e2e goes red without the
+breakout CSS (`box 252 vs column 300`) — checked by disabling the two
+declarations, not assumed. `punctuation_in_quoted_subgraph_title_parses` is red
+on 0.7.0. A pipeline test asserts the stylesheet carries a rule for every class
+the Rust emits, so the two cannot drift. Each new toggle has a test that goes
+red when its rule is disabled — checked by disabling, not assumed. Pipeline
+instruction counts vs v1.8.0
+after the lazy fix: `mermaid` −46.7 %, `demo` −45.7 %, `prose_10k` −4.3 %,
+`wikilinks` −1.2 %, `math_heavy` −0.8 %, `table_heavy` −0.3 %, `code_heavy`
+−0.0 %, `prose_500k` +0.3 % — every bench at or under the 105 % gate, most well
+under the baseline. Startup on `demo/demo.md` −5 % to −9 % across two runs.
+
+**Diagram fit and per-diagram zoom (DESIGN D5a.2).** Landed the same day. `a`
+cycles every diagram between fit-to-width and intrinsic; `Ctrl`+wheel over a
+diagram scales *that* diagram, 0.25×…8×, leaving the page alone. The routing had
+to be shell-side and synchronous, because GTK takes the scroll capture-phase
+before WebKit sees it (D4) and a page `wheel` listener therefore never fires: the
+page posts a pointer-over-diagram index through the existing `__jmnj_post`
+bridge, the controller caches it, and each tick reads the cache. A stale cache
+costs one tick going to the wrong target, never correctness. `=` clears the
+scales along with both zoom axes, inside the same anchored capture.
+
+The e2e caught the thing that would otherwise have shipped broken: **every scale
+above 1 was silently clamped back to intrinsic.** merman writes the intrinsic
+width onto the SVG root as an *inline* `max-width:<N>px` — the same declaration
+`--dw` is parsed out of — and an inline declaration outranks every selector. The
+first fix was `max-width: none !important`, which works and was wrong: user
+themes are emitted last precisely so they win the cascade, and an `!important`
+in the base sheet beats them too. Fixed at the source instead — `wrap_svg` now
+**moves** the declaration onto `--dw` rather than copying it, deleting the inline
+one (root tag only, so a `<foreignObject>` label's own styles survive). The
+stylesheet is back to zero `!important`.
+
+**Next.** Nothing outstanding on diagrams. Worth watching: merman 0.8 is an
+alpha, so track its releases and move to 0.8.0 stable when it lands.
+
 ## 2026-09-02/03 — three layers, CI, and a performance guard that can tell
 
 The day after the macOS proposal was evaluated (entry below), the owner-side

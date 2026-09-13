@@ -11,35 +11,37 @@ content pipeline, modal vim/zathura keys, Obsidian dialect. Linux-first.
 
 Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
-- **macOS port (issue #1)** — evaluated 2026-09-02 in
-  `docs/research/05-macos-port.md`: feasible, sensible under conditions
-  (extraction first, tier-2 cfg-gated mac shell, parity gaps named). Owner-side
-  work is three items, in order: CI workflows → controller extraction →
-  mac scaffold branch. Decided 2026-09-02: extraction first, traits + generic
-  `Session`, Arch container for CI, `cfg(target_os)` for the mac shell.
-- **controller-extraction** (on `main`, main checkout) — stage the §5.2
-  plan: scripts seam → traits → session move → fake toolkit tests → docs.
-  State: **stages 1–3 landed** (session → `controller::session`, GTK shell
-  → `shell/gtk/`, wiring only; 50/50 e2e, reviewed, A/B flat). **Stage 4
-  (fake toolkit + 47 controller unit tests) in verification + review.** Docs
-  (DESIGN D2a/D13, CLAUDE, TESTING, README) reconciled.
-- **perf guard** — `.github/workflows/{ci,bench}.yml` (Arch container; fmt/
-  clippy/unit, e2e, criterion + startup trail on `gh-pages`, alerts on PRs)
-  and `scripts/bench-compare.sh` (local A/B of a ref vs. the tree). State:
-  **e2e proven in CI (50/50 in an Arch container)**; trail carried as a
-  workflow artifact chain (no branch, no Pages — the Pages experiment is
-  torn down). `bench-compare.sh` interleaves both halves; local A/B vs
-  v1.8.0 flat at startup. Next: confirm the first artifact-trail run.
+- **macOS port (issue #1)** — `docs/research/05-macos-port.md`; extraction
+  first, tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
+- **perf guard** — `.github/workflows/{ci,bench}.yml` (Arch container) and
+  `scripts/bench-compare.sh`. State: **e2e proven in CI (53/53)**; trail
+  is a workflow artifact chain (no branch, no Pages). Next: confirm the first
+  artifact-trail run.
 
 ## Done (recent)
 
+- **wide blocks + merman 0.8 (2026-09-13, uncommitted)** — diagrams, fences and
+  tables break out of the reading column to window width (DESIGN D5a.1); `s`
+  toggles by flipping one `<html>` class, no re-render. merman 0.7 → 0.8.0-
+  alpha.6 fixes a lexer parity bug that ate diagrams whose quoted `subgraph`
+  title held a `;` or `]`; parse errors now read as `line:col`. 438 tests green;
+  the e2e goes red without the breakout CSS. Perf vs v1.8.0: `mermaid` −47 %,
+  `demo` −46 %, everything else at or under baseline (a lazily-built renderer
+  removed a ~70 k-instruction fixed cost the bench caught).
+- **diagram fit + zoom (2026-09-13, uncommitted)** — `a` cycles fit-to-width /
+  intrinsic; Ctrl+wheel over a diagram scales that diagram, not the page
+  (DESIGN D5a.2), routed shell-side off a cached hover flag because GTK takes
+  the scroll before WebKit (D4). Stripping merman's inline `max-width` at the
+  source got the stylesheet back to zero `!important`.
+- **controller extraction (2026-09-02..12)** — session → `controller::session`,
+  GTK shell → `shell/gtk/` (wiring only), fake toolkit + 51 display-free tests;
+  DESIGN D2a/D13, CLAUDE, TESTING, README reconciled. 50/50 e2e, A/B flat.
 - **e2e restore-gate hole closed (2026-08-12)** — growing fixture plus
   `reveal_scroll_y` / `reveal_failsafe`; tests go red without the gate.
 - **Perf pass (2026-08-12)** — criterion benches + headless startup timing via
   a lib/bin split; parallel syntect, mermaid renderer reuse, startup double
   load fixed, native-scroll statusbar updates.
-- **v1.7.0** — session-scoped zoom (DESIGN D5a); document-switch flash gone
-  (restore gate waits for a steady `scrollHeight`). User-confirmed.
+- **v1.7.0** — session-scoped zoom (DESIGN D5a); document-switch flash gone.
 - **v1.6.0** — opening position rides into the load (D12); `--background`.
 - **v1.2 – v1.5** — breadcrumb, `:` completion, Obsidian dialect, Neovim sync.
 
