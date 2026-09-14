@@ -4,14 +4,19 @@
 //! Checks, in the order they run:
 //!   A  init-script + IPC round trip (`window.__jmnj_post` over `window.ipc`)
 //!   B  `evaluate_script_with_callback` delivers a JSON-serialized object
-//!   F  custom protocol serves the document *and* a document-relative image
+//!   F  custom protocol serves the document *and* a document-relative image;
+//!      also: can that jmnj:// origin load an absolute file:// image? (no)
 //!   D  CSS Custom Highlight API present and functional
 //!   C  `WebView::zoom` reaches `WKWebView.pageZoom` and reflows the viewport
 //!   E  focus handoff: is the webview first responder without a click, and
 //!      does a synthesized keyDown reach the in-page capture listener?
-//!   G1 (control) objc `loadHTMLString:baseURL:` with a file:// base — does a
-//!      document-relative local image load? (Result on macOS 26: yes.)
-//!   G2 (control) wry `load_html`, which has no base-URL parameter
+//!   G1 (control) objc `loadHTMLString:baseURL:` with a file:// base — do a
+//!      document-relative image and an absolute file:// image in another
+//!      directory load? (Result on macOS 26: yes, both.)
+//!   G2 (control) wry `load_html`, which has no base-URL parameter (neither)
+//!
+//! `controls/filebase.swift` asks the G1/G2 question again without wry or
+//! objc2, on a raw WKWebView with a default configuration.
 //!
 //! Eval results and timers are routed back to the main thread through the
 //! tao `EventLoopProxy`, the same parking pattern `controller/toolkit.rs`
@@ -40,7 +45,8 @@ const HTML: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"
 <body><main>
 <h1 id="top">Spike document</h1>
 <p>The quick brown fox jumps over the lazy dog. Find me: <b>needle</b>.</p>
-<img src="img.png" alt="one pixel">
+<img id="rel" src="img.png" alt="one pixel, document-relative">
+<img id="abs" src="__ABS__" alt="one pixel, absolute file:// in another directory">
 <p>Second paragraph with another needle in it.</p>
 </main></body></html>"#;
 
@@ -142,9 +148,18 @@ fn send_key(webview: &WebView, ch: &str, code: u16) {
     app.sendEvent(&ev);
 }
 
+/// `naturalWidth` of the relative (`#rel`) and absolute (`#abs`) test images
+/// (-1 if an element is missing), plus whether every image has settled.
+/// Synchronous on purpose: wry evaluates through
+/// `evaluateJavaScript:completionHandler:`, which does not await a Promise;
+/// the probes run several hundred ms after the load, which is plenty for a
+/// 70-byte local PNG, and `settled` says so explicitly.
 fn img_width_js(extra: &str) -> String {
     format!(
-        "({{img: (() => {{ const i = document.querySelector('img'); return i ? i.naturalWidth : -1; }})(){extra}}})"
+        "(() => {{ \
+           const w = id => {{ const i = document.getElementById(id); return i ? i.naturalWidth : -1; }}; \
+           return {{img: w('rel'), abs: w('abs'), settled: [...document.images].every(i => i.complete){extra}}}; \
+         }})()"
     )
 }
 
@@ -155,7 +170,16 @@ fn main() {
     // A *different* file name than the protocol serves, so a cache hit on
     // jmnj://doc/img.png cannot masquerade as a file:// load.
     std::fs::write(fixture_dir.join("img2.png"), PNG).unwrap();
-    let html_file_base = HTML.replace("img.png", "img2.png");
+    // The absolute image lives in a *different* directory than the base, so
+    // it also tells whether read access is confined to the base directory.
+    let other_dir = fixture_dir.join("other");
+    std::fs::create_dir_all(&other_dir).unwrap();
+    std::fs::write(other_dir.join("abs.png"), PNG).unwrap();
+    let abs_url = format!("file://{}", other_dir.join("abs.png").display());
+    let html_proto: &'static str = Box::leak(HTML.replace("__ABS__", &abs_url).into_boxed_str());
+    let html_file_base = HTML
+        .replace("img.png", "img2.png")
+        .replace("__ABS__", &abs_url);
 
     let event_loop: EventLoop<Msg> = EventLoopBuilder::<Msg>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -178,7 +202,7 @@ fn main() {
             let (status, body, mime): (u16, Cow<'static, [u8]>, &str) = match path.as_str() {
                 "/index.html" | "/" => (
                     200,
-                    Cow::Borrowed(HTML.as_bytes()),
+                    Cow::Borrowed(html_proto.as_bytes()),
                     "text/html; charset=utf-8",
                 ),
                 "/img.png" => (200, Cow::Borrowed(PNG), "image/png"),
@@ -285,7 +309,10 @@ fn main() {
                 results.record(
                     "F custom-protocol",
                     Some(v["img"] == 1),
-                    format!("img.naturalWidth={} for <img src=\"img.png\"> under jmnj://doc/", v["img"]),
+                    format!(
+                        "under jmnj://doc/: relative img.naturalWidth={} (served by the protocol); absolute file:// img.naturalWidth={} (0 = a jmnj:// origin cannot load file:// resources)",
+                        v["img"], v["abs"]
+                    ),
                 );
                 results.record(
                     "D css-highlight",
@@ -361,17 +388,16 @@ fn main() {
                 after(&proxy, 800, 6);
             }
             Event::UserEvent(Msg::Tick(6)) => {
-                eval_json(&webview, &proxy, 3, &img_width_js(", base: document.baseURI, src: document.querySelector('img').src"));
+                eval_json(&webview, &proxy, 3, &img_width_js(", base: document.baseURI"));
             }
             Event::UserEvent(Msg::Eval(3, json)) => {
                 let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
-                let w = v["img"].as_i64().unwrap_or(-2);
                 results.record(
                     "G1 file:// base via objc loadHTMLString:baseURL:",
                     None,
                     format!(
-                        "img.naturalWidth={w} for {} (1 = WKWebView DID load a relative local image from a file:// base)",
-                        v["src"]
+                        "relative img.naturalWidth={}, absolute file:// (other dir) img.naturalWidth={}, baseURI={} (1/1 = WKWebView loads local images from a file:// base, not confined to the base dir)",
+                        v["img"], v["abs"], v["base"]
                     ),
                 );
                 // G2: wry's own load_html has no base-URL parameter at all.
@@ -379,15 +405,17 @@ fn main() {
                 after(&proxy, 800, 7);
             }
             Event::UserEvent(Msg::Tick(7)) => {
-                eval_json(&webview, &proxy, 4, &img_width_js(", base: document.baseURI, src: document.querySelector('img').src"));
+                eval_json(&webview, &proxy, 4, &img_width_js(", base: document.baseURI"));
             }
             Event::UserEvent(Msg::Eval(4, json)) => {
                 let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
-                let w = v["img"].as_i64().unwrap_or(-2);
                 results.record(
                     "G2 wry load_html (no base)",
                     None,
-                    format!("img.naturalWidth={w}, baseURI={}, img.src={}", v["base"], v["src"]),
+                    format!(
+                        "relative img.naturalWidth={}, absolute file:// img.naturalWidth={}, baseURI={}",
+                        v["img"], v["abs"], v["base"]
+                    ),
                 );
                 after(&proxy, 0, 9);
             }
