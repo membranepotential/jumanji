@@ -1,0 +1,17 @@
+[package]
+name = "macos-wkwebview-spike"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSEvent", "NSWindow", "NSView", "NSResponder", "NSGraphicsContext", "NSGraphics"] }
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSURL", "NSGeometry", "NSDate"] }
+objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "WKNavigation"] }
+serde_json = "1.0.151"
+tao = "0.37"
+wry = "0.57"
+
+# Standalone: not a member of the jumanji package above, so cargo must not
+# try to adopt it as a workspace member.
+[workspace]
