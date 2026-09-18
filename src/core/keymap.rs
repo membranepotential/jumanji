@@ -272,8 +272,9 @@ impl Default for Keymap {
 
         // The document graph (DESIGN D14). `g` would be the mnemonic, but it
         // prefixes `gg`; `t` is free and the graph is drawn as a tree. Inside,
-        // `jk` walk a column, `hl` collapse/ascend and expand/descend (the TOC's
-        // semantics), `v` switches the view, and the zoom keys zoom the graph.
+        // `hjkl` move (`l` into a folded node unfolds it), `Space` folds, `v`
+        // switches the view, and the zoom keys zoom the graph
+        // (docs/graph/interaction.md, "Gestures").
         km.bind(n, c('t'), ToggleGraph);
         let g = Mode::Graph;
         km.bind(g, c('t'), ToggleGraph);
@@ -281,6 +282,11 @@ impl Default for Keymap {
         km.bind(g, c('k'), GraphPrevious);
         km.bind(g, c('h'), GraphParent);
         km.bind(g, c('l'), GraphChild);
+        km.bind(
+            g,
+            KeySequence::single(KeyPress::new(Key::Space, false, false)),
+            GraphFold,
+        );
         km.bind(g, c('v'), GraphToggleView);
         // `:` stays reachable over the graph, so `:set graph-view` can change
         // what is on screen.

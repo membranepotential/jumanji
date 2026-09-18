@@ -640,7 +640,7 @@ fn an_unbound_key_does_not_reach_the_page_behind_the_graph() {
     assert_eq!(r.press('z'), KeyOutcome::Consumed);
 }
 
-/// The graph fields of the state snapshot: view, selected note, item count.
+/// The graph fields of the state snapshot: view, selected node, item count.
 fn graph_state(r: &Reader) -> (String, String, u64) {
     let v: serde_json::Value = serde_json::from_str(&r.state()).expect("state is JSON");
     (
@@ -659,7 +659,7 @@ fn the_state_reports_the_open_graph() {
     let (view, selected, items) = graph_state(&r);
     assert_eq!(view, "links");
     assert_eq!(r.chrome.message(), "Graph: links");
-    assert!(selected.ends_with("doc.md"), "the current note: {selected}");
+    assert!(selected.ends_with("doc.md"), "the current node: {selected}");
     assert_eq!(items, 2, "doc.md and its one link");
     r.press('t');
     assert_eq!(graph_state(&r).2, 0);
@@ -699,15 +699,17 @@ fn set_graph_view_re_lays_out_an_open_graph() {
     assert_eq!(graph_state(&r).0, "tree");
 }
 
-/// A route `doc.md → other.md` where doc.md also links a note before and one
-/// after other.md — the two clusters — with the graph open on other.md.
-fn with_clusters() -> Reader {
+/// A route `doc.md → other.md` where doc.md also links x.md before other.md
+/// and y.md after it — other.md's siblings — and x.md links z.md. The graph
+/// is open on other.md. Nodes: doc 0, x 1, other 2, y 3, z 4.
+fn with_siblings() -> Reader {
     let r = Reader::open_with(
         "# Doc\n\n[x](x.md) [other](other.md) [y](y.md)\n",
         |vault| {
             std::fs::write(vault.join("other.md"), "# Other\n").expect("write other");
-            std::fs::write(vault.join("x.md"), "# X\n").expect("write x");
+            std::fs::write(vault.join("x.md"), "# X\n\n[z](z.md)\n").expect("write x");
             std::fs::write(vault.join("y.md"), "# Y\n").expect("write y");
+            std::fs::write(vault.join("z.md"), "# Z\n").expect("write z");
         },
     );
     r.finish_load();
@@ -719,66 +721,92 @@ fn with_clusters() -> Reader {
 }
 
 #[test]
-fn l_on_a_cluster_expands_it_and_h_collapses_it() {
-    let r = with_clusters();
-    let (_, _, closed) = graph_state(&r);
-    // other.md's column: the cluster above it, then other.md.
+fn a_route_steps_siblings_are_on_screen_from_the_start() {
+    let r = with_siblings();
+    let (_, selected, items) = graph_state(&r);
+    assert!(selected.ends_with("other.md"));
+    assert_eq!(items, 4, "doc, other, and other's siblings x and y");
+    assert!(r.view.evaled(">+1"), "x.md starts folded over z.md");
+}
+
+#[test]
+fn space_folds_and_unfolds_the_selected_node_and_h_never_folds() {
+    let r = with_siblings();
+    r.press('h');
+    let (_, selected, items) = graph_state(&r);
+    assert!(selected.ends_with("doc.md"), "h moved to the parent");
+    assert_eq!(items, 4, "and folded nothing");
+    r.view.clear();
+    r.press_key(Key::Space);
+    assert!(r.view.evaled("update("));
+    assert_eq!(
+        graph_state(&r).2,
+        2,
+        "the siblings fold away, the route stays"
+    );
+    assert!(graph_state(&r).1.ends_with("doc.md"));
+    r.press_key(Key::Space);
+    assert_eq!(graph_state(&r).2, 4);
+    r.press('h');
+    assert_eq!(graph_state(&r).2, 4, "h on the root: still nothing folds");
+}
+
+#[test]
+fn l_unfolds_a_folded_node_and_enters_it() {
+    let r = with_siblings();
+    // other.md's column: x.md above it.
     r.press('k');
-    assert_eq!(graph_state(&r).1, "", "a cluster is not a note");
+    assert!(graph_state(&r).1.ends_with("x.md"));
     r.view.clear();
     r.press('l');
     assert!(r.view.evaled("update("));
-    assert_eq!(graph_state(&r).2, closed + 1, "x.md is on screen");
-    r.press('l');
-    assert!(graph_state(&r).1.ends_with("x.md"));
-    r.press('h');
-    assert_eq!(graph_state(&r).1, "", "back on the cluster");
-    r.press('h');
-    assert_eq!(graph_state(&r).2, closed);
+    let (_, selected, items) = graph_state(&r);
+    assert!(selected.ends_with("z.md"), "{selected}");
+    assert_eq!(items, 5);
 }
 
 #[test]
-fn enter_on_a_cluster_expands_it_rather_than_opening_anything() {
-    let r = with_clusters();
-    let (_, _, closed) = graph_state(&r);
-    r.press('j');
+fn a_click_on_a_handle_toggles_that_node() {
+    let r = with_siblings();
+    r.message(message::GRAPH_FOLD, "0.1");
+    let (_, selected, items) = graph_state(&r);
+    assert!(selected.ends_with("x.md"), "the clicked node is selected");
+    assert_eq!(items, 5, "and unfolded");
+    r.message(message::GRAPH_FOLD, "0.1");
+    assert_eq!(graph_state(&r).2, 4, "and folded again");
+    r.message(message::GRAPH_FOLD, "0.9");
+    assert_eq!(graph_state(&r).2, 4, "an unknown key is ignored");
+    // A node without links has no handle; its "click" does nothing.
+    r.message(message::GRAPH_FOLD, "0.3");
+    assert_eq!(graph_state(&r).2, 4);
+}
+
+#[test]
+fn enter_opens_a_sibling() {
+    let r = with_siblings();
+    r.press('k');
     r.view.clear();
     r.press_key(Key::Enter);
-    assert!(r.view.loads().is_empty());
-    assert_eq!(mode(&r), "graph");
-    assert_eq!(graph_state(&r).2, closed + 1, "y.md is on screen");
-}
-
-#[test]
-fn a_click_on_a_cluster_expands_it() {
-    let r = with_clusters();
-    let (_, _, closed) = graph_state(&r);
-    r.press('k');
-    let v: serde_json::Value = serde_json::from_str(&r.state()).unwrap();
-    assert_eq!(v["graph_selected"], "");
-    r.press('j');
-    // doc.md's cluster above, by key (doc.md is node 0).
-    r.message(message::GRAPH_EXPAND, "0.a");
-    assert_eq!(graph_state(&r).2, closed + 1);
-    r.message(message::GRAPH_EXPAND, "0.9");
-    assert_eq!(graph_state(&r).2, closed + 1, "an unknown key is ignored");
+    let loads = r.view.loads();
+    assert_eq!(loads.len(), 1);
+    assert!(loads[0].1.ends_with("x.md"));
+    assert_eq!(mode(&r), "normal");
 }
 
 #[test]
 fn a_click_on_an_item_a_re_layout_removed_is_dropped() {
-    let r = with_clusters();
-    r.message(message::GRAPH_EXPAND, "0.a");
-    // x.md (node 1) is on screen inside the cluster; the page is told so.
-    r.message(message::GRAPH_SELECT, "0.1");
-    assert!(graph_state(&r).1.ends_with("x.md"));
-    r.press('h');
-    r.press('h');
+    let r = with_siblings();
+    r.message(message::GRAPH_FOLD, "0.1");
+    // z.md (node 4, under x) is on screen; the page is told so.
+    r.message(message::GRAPH_SELECT, "0.1.4");
+    assert!(graph_state(&r).1.ends_with("z.md"));
+    r.message(message::GRAPH_FOLD, "0.1");
     r.press('j');
     assert!(graph_state(&r).1.ends_with("other.md"));
-    // A click on x.md posted before the collapse landed arrives after it: it
+    // A click on z.md posted before the fold landed arrives after it: it
     // names nothing now, and must select neither whatever took its index nor
     // a stand-in for it.
-    r.message(message::GRAPH_SELECT, "0.1");
+    r.message(message::GRAPH_SELECT, "0.1.4");
     assert!(
         graph_state(&r).1.ends_with("other.md"),
         "the selection stays"
@@ -813,6 +841,28 @@ fn ctrl_wheel_zooms_the_graph_and_not_the_page() {
     assert!(r.view.zoom_levels().is_empty());
     r.press('+');
     assert!(r.view.zoom_levels().is_empty());
+}
+
+#[test]
+fn ctrl_wheel_zooms_the_graph_about_the_pages_own_pointer() {
+    // The shell's pointer is in toolkit px, which WebKit need not lay the page
+    // out in (a 2:1 screen scale has been seen); converting it gave a zoom
+    // that "shifts the pan". The graph zooms about the pointer the page itself
+    // saw, so the controller passes no coordinates at all.
+    let r = with_graph();
+    r.controller.on_pointer_moved(612.0, 344.0);
+    r.view.clear();
+    r.wheel_zoom(-1.0, false);
+    assert!(r.view.evaled(", 'pointer');"), "about the page's pointer");
+    assert!(!r.view.evaled("612") && !r.view.evaled("306"));
+    for key in ['-', '+'] {
+        r.view.clear();
+        r.press(key);
+        assert!(
+            r.view.evaled(", 'selection');"),
+            "the keys zoom about the selection"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

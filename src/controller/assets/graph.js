@@ -1,12 +1,13 @@
-// The document-graph overlay (DESIGN D14). Viewport glue in the D12 sense:
-// the scene arrives as finished SVG from `core::graph`; this only puts it on
-// screen, pans and zooms it, swaps level-of-detail classes, and reports
-// clicks. The controller owns the selection and the layout: a click calls
-// `post.select(key)`, a click on a cluster or a `+n` badge `post.expand(key)`,
-// a double-click `post.open(key)` (all built in `scripts.rs` over the shell's
-// post seam; an item's key survives re-layouts, its index does not), and the
-// controller answers through `window.__jmnj_graph.select(i)`, or
-// `update(svg, i)` after a re-layout.
+// The document-graph overlay (DESIGN D14; the interaction is specified in
+// docs/graph/interaction.md). Viewport glue in the D12 sense: the scene
+// arrives as finished SVG from `core::graph`; this only puts it on screen,
+// pans and zooms it, swaps level-of-detail classes, draws a peek, and reports
+// clicks. The controller owns the selection, the folds and the layout: a click
+// on a pill calls `post.select(key)`, a click on a fold handle
+// `post.fold(key)`, a double-click `post.open(key)` (all built in `scripts.rs`
+// over the shell's post seam; an item's key survives re-layouts, its index
+// does not), and the controller answers through `window.__jmnj_graph.select(i)`,
+// or `update(svg, i, anchor)` after a re-layout.
 //
 // Called as `(GRAPH_JS)(svgMarkup, css, selected, post)`.
 (function (svgMarkup, css, selected, post) {
@@ -17,20 +18,26 @@
   root.innerHTML =
     '<style>' + css + '</style>' +
     '<div class="jg-stage"></div>' +
-    '<div class="jg-peek" hidden></div>' +
     '<div class="jg-info"><div class="jg-info-title"></div>' +
-    '<div class="jg-info-path"></div><div class="jg-info-route"></div></div>' +
+    '<div class="jg-info-path"></div><div class="jg-info-cut"></div>' +
+    '<div class="jg-info-route"></div></div>' +
     '<div class="jg-keys"><kbd>Enter</kbd> open &nbsp; <kbd>hjkl</kbd> move &nbsp; ' +
-    '<kbd>v</kbd> view &nbsp; wheel pan &nbsp; <kbd>Ctrl</kbd>+wheel zoom &nbsp; ' +
-    '<kbd>Esc</kbd> close</div>';
+    '<kbd>Space</kbd> fold &nbsp; <kbd>v</kbd> view &nbsp; ' +
+    '<kbd>Ctrl</kbd>+wheel zoom &nbsp; <kbd>Esc</kbd> close</div>';
   document.documentElement.appendChild(root);
 
   const stage = root.querySelector('.jg-stage');
-  const peek = root.querySelector('.jg-peek');
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  // The peek's layer: screen space, over the scene and outside its camera, so
+  // a peek is the same size at every zoom level.
+  const peekLayer = document.createElementNS(SVG_NS, 'svg');
+  peekLayer.setAttribute('class', 'jg-peek-layer');
+  root.insertBefore(peekLayer, stage.nextSibling);
   const info = {
     box: root.querySelector('.jg-info'),
     title: root.querySelector('.jg-info-title'),
     path: root.querySelector('.jg-info-path'),
+    cut: root.querySelector('.jg-info-cut'),
     route: root.querySelector('.jg-info-route'),
   };
   // Level-of-detail thresholds (DESIGN D14): near ≥ 0.7 > mid ≥ 0.4 > far.
@@ -39,12 +46,24 @@
   // KX_MIN, so a far label has room for more of its title. Text is
   // counter-scaled horizontally (`--sx` in graph.css), so glyphs never stretch.
   const KX_MIN = 0.55;
-  // The far level's label size on screen, in px (the far `font-size` in graph.css).
-  const FAR_FONT = 15;
+  // Clicking a bundle zooms in to this scale: mid, where titles show.
+  const BUNDLE_ZOOM = 0.55;
+  // How long the pointer rests on a folded node before its peek appears, so a
+  // passing pointer does not flash fans.
+  const PEEK_DELAY = 250;
+  // Scene units of a pill's padding: the text starts 16 in, and keeps 10 clear
+  // of the right edge — or of the fold handle, the pill's last 38.
+  const PAD_LEFT = 16, PAD_RIGHT = 10, HANDLE_W = 38;
+  // A pill's vertical middle, in scene units.
+  const NODE_MID = 21;
   let svg = null;
   // The camera: a translation, and a vertical and horizontal scale.
   let tx = 0, ty = 0, k = 1;
   const kx = () => Math.max(k, KX_MIN);
+  // Where the pointer last was, in CSS px: `Ctrl`+wheel zooms about it. The
+  // page tracks it itself — the shell's pointer is in toolkit px, which need
+  // not be CSS px (page.rs `GraphZoomAt::Pointer`).
+  const pointer = { x: innerWidth / 2, y: innerHeight / 2 };
 
   function apply() {
     svg.style.transform =
@@ -61,10 +80,12 @@
     declutter();
   }
 
-  // Far out, labels are drawn at a fixed screen size over a shrinking scene,
-  // so they would run into each other. Once per frame after a change: cut
-  // each label to what fits one column pitch on screen, then keep labels in
-  // priority order and hide (fade) any that would overlap one already kept.
+  // Labels keep a minimum size on screen at every level (graph.css), so a
+  // zoomed-out label is larger than its pill was drawn for. Once per frame
+  // after a change: cut each label to what fits — its pill near and mid, one
+  // column far out — at the size it is actually drawn, and then, far out,
+  // keep labels in priority order and hide (fade) any that would overlap one
+  // already kept. The panel and hover still show the whole title.
   // A pan moves every label alike, so only a new scale, scene or selection
   // (which outranks other labels) redoes it: `clutterK` is the scale it was
   // last done at, `null` when it must be redone.
@@ -75,48 +96,98 @@
     clutterK = k;
     cancelAnimationFrame(declutterFrame);
     declutterFrame = requestAnimationFrame(() => {
-      const far = root.dataset.lod === 'far';
-      const labels = svg.querySelectorAll('.jg-nodes .t, .jg-bundle .t');
-      const perChar = FAR_FONT * 0.55;
-      const chars = Math.max(4, Math.floor((svg.dataset.column * kx() * 0.85) / perChar));
-      for (const t of labels) {
-        if (t.dataset.full === undefined) t.dataset.full = t.textContent;
-        const full = t.dataset.full;
-        t.textContent = far && full.length > chars ? full.slice(0, chars - 1) + '…' : full;
-        t.classList.remove('culled');
+      const lod = root.dataset.lod;
+      const column = Number(svg.dataset.column);
+      for (const c of svg.querySelectorAll('.culled')) c.classList.remove('culled');
+      for (const g of svg.querySelectorAll('.jg-nodes .jg-node')) {
+        const pill = g.querySelector('rect').width.baseVal.value;
+        const title = g.querySelector('.t');
+        const handle = g.querySelector('.jg-handle > g');
+        if (handle && handle.dataset.home === undefined) {
+          handle.dataset.home = handle.getAttribute('transform');
+        }
+        if (lod === 'far') {
+          // Far out the handle stands beside the label, which leaves room
+          // for it within the column.
+          const sx = k / kx();
+          const gap = 8 / kx();
+          const hw = handle ? handle.querySelector('text').getComputedTextLength() * sx : 0;
+          const room = column - PAD_LEFT - PAD_RIGHT - (handle ? hw + gap : 0);
+          fit(title, g.dataset.title, room);
+          if (handle) {
+            const end = PAD_LEFT + title.getComputedTextLength() * sx + gap + hw / 2;
+            handle.setAttribute('transform', 'translate(' + end + ' ' + NODE_MID + ')');
+          }
+        } else {
+          const room = pill - (handle ? HANDLE_W : 0) - PAD_LEFT - PAD_RIGHT;
+          fit(title, g.dataset.title, room);
+          if (handle) handle.setAttribute('transform', handle.dataset.home);
+        }
+        const name = g.querySelector('.f');
+        if (lod === 'near') {
+          if (name.dataset.full === undefined) name.dataset.full = name.textContent;
+          fit(name, name.dataset.full, pill - (handle ? HANDLE_W : 0) - PAD_LEFT - PAD_RIGHT);
+        }
       }
-      if (!far) return;
+      if (lod !== 'far') return;
+      const labels = svg.querySelectorAll('.jg-nodes .t, .jg-bundle .t');
       const kept = [];
       const hits = (b) => kept.some((o) =>
         b.left < o.right && o.left < b.right && b.top < o.bottom && o.top < b.bottom);
+      // A label's box includes its handle, which stands beside it.
       for (const t of [...labels].sort((a, b) => rank(a) - rank(b))) {
         const g = t.closest('.jg-node');
         if (g && g.classList.contains('bundled') && !g.classList.contains('sel')) continue;
-        const b = t.getBoundingClientRect();
-        if (hits(b)) t.classList.add('culled');
+        const handle = g && g.querySelector('.jg-handle text');
+        const parts = handle ? [t, handle] : [t];
+        const rects = parts.map((p) => p.getBoundingClientRect());
+        const b = {
+          left: Math.min(...rects.map((r) => r.left)),
+          right: Math.max(...rects.map((r) => r.right)),
+          top: Math.min(...rects.map((r) => r.top)),
+          bottom: Math.max(...rects.map((r) => r.bottom)),
+        };
+        if (hits(b)) for (const p of parts) p.classList.add('culled');
         else kept.push(b);
       }
     });
   }
 
-  // Which labels win a collision: current, spine, selected, clusters and
-  // bundles, notes with something under them, then leaves.
+  // Set `t` to `full`, cut with an ellipsis to `room` units of its pill's
+  // width. In the scene, text is counter-scaled horizontally (--sx = k / kx),
+  // so a unit of its own length covers `sx` units of the pill; in the peek's
+  // screen-space layer, `sx` is 1.
+  function fit(t, full, room, sx = k / kx()) {
+    t.textContent = full;
+    const len = () => t.getComputedTextLength() * sx;
+    if (len() <= room) return;
+    let n = Math.max(1, Math.floor(full.length * room / len()));
+    t.textContent = full.slice(0, n) + '…';
+    while (n > 1 && len() > room) {
+      n -= 1;
+      t.textContent = full.slice(0, n) + '…';
+    }
+  }
+
+  // Which labels win a collision: current, route, selected, bundles, nodes
+  // with children in this view, then leaves.
   function rank(t) {
     const g = t.closest('.jg-node');
     if (!g) return 3;
     const c = g.classList;
     return c.contains('current') ? 0 : c.contains('spine') ? 1 : c.contains('sel') ? 2
-      : c.contains('cluster') ? 3 : c.contains('inner') || c.contains('collapsed') ? 4 : 5;
+      : c.contains('folded') || c.contains('unfolded') ? 4 : 5;
   }
 
   // Put the scene on stage, and the route into the panel's breadcrumb.
   function mount(next) {
     clutterK = null;
+    hidePeek();
     stage.replaceChildren(next);
     svg = next;
     info.route.textContent = '';
     const route = (svg.dataset.route || '').split(' ').filter(Boolean);
-    // A one-note route would only repeat the title.
+    // A one-node route would only repeat the title.
     info.route.hidden = route.length < 2;
     route.forEach((i, n) => {
       if (n > 0) {
@@ -150,7 +221,7 @@
   }
 
   function nodeEl(i, within) {
-    return (within || svg).querySelector('.jg-node[data-i="' + i + '"]');
+    return (within || svg).querySelector('.jg-nodes .jg-node[data-i="' + i + '"]');
   }
 
   // The item's pill in layout (SVG user) coordinates.
@@ -176,10 +247,10 @@
     apply();
   }
 
-  // The tree view draws each note once, so where its links go is not a line
-  // of the tree: selecting a note outlines the notes it links to and dims
+  // The tree view draws each node once, so where its links go is not a line
+  // of the tree: selecting a node outlines the nodes it links to and dims
   // everything that is neither those, the selection, nor the route. The links
-  // view emits no `data-to` — its fans already are the links.
+  // view emits no `data-to` — its children already are the links.
   function highlightLinks(el) {
     for (const n of svg.querySelectorAll('.linked, .dim')) n.classList.remove('linked', 'dim');
     if (svg.dataset.view !== 'tree') return;
@@ -190,7 +261,7 @@
       n.classList.add('linked');
       keep.add(t);
     }
-    for (const n of svg.querySelectorAll('.jg-node:not(.spine)')) {
+    for (const n of svg.querySelectorAll('.jg-nodes .jg-node:not(.spine)')) {
       if (!keep.has(n.dataset.i)) n.classList.add('dim');
     }
     for (const e of svg.querySelectorAll('.jg-edge')) {
@@ -209,6 +280,8 @@
     info.title.textContent = el.dataset.title;
     info.path.textContent = el.dataset.path;
     info.path.hidden = !el.dataset.path;
+    info.cut.textContent = el.dataset.cut || '';
+    info.cut.hidden = !el.dataset.cut;
     for (const c of info.route.querySelectorAll('.jg-crumb')) {
       c.classList.toggle('sel', c.dataset.i === String(i));
     }
@@ -224,14 +297,15 @@
     }
   }
 
-  // A re-layout: swap the scene, and move the camera so the selected item is
-  // where it was on screen — found by its key, or else where the old
-  // selection was.
-  function update(markup, i) {
+  // A re-layout: swap the scene, and move the camera so item `anchor` — the
+  // one the reader acted on — is where it was on screen (found by its key, or
+  // else where the old selection was). Then select item `i`, revealing it if
+  // it is not the anchor and landed off screen.
+  function update(markup, i, anchor) {
     const next = parse(markup);
-    const el = nodeEl(i, next);
+    const el = nodeEl(anchor, next);
     if (!el) return;
-    const old = svg.querySelector('.jg-node[data-key="' + el.dataset.key + '"]') ||
+    const old = svg.querySelector('.jg-nodes .jg-node[data-key="' + el.dataset.key + '"]') ||
       svg.querySelector('.jg-node.sel');
     const before = old && box(old);
     mount(next);
@@ -242,7 +316,7 @@
       apply();
     }
     unhover();
-    select(i, false);
+    select(i, i !== anchor);
   }
 
   // Zoom about a stage point: the world point under it stays put, on each
@@ -255,11 +329,32 @@
     apply();
   }
 
+  // The keys zoom about the selection (where the keyboard's attention is).
+  function selectionCentre() {
+    const el = svg.querySelector('.jg-node.sel');
+    if (!el) return { x: innerWidth / 2, y: innerHeight / 2 };
+    const b = box(el);
+    return { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+  }
+
+  // A far-out bundle is a handle too: clicking it zooms in until its nodes
+  // are readable, centred on it.
+  function zoomIntoBundle(bundle) {
+    const r = bundle.querySelector('rect').getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    glide();
+    zoom(Math.max(1, BUNDLE_ZOOM / k), cx, cy);
+    tx += innerWidth / 2 - cx;
+    ty += innerHeight / 2 - cy;
+    apply();
+  }
+
   // The wheel pans (Shift+wheel sideways). Ctrl+wheel never arrives here:
-  // GTK takes it first and the controller routes it to `zoom` at the cursor
+  // GTK takes it first and the controller routes it to `zoom` at the pointer
   // (DESIGN D4).
   root.addEventListener('wheel', (e) => {
     e.preventDefault();
+    track(e);
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;
     const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX;
     const dy = e.shiftKey && !e.deltaX ? 0 : e.deltaY;
@@ -268,41 +363,108 @@
     apply();
   }, { passive: false });
 
-  // Hovering a collapsed cluster or a `+n` badge previews the titles it holds
-  // (`data-members`, from core), next to the item.
-  function showPeek(el) {
-    const titles = (el.dataset.members || '').split('\n').filter(Boolean);
-    if (!titles.length) return hidePeek();
-    peek.textContent = '';
-    for (const t of titles) {
-      const line = document.createElement('div');
-      line.textContent = t;
-      if (/^and \d+ more$/.test(t) && t === titles[titles.length - 1]) line.className = 'more';
-      peek.appendChild(line);
-    }
-    const b = el.getBoundingClientRect();
-    peek.hidden = false;
-    const p = peek.getBoundingClientRect();
-    const left = b.right + 10 + p.width < innerWidth ? b.right + 10 : Math.max(8, b.left - 10 - p.width);
-    peek.style.left = left + 'px';
-    peek.style.top = Math.max(8, Math.min(innerHeight - p.height - 8, b.top)) + 'px';
-    peek.classList.add('shown');
-  }
+  // The peek: resting the pointer on a folded node draws its children as a
+  // temporary fan next to it — full pills at screen scale, whatever the zoom,
+  // in their own layer outside the scene's camera, laid out as unfolding
+  // would lay them out (one column right, centred on the node, one row apart,
+  // an elbow trunk), over a backdrop so nothing beneath shows through, and
+  // clamped to the viewport. Nothing else moves. It stays while the pointer
+  // is on the node or the fan, and goes on leave, zoom, pan, resize or
+  // re-layout. Its data is the node's `data-peek`, a JSON array of
+  // `{title, file}`.
+  let peekTimer = 0;
+  // The key of the node a peek is pending or shown for: moving between the
+  // parts of one node must not restart the delay.
+  let peekKey = null;
+  let ghost = null;
   function hidePeek() {
-    peek.classList.remove('shown');
-    peek.hidden = true;
+    clearTimeout(peekTimer);
+    if (ghost) ghost.remove();
+    ghost = null;
+    peekKey = null;
   }
-
-  // Hover lights up the item and the edges that meet it.
-  let hovered = null;
-  function unhover() {
+  function schedulePeek(el) {
+    if (peekKey === el.dataset.key) return;
     hidePeek();
+    peekKey = el.dataset.key;
+    peekTimer = setTimeout(() => showPeek(el), PEEK_DELAY);
+  }
+  function svgEl(tag, attrs, parent) {
+    const e = document.createElementNS(SVG_NS, tag);
+    for (const [name, value] of Object.entries(attrs)) e.setAttribute(name, value);
+    parent.appendChild(e);
+    return e;
+  }
+  function elbowPath(x1, y1, x2, y2) {
+    const mx = (x1 + x2) / 2;
+    return 'M' + x1 + ' ' + y1 + 'H' + mx + 'V' + y2 + 'H' + x2;
+  }
+  function showPeek(el) {
+    let entries = [];
+    try {
+      entries = JSON.parse(el.dataset.peek || '[]');
+    } catch (_) {
+      return;
+    }
+    const more = Number(el.dataset.peekMore || 0);
+    if (more > 0) entries.push({ title: 'and ' + more + ' more', file: '' });
+    if (!entries.length) return;
+    // Pills at 1:1, the grid's own pitch: as they would be at scale 1.
+    const pill = layoutBox(el);
+    const w = pill.w, h = pill.h;
+    const column = Number(svg.dataset.column), row = Number(svg.dataset.row);
+    const node = box(el);
+    const from = node.x + node.w, midY = node.y + node.h / 2;
+    const n = entries.length;
+    const pad = 8;
+    let x = from + (column - w);
+    let first = midY - ((n - 1) / 2) * row;
+    const top = first - h / 2, bottom = first + (n - 1) * row + h / 2;
+    if (bottom - top < innerHeight - 2 * pad) {
+      if (top < pad) first += pad - top;
+      else if (bottom > innerHeight - pad) first -= bottom - innerHeight + pad;
+    }
+    // At the right edge the fan slides left, but never over its own node.
+    if (x + w + pad > innerWidth) x = Math.max(from + 2 * pad, innerWidth - w - pad);
+    ghost = svgEl('g', { class: 'jg-ghost' }, peekLayer);
+    svgEl('rect', {
+      class: 'backdrop', x: from + 2, y: first - h / 2 - pad,
+      width: x + w + pad - from - 2, height: (n - 1) * row + h + 2 * pad, rx: 8,
+    }, ghost);
+    const room = w - PAD_LEFT - PAD_RIGHT;
+    entries.forEach(({ title, file }, j) => {
+      const y = first + j * row;
+      svgEl('path', { class: 'trunk', d: elbowPath(from, midY, x, y) }, ghost);
+      const g = svgEl('g', { class: 'jg-ghost-node', transform: 'translate(' + x + ' ' + (y - h / 2) + ')' }, ghost);
+      svgEl('rect', { width: w, height: h, rx: 8 }, g);
+      fit(svgEl('text', { class: 't', x: PAD_LEFT, y: 18 }, g), title, room, 1);
+      if (file) fit(svgEl('text', { class: 'f', x: PAD_LEFT, y: 33 }, g), file, room, 1);
+    });
+  }
+  // The pointer may cross from the node into its fan and back.
+  peekLayer.addEventListener('pointerleave', (e) => {
+    const into = e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest('.jg-node');
+    if (!into || into.dataset.key !== peekKey) hidePeek();
+  });
+
+  // Hover lights up the item and the edges that meet it, and a folded one
+  // peeks once the pointer rests on it.
+  let hovered = null;
+  // The page learns where the pointer is from every pointer event it gets,
+  // not only from motion: `Ctrl`+wheel may come before the pointer moves.
+  function track(e) {
+    pointer.x = e.clientX;
+    pointer.y = e.clientY;
+  }
+  root.addEventListener('pointerover', track);
+  root.addEventListener('pointerdown', track);
+  function unhover() {
     if (!hovered) return;
     for (const h of root.querySelectorAll('.hover')) h.classList.remove('hover');
     hovered = null;
   }
   stage.addEventListener('pointerover', (e) => {
-    const el = e.target.closest('.jg-node');
+    const el = e.target.closest('.jg-nodes .jg-node');
     if (el !== hovered) {
       unhover();
       if (el) {
@@ -314,13 +476,13 @@
         }
       }
     }
-    // A cluster previews from anywhere on it; a note only from its badge.
-    const previewed = el && el.classList.contains('collapsed') &&
-      (el.classList.contains('cluster') || e.target.closest('.jg-badge'));
-    if (!previewed) hidePeek();
-    else if (peek.hidden) showPeek(el);
+    if (el && el.classList.contains('folded')) schedulePeek(el);
+    else hidePeek();
   });
-  stage.addEventListener('pointerleave', unhover);
+  stage.addEventListener('pointerleave', (e) => {
+    unhover();
+    if (!(e.relatedTarget && peekLayer.contains(e.relatedTarget))) hidePeek();
+  });
 
   let drag = null;
   // The item a click just selected, so the controller's echo does not pan.
@@ -332,6 +494,7 @@
   // On the window, not the stage: a drag may leave the stage, and pointer
   // capture would retarget the `click` that ends it away from the item.
   function onMove(e) {
+    track(e);
     if (!drag) return;
     // A release outside the window never reaches `pointerup` here.
     if (!(e.buttons & 1)) { onUp(); return; }
@@ -351,50 +514,66 @@
   }
   window.addEventListener('pointermove', onMove);
   window.addEventListener('pointerup', onUp);
+  // A resized window keeps the world point at its centre where it was.
+  let size = { w: innerWidth, h: innerHeight };
+  function onResize() {
+    tx += (innerWidth - size.w) / 2;
+    ty += (innerHeight - size.h) / 2;
+    size = { w: innerWidth, h: innerHeight };
+    clutterK = null;
+    apply();
+  }
+  window.addEventListener('resize', onResize);
   stage.addEventListener('click', (e) => {
     if (drag && drag.moved) return;
-    const el = e.target.closest('.jg-node');
+    const bundle = e.target.closest('.jg-bundle');
+    if (bundle) {
+      zoomIntoBundle(bundle);
+      return;
+    }
+    const el = e.target.closest('.jg-nodes .jg-node');
     if (!el) return;
     // The item is under the pointer already; panning it away would move a
     // double-click's second press onto a different item.
     clicked = el.dataset.key;
-    const expand = e.target.closest('.jg-badge') ||
-      (el.classList.contains('cluster') && el.classList.contains('collapsed'));
-    if (expand) post.expand(el.dataset.key);
+    if (e.target.closest('.jg-handle')) post.fold(el.dataset.key);
     else post.select(el.dataset.key);
   });
   stage.addEventListener('dblclick', (e) => {
-    const el = e.target.closest('.jg-node');
-    if (el) post.open(el.dataset.key);
+    const el = e.target.closest('.jg-nodes .jg-node');
+    if (el && !e.target.closest('.jg-handle')) post.open(el.dataset.key);
   });
-  // A breadcrumb segment selects that spine note — which may be off screen,
+  // A breadcrumb segment selects that route node — which may be off screen,
   // so this selection is revealed.
   info.route.addEventListener('click', (e) => {
     const seg = e.target.closest('.jg-crumb');
     if (seg) post.select(seg.dataset.key);
   });
 
-  // The opening frame: the whole route and the current note's first column
-  // of links when that fits the window at 1:1, centred, the spine on the
-  // vertical middle; otherwise the current note a third of the way across.
+  // The opening frame, route first: the whole route and the current node's
+  // children, centred, when they fit the window at 1:1; else the whole route,
+  // the root at the left margin and the children running off the right; only
+  // a route wider than the window puts the current node a third across. The
+  // spine sits on the vertical middle.
   function frame() {
     const cur = svg.querySelector('.jg-node.current');
-    const first = svg.querySelector('.jg-node[data-i="0"]');
+    const first = nodeEl(0);
     if (!cur || !first) return;
-    let right = layoutBox(cur);
-    right = right.x + right.w;
-    for (const c of svg.querySelectorAll('.jg-node[data-parent="' + cur.dataset.i + '"]')) {
-      const b = layoutBox(c);
+    const c = layoutBox(cur);
+    const left = layoutBox(first).x;
+    const routeRight = c.x + c.w;
+    let right = routeRight;
+    for (const child of svg.querySelectorAll('.jg-node[data-parent="' + cur.dataset.i + '"]')) {
+      const b = layoutBox(child);
       right = Math.max(right, b.x + b.w);
     }
-    const left = layoutBox(first).x;
     const margin = 48;
-    if (right - left > innerWidth - 2 * margin) {
+    const room = innerWidth - 2 * margin;
+    if (routeRight - left > room) {
       centre(cur);
       return;
     }
-    const c = layoutBox(cur);
-    tx = (innerWidth - (right - left)) / 2 - left;
+    tx = right - left <= room ? (innerWidth - (right - left)) / 2 - left : margin - left;
     ty = innerHeight / 2 - (c.y + c.h / 2);
     apply();
   }
@@ -405,12 +584,16 @@
       select(i, !el || clicked !== el.dataset.key);
       clicked = null;
     },
-    update: (markup, i) => {
-      update(markup, i);
+    update: (markup, i, anchor) => {
+      update(markup, i, anchor);
       clicked = null;
     },
-    zoom,
-    // `=`: back to 1:1 on the current note.
+    // `Ctrl`+wheel zooms about the pointer, `+` / `-` about the selection.
+    zoom: (factor, at) => {
+      const p = at === 'pointer' ? pointer : selectionCentre();
+      zoom(factor, p.x, p.y);
+    },
+    // `=`: back to 1:1 on the current node.
     reset: () => {
       k = 1;
       apply();
@@ -418,8 +601,10 @@
       if (el) { glide(); centre(el); }
     },
     close: () => {
+      hidePeek();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('resize', onResize);
       root.remove();
       delete window.__jmnj_graph;
     },

@@ -1,23 +1,23 @@
-//! The document graph (DESIGN D14): the notes reachable by links from where the
+//! The document graph (DESIGN D14): the documents reachable by links from where the
 //! reading session started, laid out around the route the reader took.
 //!
 //! Pure. Three stages, each testable alone:
 //!
-//! 1. [`scan`] — one note's title and outgoing links, from its markdown.
+//! 1. [`scan`] — one document's title and outgoing links, from its markdown.
 //! 2. [`build`] — the breadth-first walk from the trail's root that turns the
 //!    (cyclic) link graph into a spanning tree, with the trail pinned into it
 //!    where a link explains a step. File access is the caller's closure, so the
 //!    walk is tested over a map.
-//! 3. [`Scene`] — what is on screen for one [`View`] and set of expanded
-//!    items: the route as a straight spine, everything else packed above and
-//!    below it ([`scene`]), written out as inline SVG ([`svg`]).
-//!    Deterministic: the same files and the same expansions always give the
-//!    same picture.
+//! 3. [`Scene`] — what is on screen for one [`View`] and the reader's
+//!    [`Folds`]: the route as a straight spine, everything else packed above
+//!    and below it ([`scene`]), written out as inline SVG ([`svg`]).
+//!    Deterministic: the same files and the same folds always give the same
+//!    picture. The interaction is specified in `docs/graph/interaction.md`.
 
 mod scene;
 mod svg;
 
-pub use scene::{Expanded, Fold, Item, ItemKey, ItemKind, Move, Scene, Side, Step, View};
+pub use scene::{Fold, Folds, Handle, Item, ItemKey, Scene, Step, View};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -30,33 +30,33 @@ use super::obsidian::{self, RefKind, percent_decode};
 use super::pipeline::comrak_options;
 use super::vault::{Target, VaultIndex};
 
-/// How many notes the walk places at most. Route notes are always placed, even
-/// past the budget; the tree view marks a note whose links were cut with `+n`.
+/// How many nodes the walk places at most. Route nodes are always placed, even
+/// past the budget; the panel says how many of a node's links were cut.
 pub const NODE_BUDGET: usize = 300;
 
-/// How many bytes of a note the walk reads. Links and titles sit in the text a
-/// person wrote; a note larger than this is data, not a hub.
+/// How many bytes of a document the walk reads. Links and titles sit in the
+/// text a person wrote; a document larger than this is data, not a hub.
 pub const READ_CAP: u64 = 1 << 20;
 
-/// What the walk needs to know about one note.
+/// What the walk needs to know about one document: [`scan`]'s result.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Note {
+pub struct Scan {
     /// Frontmatter `title`, else the first `# H1`. `None` falls back to the
     /// file stem at placement.
     pub title: Option<String>,
-    /// Outgoing links to markdown notes, in source order, without duplicates.
+    /// Outgoing links to markdown documents, in source order, without duplicates.
     /// [`scan`] leaves them as written (joined, not canonical); the caller that
-    /// hands notes to [`build`] canonicalises them and drops missing files.
+    /// hands scans to [`build`] canonicalises them and drops missing files.
     pub links: Vec<PathBuf>,
 }
 
-/// Read one note's title and outgoing markdown links.
+/// Read one document's title and outgoing markdown links.
 ///
 /// Links follow the reader's own routing (`Controller::on_navigate`): a
-/// markdown link is a path relative to the note's directory, a wikilink
+/// markdown link is a path relative to the document's directory, a wikilink
 /// resolves through the vault index, and only `.md` / `.markdown` targets count
-/// — a directory, an image or a web page is not a note.
-pub fn scan(md: &str, source: &Path, index: &VaultIndex) -> Note {
+/// — a directory, an image or a web page is not a node.
+pub fn scan(md: &str, source: &Path, index: &VaultIndex) -> Scan {
     let arena = Arena::new();
     let root = parse_document(&arena, md, &comrak_options());
     let dir = source.parent().unwrap_or(Path::new(""));
@@ -94,7 +94,7 @@ pub fn scan(md: &str, source: &Path, index: &VaultIndex) -> Note {
         .or(h1)
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-    Note { title, links }
+    Scan { title, links }
 }
 
 /// The frontmatter `title`, if it is a plain non-empty value.
@@ -153,8 +153,8 @@ fn is_markdown(path: &Path) -> bool {
 pub enum EdgeKind {
     /// The parent links to the node.
     Link,
-    /// No link explains the edge: a route note the walk could not reach, hung
-    /// under the note the reader came from.
+    /// No link explains the edge: a route node the walk could not reach, hung
+    /// under the node the reader came from.
     Jump,
 }
 
@@ -176,9 +176,9 @@ pub struct Node {
     pub depth: usize,
     /// Links cut by [`NODE_BUDGET`]. Every other link is in `targets`.
     pub hidden: usize,
-    /// Every placed note this note links to, in source order — its tree
+    /// Every placed node this node links to, in source order — its tree
     /// children and the cross-links the tree does not draw. The links view
-    /// fans these out; the tree view draws them for the selected note.
+    /// fans these out; the tree view highlights them for the selected node.
     pub targets: Vec<usize>,
 }
 
@@ -193,14 +193,14 @@ pub struct Graph {
 /// Build the tree for `trail` (root first, current document last; paths in
 /// the same canonical form `read` returns links in). `None` for an empty trail.
 ///
-/// `read` is called at most once per note and must return links already
-/// canonical and existing (see [`Note::links`]).
-pub fn build(trail: &[PathBuf], budget: usize, read: impl FnMut(&Path) -> Note) -> Option<Graph> {
+/// `read` is called at most once per document and must return links already
+/// canonical and existing (see [`Scan::links`]).
+pub fn build(trail: &[PathBuf], budget: usize, read: impl FnMut(&Path) -> Scan) -> Option<Graph> {
     let route = loop_free(trail);
     let root = route.first()?.clone();
     let mut walk = Walk {
         read,
-        notes: HashMap::new(),
+        scans: HashMap::new(),
         nodes: Vec::new(),
         index: HashMap::new(),
         on_route: route.iter().cloned().collect(),
@@ -209,14 +209,14 @@ pub fn build(trail: &[PathBuf], budget: usize, read: impl FnMut(&Path) -> Note) 
 
     let first = walk.place(root, None);
     walk.expand(first);
-    // Route notes the walk could not reach hang under the note the reader
+    // Route nodes the walk could not reach hang under the node the reader
     // came from — in trail order, so that predecessor is always placed.
     for pair in route.windows(2) {
         if walk.index.contains_key(&pair[1]) {
             continue;
         }
         let from = walk.index[&pair[0]];
-        let kind = if walk.note(&pair[0]).links.contains(&pair[1]) {
+        let kind = if walk.scan(&pair[0]).links.contains(&pair[1]) {
             EdgeKind::Link
         } else {
             EdgeKind::Jump
@@ -225,23 +225,23 @@ pub fn build(trail: &[PathBuf], budget: usize, read: impl FnMut(&Path) -> Note) 
         walk.expand(placed);
     }
 
-    // Pin the route where a link explains a step: a note the reader reached by
-    // following a link hangs under the note they followed it from, taking its
+    // Pin the route where a link explains a step: a node the reader reached by
+    // following a link hangs under the node they followed it from, taking its
     // subtree along. Done on the finished tree rather than during the walk, so
-    // a pin can never make a note unreachable — and one that would make a node
+    // a pin can never make a node unreachable — and one that would make a node
     // its own ancestor (the reader went back up a chain) is simply skipped.
     for pair in route.windows(2) {
         let (from, to) = (walk.index[&pair[0]], walk.index[&pair[1]]);
-        let linked = walk.note(&pair[0]).links.contains(&pair[1]);
+        let linked = walk.scan(&pair[0]).links.contains(&pair[1]);
         if linked && walk.nodes[to].parent.map(|p| p.index) != Some(from) {
             walk.reparent(to, from);
         }
     }
     walk.assign_depths();
 
-    // Every placed note was expanded, so its links are in hand.
+    // Every placed node was expanded, so its links are in hand.
     for node in &mut walk.nodes {
-        node.targets = walk.notes[&node.path]
+        node.targets = walk.scans[&node.path]
             .links
             .iter()
             .filter_map(|link| walk.index.get(link).copied())
@@ -269,25 +269,25 @@ fn loop_free(trail: &[PathBuf]) -> Vec<PathBuf> {
 
 struct Walk<R> {
     read: R,
-    notes: HashMap<PathBuf, Note>,
+    scans: HashMap<PathBuf, Scan>,
     nodes: Vec<Node>,
     index: HashMap<PathBuf, usize>,
     on_route: HashSet<PathBuf>,
     budget: usize,
 }
 
-impl<R: FnMut(&Path) -> Note> Walk<R> {
-    fn note(&mut self, path: &Path) -> &Note {
-        if !self.notes.contains_key(path) {
-            let note = (self.read)(path);
-            self.notes.insert(path.to_path_buf(), note);
+impl<R: FnMut(&Path) -> Scan> Walk<R> {
+    fn scan(&mut self, path: &Path) -> &Scan {
+        if !self.scans.contains_key(path) {
+            let scan = (self.read)(path);
+            self.scans.insert(path.to_path_buf(), scan);
         }
-        &self.notes[path]
+        &self.scans[path]
     }
 
     fn place(&mut self, path: PathBuf, parent: Option<Parent>) -> usize {
         let title = self
-            .note(&path)
+            .scan(&path)
             .title
             .clone()
             .unwrap_or_else(|| stem(&path));
@@ -310,12 +310,12 @@ impl<R: FnMut(&Path) -> Note> Walk<R> {
     }
 
     /// Breadth-first from `start`: each unplaced link target becomes a child of
-    /// the first note that reaches it.
+    /// the first node that reaches it.
     fn expand(&mut self, start: usize) {
         let mut queue = VecDeque::from([start]);
         while let Some(at) = queue.pop_front() {
             let path = self.nodes[at].path.clone();
-            let links = self.note(&path).links.clone();
+            let links = self.scan(&path).links.clone();
             for target in links {
                 if self.index.contains_key(&target) {
                     continue;
@@ -337,7 +337,7 @@ impl<R: FnMut(&Path) -> Note> Walk<R> {
     }
 }
 
-impl<R: FnMut(&Path) -> Note> Walk<R> {
+impl<R: FnMut(&Path) -> Scan> Walk<R> {
     /// Move `node` (with its subtree) under `parent`, in `parent`'s link order.
     /// A no-op when `node` is `parent` or one of its ancestors.
     fn reparent(&mut self, node: usize, parent: usize) {
@@ -355,7 +355,7 @@ impl<R: FnMut(&Path) -> Note> Walk<R> {
             index: parent,
             kind: EdgeKind::Link,
         });
-        let links = &self.notes[&self.nodes[parent].path].links;
+        let links = &self.scans[&self.nodes[parent].path].links;
         let rank = |i: usize| {
             links
                 .iter()
@@ -428,13 +428,13 @@ mod tests {
 
     /// A reader over a fixed link table: `("a", &["b", "c"])` means `a.md`
     /// links to `b.md` then `c.md`.
-    pub(super) fn table(links: &[(&str, &[&str])]) -> impl FnMut(&Path) -> Note + use<> {
-        let map: HashMap<PathBuf, Note> = links
+    pub(super) fn table(links: &[(&str, &[&str])]) -> impl FnMut(&Path) -> Scan + use<> {
+        let map: HashMap<PathBuf, Scan> = links
             .iter()
             .map(|(from, to)| {
                 (
                     p(from),
-                    Note {
+                    Scan {
                         title: None,
                         links: to.iter().map(|t| p(t)).collect(),
                     },
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn a_note_hangs_under_the_first_note_that_reaches_it() {
+    fn a_node_hangs_under_the_first_node_that_reaches_it() {
         let read = table(&[("a", &["b", "c"]), ("b", &["c", "d"]), ("c", &["a", "d"])]);
         let g = build(&[p("a")], NODE_BUDGET, read).unwrap();
         assert_eq!(titles(&g, &g.node(0).children), ["b", "c"]);
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn a_followed_link_pins_the_note_a_layer_deeper() {
+    fn a_followed_link_pins_the_node_a_layer_deeper() {
         // a links to c directly, but the reader went a → b → c.
         let read = table(&[("a", &["b", "c"]), ("b", &["c"])]);
         let g = build(&[p("a"), p("b"), p("c")], NODE_BUDGET, read).unwrap();
@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_never_makes_a_note_its_own_ancestor() {
+    fn a_pin_never_makes_a_node_its_own_ancestor() {
         // x → b → a, and a links back to b. The reader jumped x ⇢ a (from the
         // graph), then followed a → b: pinning b under a would need a under b.
         let read = table(&[("x", &["b"]), ("b", &["a"]), ("a", &["b"])]);
@@ -509,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreachable_route_note_hangs_under_where_the_reader_came_from() {
+    fn an_unreachable_route_node_hangs_under_where_the_reader_came_from() {
         let read = table(&[("a", &["b"])]);
         let g = build(&[p("a"), p("b"), p("z")], NODE_BUDGET, read).unwrap();
         assert_eq!(parent_of(&g, "z"), Some(("b".into(), EdgeKind::Jump)));
@@ -531,17 +531,17 @@ mod tests {
     }
 
     #[test]
-    fn scan_reads_markdown_links_relative_to_the_note() {
+    fn scan_reads_markdown_links_relative_to_the_document() {
         let md = "# Guide\n\n[a](./sub/a.md) [b](../b.markdown#part) [web](https://x.org/c.md) \
                   [pic](img.png) [self](#top) [dup](sub/a.md) [dir](sub/)\n";
-        let note = scan(
+        let scanned = scan(
             md,
             Path::new("/v/docs/guide.md"),
             &VaultIndex::build(PathBuf::from("/v"), Vec::new()),
         );
-        assert_eq!(note.title.as_deref(), Some("Guide"));
+        assert_eq!(scanned.title.as_deref(), Some("Guide"));
         assert_eq!(
-            note.links,
+            scanned.links,
             [
                 PathBuf::from("/v/docs/./sub/a.md"),
                 PathBuf::from("/v/docs/../b.markdown"),
@@ -559,23 +559,23 @@ mod tests {
                 aliases: Vec::new(),
             }],
         );
-        let note = scan(
+        let scanned = scan(
             "see [[Other]] and [[Missing]]",
             Path::new("/v/a.md"),
             &index,
         );
-        assert_eq!(note.links, [PathBuf::from("/v/notes/Other.md")]);
-        assert_eq!(note.title, None);
+        assert_eq!(scanned.links, [PathBuf::from("/v/notes/Other.md")]);
+        assert_eq!(scanned.title, None);
     }
 
     #[test]
     fn a_frontmatter_title_outranks_the_first_heading() {
         let md = "---\ntitle: \"Case 12\"\n---\n# Heading\n";
-        let note = scan(
+        let scanned = scan(
             md,
             Path::new("/v/a.md"),
             &VaultIndex::build(PathBuf::from("/v"), Vec::new()),
         );
-        assert_eq!(note.title.as_deref(), Some("Case 12"));
+        assert_eq!(scanned.title.as_deref(), Some("Case 12"));
     }
 }

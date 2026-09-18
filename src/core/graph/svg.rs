@@ -1,19 +1,23 @@
-//! The scene as one inline `<svg>` (DESIGN D14).
+//! The scene as one inline `<svg>` (DESIGN D14, docs/graph/interaction.md).
 //!
 //! Everything the overlay needs to draw every zoom level is in the markup;
-//! the overlay only swaps classes. Items are `<g class="jg-node">` with
-//! `data-i` (the item index), `data-key` (its [`ItemKey`](super::ItemKey)),
-//! `data-parent`, the panel's text in `data-title` / `data-path`, and — on a
-//! collapsed item — the hover preview's titles in `data-members`. In the
-//! tree view a note also carries `data-to`, the items it links to, which the
-//! overlay highlights on selection. The `<svg>` carries `data-route`, the spine's
-//! items root first, for the panel's breadcrumb, and `data-column`, the column
-//! pitch the far level cuts labels to.
+//! the overlay only swaps classes. Every item is a node, `<g class="jg-node">`,
+//! with `data-i` (the item index), `data-key` (its [`ItemKey`](super::ItemKey)),
+//! `data-parent`, the panel's text in `data-title` / `data-path` / `data-cut`
+//! (links the walk's budget cut), and — when it is folded — what a peek shows
+//! in `data-peek` (a JSON array of `{title, file}`, one per hidden child,
+//! capped) and `data-peek-more`. Its fold handle is a `<g class="jg-handle">` reading `+n`
+//! or `−`. In the tree view a node also carries `data-to`, the items it links
+//! to, which the overlay highlights on selection. The `<svg>` carries
+//! `data-route` (the spine's items, root first, for the breadcrumb) and the
+//! grid's pitch, `data-column` and `data-row`.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-use super::scene::{Fold, Item, ItemKind, Scene, View};
+use serde::Serialize;
+
+use super::scene::{Handle, Item, Scene, View};
 use super::{EdgeKind, Graph, display_path};
 use crate::core::highlight::escape_html;
 
@@ -21,31 +25,24 @@ use crate::core::highlight::escape_html;
 const COLUMN: f64 = 300.0;
 /// Vertical distance between rows.
 const ROW: f64 = 54.0;
-/// Note pill size.
+/// Pill size.
 const NODE_W: f64 = 232.0;
 const NODE_H: f64 = 42.0;
-/// Cluster pill width.
-const CLUSTER_W: f64 = 76.0;
+/// The fold handle's slot: the pill's last 38 units, behind a hairline.
+const HANDLE_W: f64 = 38.0;
 /// Margin around the drawing.
 const PAD: f64 = 48.0;
-/// Longest title / file name drawn on a note, in characters; the panel shows
-/// the whole of both.
+/// Longest title / file name written into a pill, in characters; the overlay
+/// cuts them to what fits, and the panel shows the whole of both.
 const TITLE_CHARS: usize = 27;
 const NAME_CHARS: usize = 32;
-/// How many titles a collapsed item's hover preview lists before "and k more".
-const PREVIEW_TITLES: usize = 15;
-
-fn width(item: &Item) -> f64 {
-    match item.kind {
-        ItemKind::Note(_) => NODE_W,
-        ItemKind::Cluster { .. } => CLUSTER_W,
-    }
-}
+/// How many hidden children a peek draws before an "and k more" pill.
+const PEEK_NODES: usize = 30;
 
 /// A tree edge from a parent's right side `(x1, y1)` to a child's left side
 /// `(x2, y2)`: out, along a vertical trunk midway between the columns, and in,
 /// with rounded corners. Every child of one parent shares the trunk, so a fan
-/// of fifty notes draws as one line with fifty branches.
+/// of fifty nodes draws as one line with fifty branches.
 fn elbow(x1: f64, y1: f64, x2: f64, y2: f64) -> String {
     let mx = (x1 + x2) / 2.0;
     let dy = y2 - y1;
@@ -73,22 +70,45 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// The hover preview of a collapsed item: the titles of `nodes`, one per
-/// line, at most [`PREVIEW_TITLES`] and then `and k more`. Empty unless the
-/// item is collapsed — an expanded one already shows its children.
-fn preview(graph: &Graph, fold: Fold, nodes: &[usize]) -> String {
-    if !matches!(fold, Fold::Collapsed(_)) {
-        return String::new();
-    }
-    let mut lines: Vec<String> = nodes
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// One node a peek draws.
+#[derive(Serialize)]
+struct PeekNode {
+    title: String,
+    file: String,
+}
+
+/// What a peek at a folded item draws: its hidden children as a JSON array of
+/// [`PeekNode`], at most [`PEEK_NODES`], escaped for an attribute — and how
+/// many more there are.
+fn peek(graph: &Graph, hidden: &[usize]) -> (String, usize) {
+    let nodes: Vec<PeekNode> = hidden
         .iter()
-        .take(PREVIEW_TITLES)
-        .map(|&n| graph.node(n).title.clone())
+        .take(PEEK_NODES)
+        .map(|&n| {
+            let node = graph.node(n);
+            PeekNode {
+                title: node.title.clone(),
+                file: file_name(&node.path),
+            }
+        })
         .collect();
-    if nodes.len() > PREVIEW_TITLES {
-        lines.push(format!("and {} more", nodes.len() - PREVIEW_TITLES));
+    let json = serde_json::to_string(&nodes).expect("strings serialize");
+    (escape_html(&json), hidden.len().saturating_sub(PEEK_NODES))
+}
+
+/// The panel's line for links the walk's budget cut: `""` when none were.
+fn cut(hidden: usize) -> String {
+    match hidden {
+        0 => String::new(),
+        1 => "1 more link not walked".to_string(),
+        n => format!("{n} more links not walked"),
     }
-    escape_html(&lines.join("\n"))
 }
 
 fn joined(items: impl Iterator<Item = usize>) -> String {
@@ -117,11 +137,13 @@ impl Scene {
             b
         };
         let on_route = |n: usize| graph.route().contains(&n);
+        // Where an item's outgoing edges start: its pill's right edge.
+        let out = |it: &Item| anchor(it).0 + NODE_W;
 
         let (mut edges, mut spine) = (String::new(), String::new());
         for (i, it) in items.iter().enumerate() {
             let Some(p) = it.parent else { continue };
-            let (px, py) = anchor(&items[p]);
+            let (_, py) = anchor(&items[p]);
             let (x, y) = anchor(it);
             let jump = if it.edge == EdgeKind::Jump {
                 " jg-jump"
@@ -132,10 +154,10 @@ impl Scene {
                 let _ = write!(
                     spine,
                     r#"<path class="jg-route-edge{jump}" data-a="{p}" data-b="{i}" d="M{:.1} {py:.1}H{x:.1}"/>"#,
-                    px + width(&items[p]),
+                    out(&items[p]),
                 );
             } else {
-                let d = elbow(px + width(&items[p]), py, x, y);
+                let d = elbow(out(&items[p]), py, x, y);
                 let class = if bundled[i] { " bundled" } else { "" };
                 let _ = write!(
                     edges,
@@ -144,34 +166,34 @@ impl Scene {
             }
         }
 
+        // The label sits in its own translated group: text is counter-scaled
+        // about its local origin (graph.css `--sx`), so it must start there.
         let mut bundles = String::new();
         for bundle in self.bundles() {
             let first = &items[bundle.members[0]];
             let last = &items[*bundle.members.last().expect("a bundle has members")];
             let (x, y1) = anchor(first);
             let (_, y2) = anchor(last);
-            let (px, py) = anchor(&items[bundle.parent]);
+            let (_, py) = anchor(&items[bundle.parent]);
             let (top, bottom) = (y1 - NODE_H / 2.0, y2 + NODE_H / 2.0);
             let mid = (top + bottom) / 2.0;
             let _ = write!(
                 bundles,
-                r#"<g class="jg-bundle" data-parent="{parent}"><path class="jg-bundle-edge" d="{d}"/><rect x="{x:.1}" y="{top:.1}" width="6" height="{h:.1}" rx="3"/><text class="t" x="{tx:.1}" y="{mid:.1}">{n} notes</text></g>"#,
+                r#"<g class="jg-bundle" data-parent="{parent}"><path class="jg-bundle-edge" d="{d}"/><rect x="{x:.1}" y="{top:.1}" width="6" height="{h:.1}" rx="3"/><g transform="translate({tx:.1} {mid:.1})"><text class="t">{n} nodes</text></g></g>"#,
                 parent = bundle.parent,
-                d = elbow(px + width(&items[bundle.parent]), py, x, mid),
+                d = elbow(out(&items[bundle.parent]), py, x, mid),
                 h = bottom - top,
                 tx = x + 16.0,
                 n = bundle.members.len(),
             );
         }
 
-        // In the tree view each note is one item, so its links are items too.
+        // In the tree view each node is one item, so its links are items too.
         let item_of: Vec<Option<usize>> = {
             let mut of = vec![None; graph.nodes().len()];
             if self.view() == View::Tree {
                 for (i, it) in items.iter().enumerate() {
-                    if let ItemKind::Note(n) = it.kind {
-                        of[n] = Some(i);
-                    }
+                    of[it.node] = Some(i);
                 }
             }
             of
@@ -180,11 +202,12 @@ impl Scene {
         let mut nodes = String::new();
         for (i, it) in items.iter().enumerate() {
             let (x, y) = anchor(it);
+            let node = graph.node(it.node);
             let mut class = String::from("jg-node");
             if i == 0 {
                 class.push_str(" root");
             }
-            if matches!(it.kind, ItemKind::Note(n) if on_route(n)) {
+            if on_route(it.node) {
                 class.push_str(" route");
             }
             if i == self.current() {
@@ -193,74 +216,53 @@ impl Scene {
             if self.is_spine(i) {
                 class.push_str(" spine");
             }
-            if matches!(it.kind, ItemKind::Cluster { .. }) {
-                class.push_str(" cluster");
-            }
-            match it.fold {
-                Fold::Collapsed(_) => class.push_str(" collapsed"),
-                Fold::Expanded => class.push_str(" expanded"),
-                Fold::Leaf | Fold::Fixed => {}
-            }
-            if !self.children(i).is_empty() {
-                class.push_str(" inner");
+            match it.handle {
+                Handle::Folded(_) => class.push_str(" folded"),
+                Handle::Unfolded => class.push_str(" unfolded"),
+                Handle::None => {}
             }
             if bundled[i] {
                 class.push_str(" bundled");
             }
-            let parent = it.parent.map_or(String::new(), |p| p.to_string());
-            let w = width(it);
-            match &it.kind {
-                ItemKind::Note(n) => {
-                    let node = graph.node(*n);
-                    let name = node
-                        .path
-                        .file_name()
-                        .map(|f| f.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let to = joined(node.targets.iter().filter_map(|&t| item_of[t]));
-                    let _ = write!(
-                        nodes,
-                        r#"<g class="{class}" data-i="{i}" data-key="{key}" data-parent="{parent}" data-title="{title_attr}" data-path="{path}" data-to="{to}" data-members="{members}" transform="translate({x:.1} {top:.1})"><rect width="{w}" height="{NODE_H}" rx="8"/><circle class="dot" cy="{half}" r="{r}"/><text class="t" x="16" y="18">{title}</text><text class="f" x="16" y="33">{name}</text>"#,
-                        key = it.key,
-                        members = preview(graph, it.fold, &node.targets),
-                        title_attr = escape_html(&node.title),
-                        path = escape_html(&display_path(&node.path, base)),
-                        top = y - NODE_H / 2.0,
-                        half = NODE_H / 2.0,
-                        r = if i == 0 { 5.5 } else { 3.5 },
-                        title = escape_html(&truncate(&node.title, TITLE_CHARS)),
-                        name = escape_html(&truncate(&name, NAME_CHARS)),
-                    );
-                    // What `l` would show, or — in the tree view, where every
-                    // placed link is drawn — how many the budget cut.
-                    let more = match it.fold {
-                        Fold::Collapsed(n) => Some(("jg-badge", n)),
-                        _ if self.view() == View::Tree && node.hidden > 0 => {
-                            Some(("jg-more", node.hidden))
-                        }
-                        _ => None,
-                    };
-                    if let Some((badge, n)) = more {
-                        let _ = write!(
-                            nodes,
-                            r#"<text class="{badge}" x="{bx}" y="{by}">+{n}</text>"#,
-                            bx = w + 10.0,
-                            by = NODE_H / 2.0 + 4.0,
-                        );
-                    }
-                }
-                ItemKind::Cluster { members, .. } => {
-                    let n = members.len();
-                    let links = if n == 1 { "link" } else { "links" };
-                    let _ = write!(
-                        nodes,
-                        r#"<g class="{class}" data-i="{i}" data-key="{key}" data-parent="{parent}" data-title="{n} more {links}" data-path="" data-members="{preview}" transform="translate({x:.1} {top:.1})"><rect width="{w}" height="{NODE_H}" rx="21"/><text class="t" x="{cx}" y="26" text-anchor="middle">+{n}</text>"#,
-                        key = it.key,
-                        preview = preview(graph, it.fold, members),
-                        top = y - NODE_H / 2.0,
-                        cx = w / 2.0,
-                    );
-                }
+            let (peek_lines, peek_more) = match &it.handle {
+                Handle::Folded(hidden) => peek(graph, hidden),
+                Handle::None | Handle::Unfolded => (String::new(), 0),
+            };
+            let _ = write!(
+                nodes,
+                r#"<g class="{class}" data-i="{i}" data-key="{key}" data-parent="{parent}" data-title="{title_attr}" data-path="{path}" data-cut="{cut}" data-to="{to}" data-peek="{peek_lines}" data-peek-more="{peek_more}" transform="translate({x:.1} {top:.1})"><rect width="{NODE_W}" height="{NODE_H}" rx="8"/><circle class="dot" cy="{half}" r="{r}"/><text class="t" x="16" y="18">{title}</text><text class="f" x="16" y="33">{name}</text>"#,
+                key = it.key,
+                parent = it.parent.map_or(String::new(), |p| p.to_string()),
+                title_attr = escape_html(&node.title),
+                path = escape_html(&display_path(&node.path, base)),
+                cut = cut(node.hidden),
+                to = joined(node.targets.iter().filter_map(|&t| item_of[t])),
+                top = y - NODE_H / 2.0,
+                half = NODE_H / 2.0,
+                r = if i == 0 { 5.5 } else { 3.5 },
+                title = escape_html(&truncate(&node.title, TITLE_CHARS)),
+                name = escape_html(&truncate(&file_name(&node.path), NAME_CHARS)),
+            );
+            // The fold handle: `+n` folded, `−` unfolded, none when there is
+            // nothing to unfold in this view —
+            // the pill's last slot, behind a hairline, and its own click
+            // target, so a click on the rest of the pill only ever selects.
+            // The label sits in a translated group: text is counter-scaled
+            // about its local origin (graph.css `--sx`).
+            let label = match &it.handle {
+                Handle::Folded(hidden) => Some(format!("+{}", hidden.len())),
+                Handle::Unfolded => Some("\u{2212}".to_string()),
+                Handle::None => None,
+            };
+            if let Some(label) = label {
+                let _ = write!(
+                    nodes,
+                    r#"<g class="jg-handle"><rect class="hit" x="{hx}" width="{HANDLE_W}" height="{NODE_H}"/><line class="hair" x1="{hx}" y1="9" x2="{hx}" y2="{hy}"/><g transform="translate({tx} {ty})"><text text-anchor="middle">{label}</text></g></g>"#,
+                    hx = NODE_W - HANDLE_W,
+                    hy = NODE_H - 9.0,
+                    tx = NODE_W - HANDLE_W / 2.0,
+                    ty = NODE_H / 2.0,
+                );
             }
             nodes.push_str("</g>");
         }
@@ -270,7 +272,7 @@ impl Scene {
         let width = 2.0 * PAD + cols as f64 * COLUMN + NODE_W + 40.0;
         let height = 2.0 * PAD + (bottom - top + 1.0) * ROW;
         format!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" class="jg" data-view="{view}" data-route="{route}" data-column="{COLUMN}" width="{width:.0}" height="{height:.0}"><g class="jg-edges">{edges}</g><g class="jg-route">{spine}</g><g class="jg-bundles">{bundles}</g><g class="jg-nodes">{nodes}</g></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" class="jg" data-view="{view}" data-route="{route}" data-column="{COLUMN}" data-row="{ROW}" width="{width:.0}" height="{height:.0}"><g class="jg-edges">{edges}</g><g class="jg-route">{spine}</g><g class="jg-bundles">{bundles}</g><g class="jg-nodes">{nodes}</g></svg>"#,
             view = self.view().name(),
             route = joined(self.spine()),
         )
@@ -282,22 +284,22 @@ mod tests {
     use std::path::PathBuf;
 
     use super::super::tests::{p, table};
-    use super::super::{Expanded, NODE_BUDGET, Note, build};
+    use super::super::{Folds, NODE_BUDGET, Scan, build};
     use super::*;
 
     #[test]
     fn the_svg_marks_root_route_and_current_and_escapes_titles() {
         let mut read = table(&[("a", &["b"])]);
         let g = build(&[p("a"), p("b")], NODE_BUDGET, move |path: &Path| {
-            let mut note: Note = read(path);
+            let mut scan: Scan = read(path);
             if path == p("b") {
-                note.title = Some("<Tom & Jerry>".into());
+                scan.title = Some("<Tom & Jerry>".into());
             }
-            note
+            scan
         })
         .unwrap();
-        let svg = Scene::new(&g, View::Links, &Expanded::new()).svg(&g, Path::new("/v"));
-        assert!(svg.contains(r#"class="jg-node root route spine inner" data-i="0""#));
+        let svg = Scene::new(&g, View::Links, &Folds::new()).svg(&g, Path::new("/v"));
+        assert!(svg.contains(r#"class="jg-node root route spine" data-i="0""#));
         assert!(svg.contains(r#"class="jg-node route current spine" data-i="1""#));
         assert!(svg.contains("&lt;Tom &amp; Jerry&gt;"));
         assert!(svg.contains(r#"data-path="b.md""#));
@@ -307,60 +309,110 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_items_carry_badges_and_bundles_are_emitted() {
+    fn a_handle_reads_plus_n_folded_and_minus_unfolded() {
         let read = table(&[("a", &["b", "c", "d"]), ("b", &["e", "f"])]);
         let g = build(&[p("a")], NODE_BUDGET, read).unwrap();
-        let links = Scene::new(&g, View::Links, &Expanded::new());
+        let links = Scene::new(&g, View::Links, &Folds::new());
         let svg = links.svg(&g, &PathBuf::from("/v"));
-        assert!(svg.contains(r#"<text class="jg-badge""#) && svg.contains(">+2</text>"));
+        assert!(svg.contains(">+2</text>"), "b folds e and f");
         assert!(
-            svg.contains(">2 notes</text>") && !svg.contains(">3 notes</text>"),
+            svg.contains(">\u{2212}</text>"),
+            "the current node is unfolded"
+        );
+        assert!(svg.contains(r#"class="jg-node folded""#));
+        assert!(
+            svg.contains(">2 nodes</text>") && !svg.contains(">3 nodes</text>"),
             "c and d bundle; b has links of its own"
         );
         assert!(
             !svg.contains(r#"data-to="1"#),
-            "cross-links are a tree-view thing"
+            "link highlighting is a tree-view thing"
         );
 
-        let tree = Scene::new(&g, View::Tree, &Expanded::new());
+        let tree = Scene::new(&g, View::Tree, &Folds::new());
         let svg = tree.svg(&g, &PathBuf::from("/v"));
         assert!(svg.contains(r#"data-view="tree""#));
         // Items in placement order: a, b (with e, f under it), c, d.
         assert!(svg.contains(r#"data-to="1 4 5""#), "a links b, c, d");
+        assert!(
+            !svg.contains(">+"),
+            "nothing starts folded in the tree view"
+        );
+    }
+
+    /// The `data-peek` attribute of the first folded item, unescaped and
+    /// parsed, with its `data-peek-more`.
+    fn peek_of(svg: &str) -> (serde_json::Value, usize) {
+        let at = svg.find(" folded\"").expect("a folded item");
+        let attr = |name: &str| {
+            let key = format!("{name}=\"");
+            let from = svg[at..].find(&key).unwrap() + at + key.len();
+            let to = svg[from..].find('"').unwrap() + from;
+            svg[from..to]
+                .replace("&quot;", "\"")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&amp;", "&")
+        };
+        (
+            serde_json::from_str(&attr("data-peek")).expect("data-peek is JSON"),
+            attr("data-peek-more").parse().unwrap(),
+        )
     }
 
     #[test]
-    fn a_collapsed_item_lists_what_it_holds_for_the_hover_preview() {
-        let many: Vec<String> = (0..20).map(|i| format!("n{i:02}")).collect();
+    fn a_folded_node_carries_what_a_peek_shows_as_json() {
+        let many: Vec<String> = (0..40).map(|i| format!("n{i:02}")).collect();
         let many: Vec<&str> = many.iter().map(String::as_str).collect();
-        let mut links: Vec<&str> = vec!["x"];
-        links.push("b");
-        links.extend(&many);
-        let read = table(&[("a", links.as_slice())]);
-        let g = build(&[p("a"), p("b")], NODE_BUDGET, read).unwrap();
-        let s = Scene::new(&g, View::Links, &Expanded::new());
-        let svg = s.svg(&g, Path::new("/v"));
-        assert!(svg.contains(r#"data-members="x""#), "the cluster above");
-        let below: Vec<String> = many[..15].iter().map(|t| t.to_string()).collect();
-        let expected = format!("data-members=\"{}\nand 5 more\"", below.join("\n"));
-        assert!(svg.contains(&expected), "capped at 15");
-
-        let mut open = Expanded::new();
-        open.insert(s.item(s.children(0)[2]).key.clone());
-        let svg = Scene::new(&g, View::Links, &open).svg(&g, Path::new("/v"));
+        let read = table(&[("a", &["hub"]), ("hub", many.as_slice())]);
+        let g = build(&[p("a")], NODE_BUDGET, read).unwrap();
+        let svg = Scene::new(&g, View::Links, &Folds::new()).svg(&g, Path::new("/v"));
+        let (nodes, more) = peek_of(&svg);
+        assert_eq!(nodes.as_array().unwrap().len(), 30, "capped at 30");
+        assert_eq!(more, 10, "the rest counted");
+        assert_eq!(nodes[0]["title"], "n00");
+        assert_eq!(nodes[0]["file"], "n00.md");
         assert!(
-            !svg.contains("and 5 more"),
-            "an expanded cluster shows its notes"
+            svg.contains(r#"data-peek="" data-peek-more="0""#),
+            "an unfolded one peeks at nothing"
         );
     }
 
     #[test]
-    fn a_cluster_reads_as_a_count() {
-        let read = table(&[("a", &["x", "b", "y", "z"])]);
-        let g = build(&[p("a"), p("b")], NODE_BUDGET, read).unwrap();
-        let svg = Scene::new(&g, View::Links, &Expanded::new()).svg(&g, Path::new("/v"));
-        assert!(svg.contains(r#"data-key="0.a""#));
-        assert!(svg.contains(r#"data-title="2 more links""#));
-        assert!(svg.contains(">+2</text>"));
+    fn a_peek_survives_tabs_newlines_and_quotes() {
+        let mut read = table(&[("a", &["hub"]), ("hub", &[])]);
+        let odd = PathBuf::from("/v/we\nird.md");
+        let link = odd.clone();
+        let g = build(&[p("a")], NODE_BUDGET, move |path: &Path| {
+            let mut scan: Scan = read(path);
+            if path == p("hub") {
+                scan.links = vec![link.clone()];
+            }
+            if path == link {
+                scan.title = Some("tab\there \"quoted\" <b>&".into());
+            }
+            scan
+        })
+        .unwrap();
+        let svg = Scene::new(&g, View::Links, &Folds::new()).svg(&g, Path::new("/v"));
+        let (nodes, _) = peek_of(&svg);
+        assert_eq!(nodes[0]["title"], "tab\there \"quoted\" <b>&");
+        assert_eq!(nodes[0]["file"], odd.file_name().unwrap().to_str().unwrap());
+    }
+
+    #[test]
+    fn links_the_budget_cut_are_said_in_the_panel_not_as_a_handle() {
+        let read = table(&[("a", &["b", "c", "d", "e"])]);
+        let g = build(&[p("a")], 3, read).unwrap();
+        for view in [View::Links, View::Tree] {
+            let svg = Scene::new(&g, view, &Folds::new()).svg(&g, Path::new("/v"));
+            assert!(
+                svg.contains(r#"data-cut="2 more links not walked""#),
+                "{view:?}"
+            );
+            assert!(!svg.contains(">+2</text>"));
+        }
+        assert_eq!(cut(1), "1 more link not walked");
+        assert_eq!(cut(0), "");
     }
 }

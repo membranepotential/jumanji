@@ -62,7 +62,7 @@ webview sees a keypress, so the vim layer is absolute. See
 | `/` | search (`n` / `N` for next / previous match) |
 | `Tab` | table of contents (`j`/`k` move, `l`/`h` expand/collapse, `Enter` jump) |
 | `f` / `F` | follow link via hints / show link target |
-| `t` | document graph: the route you took as a line, and where its notes lead (see below) |
+| `t` | document graph: the route you took as a line, and where its nodes lead (see below) |
 | `m<x>` / `'<x>` | set / jump to quickmark `x` |
 | `Ctrl-o` / `Ctrl-i`, `Backspace` | jumplist back / forward — spans documents, so `Ctrl-o` / `Backspace` returns to the previous file after following a link |
 | `Ctrl-r` | recolor (dark mode) |
@@ -176,56 +176,70 @@ properties table (or set `show-frontmatter = true` to start that way).
 
 ## Document graph
 
-`t` draws the notes around the one you are reading — the breadcrumb only shows
-the route you took; this shows where else you could go. The route from the
-first document of your session to the current one is a straight line in the
-accent colour, one column per step; everything else hangs above and below it,
-and nothing jumps around between openings. A step no link explains (`:open`, a
-jump from the graph) is dashed.
+`t` draws the documents around the one you are reading as a graph of
+**nodes** — the breadcrumb only shows the route you took; this shows where
+else you could go. The route from the first document of your session to the
+current one is a straight accent line, one column per step; every other node
+hangs above or below it, and nothing moves unless you move it. A step no link
+explains (`:open`, a jump from the graph) is dashed. The feature is documented
+in [docs/graph/](docs/graph/README.md); how it behaves, gesture by gesture, is
+specified in [interaction.md](docs/graph/interaction.md).
 
-Two views, `v` switches (option `graph-view`, default `links`); the statusbar
-names the one on screen (`Graph: links`):
+A node's **children** are the nodes it links to — which ones, the view
+decides. Every node with children in the current view has a **handle** at the
+right end of its pill (beside its label when zoomed far out): `+n` while it is
+folded (`n` children hidden), `−` while it is unfolded; no handle means
+nothing to unfold here. Handles are muted, and hover only brightens a pill:
+the accent belongs to the route. The route and the current node open
+unfolded, so each route step shows its **siblings** — its parent's other
+links, in its column, above (listed before it) and below (after it) — and the
+current node's links fan out to the right. Folding a route node hides its
+siblings, never the route.
 
-- **links** — what the current note leads to: its links fan out to the right,
-  one item per link (a link back to a note on the route is there too). The
-  other route notes' links fold into a `+n` cluster above and below the line.
-  A cluster, or a note with `+n` links of its own, expands in place; hovering
-  one (or the `+n` badge) lists the titles it holds.
-- **tree** — every note reachable from where you started, once each, under the
-  first note that reached it. Selecting a note outlines the notes it links to
-  and fades everything else off the route.
+Two views, `v` switches (option `graph-view`, default `links`); the status
+line names the one on screen (`Graph: links`):
 
-Inside the graph:
+- **links** — every outgoing link is a child, so a node can appear more than
+  once; nodes off the route start folded.
+- **tree** — the spanning tree, every node once, all unfolded. Selecting a node
+  outlines the nodes it links to and dims the rest.
 
-| Key | Action |
-|---|---|
-| `j` / `k` | next / previous item in the column |
-| `l` | expand the selected item, else select a child (the route first) |
-| `h` | collapse the selected item, else select its parent |
-| `Enter`, double-click | open the selected note (on a cluster: expand it) |
-| `v` | switch between the links and the tree view |
-| click | select an item; on a cluster or a `+n` badge, expand it |
-| `+` / `-` / `=` | zoom in / out / back to 1:1 on the current note |
-| wheel, `Shift`+wheel, drag | pan (up/down, sideways, freely) |
-| `Ctrl`+wheel | zoom at the cursor |
-| `:` | command line (`:set graph-view tree` redraws the open graph) |
-| `t`, `Esc` | close, back to normal mode |
+Folding works the same in both, and a fold made in one holds in the other.
 
-The graph opens with the whole route and the current note's links in view
-when they fit the window, else with the current note a third of the way
-across. The panel bottom left shows the selected note's title and path, and
-the route as a breadcrumb: click a segment to select that note. Zoomed out,
-the graph shows less but stays readable: file names go first, then sibling
-notes without links of their own merge into one `12 notes` bar, and the labels
-that remain keep a readable size — columns shrink less than rows, labels are
-shortened to fit a column, and where two would still collide, the one nearer
-the route wins (hover shows the other).
+| Key | Mouse | Action |
+|---|---|---|
+| `j` / `k`, `h`, `l` | click a pill, or a breadcrumb segment | select: next / previous in the column, the parent, a child (the route first) |
+| `l` on a folded node | — | unfold it and select its first child |
+| `Space` | click the handle | fold / unfold (`+n` ⇄ `−`) |
+| — | rest the pointer on a folded node | peek: its children as a temporary fan, full size whatever the zoom; nothing else moves |
+| `Enter` | double-click | open the node's document; the graph closes |
+| `v` | — | switch between the links and the tree view |
+| `+` / `-`, `=` | `Ctrl`+wheel | zoom about the selection / 1:1 on the current node / zoom at the cursor |
+| — | wheel, `Shift`+wheel, drag | pan (up/down, sideways, freely) |
+| — | click a bundle (zoomed out) | zoom in on it |
+| `:` | — | command line (`:set graph-view tree`, `:graph fold`, …) |
+| `t`, `Esc` | — | close, back to reading |
 
-Opening a note goes through the same jumplist as a clicked link, so
+The graph opens with the whole route and the current node's links in view
+when they fit the window; else with the whole route in view and the links
+running off the right edge; only a route wider than the window opens with the
+current node a third of the way across. The panel bottom left shows the
+selected node's title and path, how many of its links the walk did not follow (`12 more links not walked`, when
+it hit its node budget), and the route as a breadcrumb. Zoomed out, the graph
+shows less but stays readable: file names go first, then sibling nodes with
+nothing to unfold here merge into one `12 nodes` bar (click it to zoom in). Text never shrinks below a
+readable size on screen (titles 14 px, file names 12 px, handles 13 px,
+far-out labels 15 px); a label that no longer fits its pill is cut with an
+ellipsis, columns shrink less than rows, and where two labels would still
+collide, the one nearer the route wins (hover shows the other). Resizing the
+window keeps what is in its middle in the middle.
+
+Opening a node goes through the same jumplist as a clicked link, so
 `Backspace` / `Ctrl-o` returns. Markdown links and wikilinks resolve exactly as
-they do when reading; only `.md`/`.markdown` targets become items. All of it —
-the walk, the layout, the SVG — is Rust in `core::graph`; no bundled JS
-library.
+they do when reading; only `.md`/`.markdown` targets become nodes. All of it —
+the walk, the layout, the SVG — is Rust in
+[`src/core/graph/`](src/core/graph/mod.rs); no bundled JS library
+([D14](docs/DESIGN.md#d14-the-document-graph--a-route-spine-with-its-links-fanned-out-2026-09-18)).
 
 ## External fence renderers
 
@@ -394,7 +408,10 @@ run's numbers and the accumulated trail are workflow artifacts —
 
 ## Documentation
 
-Design decisions, research, and a development log live in [`docs/`](docs/):
+The documentation index is [docs/](docs/README.md) — design decisions,
+testing, the dev log, and feature docs such as the
+[document graph](docs/graph/README.md). Design decisions, research, and a
+development log live in [`docs/`](docs/):
 [DESIGN.md](docs/DESIGN.md) is the architecture decision record,
 [DEVLOG.md](docs/DEVLOG.md) chronicles progress, and
 [research/](docs/research/) holds the full landscape/architecture research the

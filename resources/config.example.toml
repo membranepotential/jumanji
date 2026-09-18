@@ -47,11 +47,11 @@
 # Base body font size in pixels. Also the 100% reference point for text zoom.
 # font-size = 18
 
-# What the document graph (`t`) shows around the route you took: "links" —
-# the current note's links fanned out, the other route notes' links folded
-# into clusters you expand with `l` — or "tree", the whole spanning tree of
-# notes reachable from where you started. `v` switches while the graph is
-# open; `:set graph-view` changes an open graph too.
+# What a node's children are in the document graph (`t`): "links" — every
+# document it links to, so a node can appear more than once, with nodes off
+# the route starting folded — or "tree", the spanning tree of documents
+# reachable from where you started, every node once and unfolded. `v` switches
+# while the graph is open; `:set graph-view` changes an open graph too.
 # graph-view = "links"
 
 # Which system selection a copied text selection is written to, zathura-style:
@@ -148,9 +148,10 @@
 # [keys.graph]
 # "j" = "graph next"
 # "k" = "graph previous"
-# "h" = "graph parent"               # collapse the item, else up to its parent
-# "l" = "graph child"                # expand the item, else down to a child
-# "<CR>" = "graph open"              # on a cluster: expand it
+# "h" = "graph parent"               # move to the parent; never folds
+# "l" = "graph child"                # move to a child, unfolding a folded node
+# "<Space>" = "graph fold"           # fold / unfold the selected node
+# "<CR>" = "graph open"
 # "v" = "graph view"
 # ":" = "command line"
 # "+" = "zoom in"

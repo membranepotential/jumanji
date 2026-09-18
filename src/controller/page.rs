@@ -39,6 +39,21 @@ pub enum ZoomAnchor {
     Point { x: f64, y: f64 },
 }
 
+/// Which point a graph zoom keeps fixed on screen (DESIGN D14).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraphZoomAt {
+    /// The pointer, as the page itself last saw it (`Ctrl`+wheel). Not a
+    /// position the controller passes in: the shell's pointer is in toolkit
+    /// logical px, and WebKitGTK can lay the page out at its own screen scale
+    /// on top of the page zoom (seen: 2 logical px per CSS px at zoom 1), so no
+    /// conversion from outside is safe. The page's `clientX/clientY` is CSS px
+    /// by definition.
+    Pointer,
+    /// The selection's centre on screen (`+` / `-`): the keys zoom where the
+    /// keyboard's attention is (docs/graph/interaction.md, "Zoom").
+    Selection,
+}
+
 /// Where a document opens: the reading position a load must land on *before*
 /// its first painted frame.
 ///
@@ -177,6 +192,13 @@ pub struct ViewportState {
     /// scoping fix: this must not be near-black (`rgb(50, 50, 50)`, i.e.
     /// `InspiredGithub`'s light colour) once dark mode is on.
     pub fn_color: String,
+    /// The document graph's selected item on screen, in CSS px: its pill's
+    /// centre (`-1` when no graph is open) and width (0). The observable for
+    /// "a zoom about the pointer keeps what is under it in place" (DESIGN D14),
+    /// and — through the width — for "the graph's scale changed".
+    pub graph_sel_x: f64,
+    pub graph_sel_y: f64,
+    pub graph_sel_width: f64,
 }
 
 /// The snapshot as it comes back over [`Viewport::eval_json`]: the short keys
@@ -207,6 +229,9 @@ struct Snapshot {
     rv: f64,
     rt: bool,
     rs: bool,
+    sx: f64,
+    sy: f64,
+    sw: f64,
 }
 
 impl From<Snapshot> for ViewportState {
@@ -230,6 +255,9 @@ impl From<Snapshot> for ViewportState {
             revealed_by_failsafe: s.rt,
             restoring: s.rs,
             fn_color: s.fc,
+            graph_sel_x: s.sx,
+            graph_sel_y: s.sy,
+            graph_sel_width: s.sw,
         }
     }
 }
@@ -260,6 +288,9 @@ impl ViewportState {
             revealed_by_failsafe: false,
             restoring: false,
             fn_color: String::new(),
+            graph_sel_x: -1.0,
+            graph_sel_y: -1.0,
+            graph_sel_width: 0.0,
         }
     }
 }
@@ -418,10 +449,11 @@ pub trait Page: Viewport + Clone + 'static {
         self.eval(&graph_show_js(svg, selected));
     }
 
-    /// Replace the open graph's scene after a re-layout, keeping the camera
-    /// so item `selected` stays where it is on screen.
-    fn graph_update(&self, svg: &str, selected: usize) {
-        self.eval(&graph_update_js(svg, selected));
+    /// Replace the open graph's scene after a re-layout: item `anchor` (the
+    /// one the reader acted on) stays where it is on screen, and item
+    /// `selected` is selected.
+    fn graph_update(&self, svg: &str, selected: usize, anchor: usize) {
+        self.eval(&graph_update_js(svg, selected, anchor));
     }
 
     /// Move the graph's selection to item `index`, panning it into view.
@@ -429,17 +461,16 @@ pub trait Page: Viewport + Clone + 'static {
         self.eval(&graph_call_js(&format!("select({index})")));
     }
 
-    /// Scale the graph by `factor` about a viewport point in CSS px, or about
-    /// the viewport's centre when `at` is `None`.
-    fn graph_zoom(&self, factor: f64, at: Option<(f64, f64)>) {
-        let (x, y) = match at {
-            Some((x, y)) => (x.to_string(), y.to_string()),
-            None => ("innerWidth / 2".into(), "innerHeight / 2".into()),
+    /// Scale the graph by `factor`, keeping the point `at` names fixed.
+    fn graph_zoom(&self, factor: f64, at: GraphZoomAt) {
+        let at = match at {
+            GraphZoomAt::Pointer => "'pointer'",
+            GraphZoomAt::Selection => "'selection'",
         };
-        self.eval(&graph_call_js(&format!("zoom({factor}, {x}, {y})")));
+        self.eval(&graph_call_js(&format!("zoom({factor}, {at})")));
     }
 
-    /// Back to 1:1, on the current note.
+    /// Back to 1:1, on the current node.
     fn graph_reset(&self) {
         self.eval(&graph_call_js("reset()"));
     }
@@ -627,6 +658,8 @@ pub trait Page: Viewport + Clone + 'static {
              const fm = document.querySelector('.frontmatter'); \
              const fn = document.querySelector('.entity.name.function.python'); \
              const msup = document.querySelector('math msup'); \
+             const gs = document.querySelector('#__jmnj_graph .jg-node.sel rect'); \
+             const gr = gs ? gs.getBoundingClientRect() : null; \
              const mr = m.getBoundingClientRect(); \
              /* The reading-position probe. Mirrors `capture_anchor_js` exactly \
                 — same probe points, same exclusions — so what it reports is \
@@ -661,7 +694,10 @@ pub trait Page: Viewport + Clone + 'static {
                       pt: pt, py: py, \
                       rw: rf ? rf.getBoundingClientRect().width : 0, \
                       fw: fm ? fm.getBoundingClientRect().width : 0, \
-                      fc: fn ? getComputedStyle(fn).color : ''";
+                      fc: fn ? getComputedStyle(fn).color : '', \
+                      sx: gr ? gr.left + gr.width / 2 : -1, \
+                      sy: gr ? gr.top + gr.height / 2 : -1, \
+                      sw: gr ? gr.width : 0";
         let script = format!(
             "{HEAD}, ff: typeof {FIRST_FRAME_GLOBAL} === 'number' \
              ? {FIRST_FRAME_GLOBAL} : -1, \

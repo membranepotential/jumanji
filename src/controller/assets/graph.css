@@ -59,12 +59,10 @@
 #__jmnj_graph .jg-jump {
   stroke-dasharray: 2 7;
 }
+/* Hover never borrows the accent: the edges that meet a hovered node only
+   darken to the muted text colour. */
 #__jmnj_graph .jg-edge.hover {
-  stroke: var(--accent);
-  stroke-width: 1.75;
-}
-#__jmnj_graph .jg-route-edge.hover {
-  stroke-width: 3.5;
+  stroke: var(--fg-muted);
 }
 
 /* Text and dots undo the scene's extra horizontal scale (`--sx` = k / kx,
@@ -75,8 +73,8 @@
   transform-origin: left center;
   transform: scaleX(var(--sx, 1));
 }
-#__jmnj_graph .jg-node.cluster .t,
-#__jmnj_graph .jg-node .dot {
+#__jmnj_graph .jg-node .dot,
+#__jmnj_graph .jg-handle text {
   transform-origin: center;
 }
 
@@ -87,32 +85,49 @@
   opacity: 0.35;
 }
 
-/* The hover preview of a collapsed cluster or `+n` badge. */
-#__jmnj_graph .jg-peek {
+/* The peek (graph.js `showPeek`): a folded node's children as a temporary
+   fan in a screen-space layer over the scene — full size at every zoom, over
+   a backdrop so nothing beneath shows through. */
+#__jmnj_graph .jg-peek-layer {
   position: absolute;
-  max-width: 34ch;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--fg);
-  font-size: 13px;
-  line-height: 1.45;
-  pointer-events: none;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
   /* Over the panel and the help line, which come later in the overlay. */
   z-index: 1;
-  opacity: 0;
-  transition: opacity 120ms ease;
+  pointer-events: none;
+  font-family: inherit;
 }
-#__jmnj_graph .jg-peek.shown {
-  opacity: 1;
+#__jmnj_graph .jg-ghost {
+  pointer-events: auto;
+  animation: jg-fade 120ms ease;
 }
-#__jmnj_graph .jg-peek > div {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+#__jmnj_graph .jg-ghost .trunk {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.25;
 }
-#__jmnj_graph .jg-peek > .more {
-  color: var(--fg-muted);
+#__jmnj_graph .jg-ghost .backdrop {
+  fill: var(--bg);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+#__jmnj_graph .jg-ghost-node rect {
+  fill: color-mix(in srgb, var(--fg) 6%, var(--bg));
+}
+#__jmnj_graph .jg-ghost-node .t {
+  fill: var(--fg);
+  font-size: 14px;
+}
+#__jmnj_graph .jg-ghost-node .f {
+  fill: var(--fg-muted);
+  font-size: 12px;
+}
+@keyframes jg-fade {
+  from {
+    opacity: 0;
+  }
 }
 
 #__jmnj_graph .jg-node {
@@ -123,9 +138,9 @@
   stroke: transparent;
   stroke-width: 1.5;
 }
+/* Hover is a brighter fill, nothing else. */
 #__jmnj_graph .jg-node.hover rect {
   fill: color-mix(in srgb, var(--fg) 11%, var(--bg));
-  stroke: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 #__jmnj_graph .jg-node .dot {
   fill: var(--border-strong);
@@ -133,13 +148,18 @@
 #__jmnj_graph .jg-node.route .dot {
   fill: var(--accent);
 }
+/* Minimum on-screen sizes, at every level: text is drawn in scene units,
+   which the camera scales by --k, so a size is max(base, minimum / k) —
+   titles never under 14 px on screen, file names 12 px, counts 13 px (the
+   far level's labels are 15 px, below). graph.js cuts each label to what
+   fits its pill at the size it is drawn. */
 #__jmnj_graph .jg-node .t {
   fill: var(--fg);
-  font-size: 14px;
+  font-size: max(14px, calc(14px / var(--k, 1)));
 }
 #__jmnj_graph .jg-node .f {
   fill: var(--fg-muted);
-  font-size: 11.5px;
+  font-size: max(11.5px, calc(12px / var(--k, 1)));
 }
 #__jmnj_graph .jg-node.current rect {
   fill: color-mix(in srgb, var(--accent) 22%, var(--bg));
@@ -154,26 +174,24 @@
 #__jmnj_graph .jg-node.sel rect {
   stroke: var(--fg);
 }
-#__jmnj_graph .jg-more,
-#__jmnj_graph .jg-badge {
+/* The fold handle: `+n` folded, `−` unfolded — the pill's last slot behind
+   a hairline, muted: the accent belongs to the route. */
+#__jmnj_graph .jg-handle text {
   fill: var(--fg-muted);
-  font-size: 12px;
-}
-#__jmnj_graph .jg-badge {
-  fill: var(--accent);
+  font-size: max(12px, calc(13px / var(--k, 1)));
   font-weight: 600;
+  dominant-baseline: central;
 }
-#__jmnj_graph .jg-node.cluster rect {
+#__jmnj_graph .jg-handle .hair {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+#__jmnj_graph .jg-node .jg-handle rect.hit {
   fill: transparent;
-  stroke: var(--border-strong);
-  stroke-dasharray: 3 4;
+  stroke: none;
 }
-#__jmnj_graph .jg-node.cluster .t {
-  fill: var(--fg-muted);
-  font-weight: 600;
-}
-#__jmnj_graph .jg-node.cluster.sel rect {
-  stroke: var(--fg);
+#__jmnj_graph .jg-handle:hover text {
+  fill: var(--fg);
 }
 
 #__jmnj_graph .jg-bundle rect {
@@ -195,7 +213,7 @@
 #__jmnj_graph .jg-node .t,
 #__jmnj_graph .jg-node .f,
 #__jmnj_graph .jg-node rect,
-#__jmnj_graph .jg-badge,
+#__jmnj_graph .jg-handle,
 #__jmnj_graph .jg-edge,
 #__jmnj_graph .jg-bundle {
   transition:
@@ -208,53 +226,63 @@
 }
 #__jmnj_graph.lod-mid .jg-node .f,
 #__jmnj_graph.lod-far .jg-node .f,
-#__jmnj_graph.lod-far .jg-badge,
-#__jmnj_graph.lod-far .jg-more {
+#__jmnj_graph.lod-far .jg-handle .hair {
   opacity: 0;
 }
-#__jmnj_graph.lod-mid .jg-node:not(.cluster) .t {
-  transform: translateY(8px) scaleX(var(--sx, 1));
+/* Far out the handle stands beside the label (graph.js `declutter`), where
+   its text is the click target; the in-pill slot it left takes no clicks. */
+#__jmnj_graph.lod-far .jg-handle rect.hit {
+  pointer-events: none;
+}
+/* With the file name hidden, the title sits on the pill's middle (y 21):
+   a central baseline at y 18, moved down 3. */
+#__jmnj_graph.lod-mid .jg-node .t,
+#__jmnj_graph.lod-far .jg-node .t {
+  dominant-baseline: central;
+  transform: translateY(3px) scaleX(var(--sx, 1));
 }
 #__jmnj_graph.lod-far .jg-node.bundled:not(.sel),
 #__jmnj_graph.lod-far .jg-edge.bundled {
   opacity: 0;
   pointer-events: none;
 }
+/* Far out, a bundle is a handle too: a click zooms in on it. */
 #__jmnj_graph.lod-far .jg-bundle {
   opacity: 1;
+  pointer-events: auto;
+  cursor: zoom-in;
 }
 #__jmnj_graph.lod-far .jg-bundle.dim {
   opacity: 0.35;
 }
-#__jmnj_graph.lod-far .jg-node:not(.cluster):not(.sel) rect {
+/* Far out the pills go, except the selection's and the current node's
+   tint, which stays at every level. */
+#__jmnj_graph.lod-far .jg-node:not(.sel):not(.current) rect {
   opacity: 0;
 }
 #__jmnj_graph.lod-far .jg-node .t,
 #__jmnj_graph.lod-far .jg-bundle .t {
-  /* graph.js FAR_FONT: the on-screen size, whatever the scale. */
+  /* The far level: 15 px on screen, whatever the scale. */
   font-size: calc(15px / var(--k));
   dominant-baseline: central;
 }
-/* Far labels that would overlap a higher-ranked one (graph.js `declutter`). */
-#__jmnj_graph .t.culled {
+/* Far labels (with their handles) that would overlap a higher-ranked one
+   (graph.js `declutter`); hover or selection shows them again. */
+#__jmnj_graph .culled {
   opacity: 0;
+  pointer-events: none;
 }
-#__jmnj_graph .jg-node.hover .t.culled,
-#__jmnj_graph .jg-node.sel .t.culled {
+#__jmnj_graph .jg-node.hover .culled,
+#__jmnj_graph .jg-node.sel .culled {
   opacity: 1;
-}
-#__jmnj_graph.lod-far .jg-node:not(.cluster) .t {
-  transform: translateY(3px) scaleX(var(--sx, 1));
-}
-#__jmnj_graph.lod-far .jg-node.cluster .t {
-  transform: translateY(-5px) scaleX(var(--sx, 1));
+  pointer-events: auto;
 }
 @media (prefers-reduced-motion: reduce) {
   #__jmnj_graph .jg-node,
   #__jmnj_graph .jg-node .t,
   #__jmnj_graph .jg-node .f,
   #__jmnj_graph .jg-node rect,
-  #__jmnj_graph .jg-badge,
+  #__jmnj_graph .jg-handle,
   #__jmnj_graph .jg-edge,
   #__jmnj_graph .jg-bundle {
     transition: none;
@@ -286,6 +314,12 @@
   font-family: var(--font-mono, monospace);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+/* Links the walk's node budget cut, for the selection. */
+#__jmnj_graph .jg-info-cut {
+  margin-top: 4px;
+  color: var(--fg-muted);
+  font-size: 12px;
 }
 #__jmnj_graph .jg-info-route {
   margin-top: 6px;

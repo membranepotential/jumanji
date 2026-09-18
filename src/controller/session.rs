@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use crate::controller::page::{InitialPosition, Page, ViewportState, ZoomAnchor};
+use crate::controller::page::{GraphZoomAt, InitialPosition, Page, ViewportState, ZoomAnchor};
 use crate::controller::scripts::message;
 use crate::controller::stdin::StdinReader;
 use crate::controller::toolkit::{Chrome, Host, Prompt, Toolkit, Viewport};
@@ -25,7 +25,7 @@ use crate::controller::watch::{FileEvent, Watch};
 use crate::core::command::{self, Command, Completions};
 use crate::core::config::{self, Options, SetEffect};
 use crate::core::editor::EditorCommand;
-use crate::core::graph::{self, Expanded, Graph, ItemKey, ItemKind, Move, Scene, Step, View};
+use crate::core::graph::{self, Folds, Graph, Handle, ItemKey, Scene, Step, View};
 use crate::core::history::{FileState, History};
 use crate::core::jumplist::{Jumplist, Location};
 use crate::core::keymap::{Key, KeyPress, Keymap, MatchResult, Matcher};
@@ -79,12 +79,12 @@ enum GraphState {
 }
 
 /// The graph on screen: the walk, and the scene derived from it for the
-/// session's [`View`](graph::View) and what the reader expanded.
+/// session's [`View`](graph::View) and the reader's folds.
 struct OpenGraph {
     graph: Graph,
     /// What paths display relative to: the vault root.
     base: PathBuf,
-    expanded: Expanded,
+    folds: Folds,
     scene: Scene,
     /// An item index into `scene`.
     selected: usize,
@@ -92,35 +92,35 @@ struct OpenGraph {
 
 impl OpenGraph {
     fn new(graph: Graph, base: PathBuf, view: View) -> Self {
-        let expanded = Expanded::new();
-        let scene = Scene::new(&graph, view, &expanded);
+        let folds = Folds::new();
+        let scene = Scene::new(&graph, view, &folds);
         let selected = scene.current();
         Self {
             graph,
             base,
-            expanded,
+            folds,
             scene,
             selected,
         }
     }
 
-    /// Lay the scene out again (an expansion or the view changed), keeping
-    /// the selection on the same item — or its nearest stand-in.
+    /// Lay the scene out again (a fold or the view changed), keeping the
+    /// selection on the same item — or its nearest stand-in.
     fn relayout(&mut self, view: View) {
         let key = self.scene.item(self.selected).key.clone();
-        self.scene = Scene::new(&self.graph, view, &self.expanded);
+        self.scene = Scene::new(&self.graph, view, &self.folds);
         self.selected = self.scene.find(&key);
     }
 
-    /// Expand (`open`) or collapse the selected item.
-    fn fold(&mut self, open: bool) {
-        let key = self.scene.item(self.selected).key.clone();
-        if open {
-            self.expanded.insert(key);
-        } else {
-            self.expanded.remove(&key);
-        }
+    /// Select item `index` and flip its fold; whether it had one to flip.
+    fn toggle(&mut self, index: usize) -> bool {
+        self.selected = index;
+        let Some((key, fold)) = self.scene.toggle(index) else {
+            return false;
+        };
+        self.folds.insert(key, fold);
         self.relayout(self.scene.view());
+        true
     }
 
     fn svg(&self) -> String {
@@ -617,9 +617,9 @@ impl<T: Toolkit + 'static> Controller<T> {
                     self.graph_open(Some(index));
                 }
             }
-            message::GRAPH_EXPAND => {
+            message::GRAPH_FOLD => {
                 if let Some(index) = self.graph_item(payload) {
-                    self.graph_expand(index);
+                    self.graph_toggle(Some(index));
                 }
             }
             _ => {}
@@ -915,7 +915,7 @@ impl<T: Toolkit + 'static> Controller<T> {
             if s.mode == Mode::Graph {
                 let step = 1.0 + s.zoom_step;
                 let factor = if dy < 0.0 { step } else { 1.0 / step };
-                s.view.graph_zoom(factor, Some(s.cursor_css()));
+                s.view.graph_zoom(factor, GraphZoomAt::Pointer);
                 return;
             }
         }
@@ -1319,7 +1319,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 } else {
                     1.0 / step
                 };
-                s.view.graph_zoom(factor, None);
+                s.view.graph_zoom(factor, GraphZoomAt::Selection);
             }
             Action::ZoomReset if s.mode == Mode::Graph => s.view.graph_reset(),
             // Keyboard / automation zoom is immediate (counts already batch) and
@@ -1504,11 +1504,15 @@ impl<T: Toolkit + 'static> Controller<T> {
             }
             Action::GraphParent => {
                 drop(s);
-                self.graph_fold(Scene::ascend, count);
+                self.graph_step(Step::Parent, count);
             }
             Action::GraphChild => {
                 drop(s);
-                self.graph_fold(Scene::descend, count);
+                self.graph_enter(count);
+            }
+            Action::GraphFold => {
+                drop(s);
+                self.graph_toggle(None);
             }
             Action::GraphOpen => {
                 drop(s);
@@ -1730,31 +1734,46 @@ impl<T: Toolkit + 'static> Controller<T> {
         s.view.graph_select(open.selected);
     }
 
-    /// `h` / `l`, `count` times: each press moves the selection, or expands or
-    /// collapses the selected item in place (DESIGN D14).
-    fn graph_fold(&self, press: fn(&Scene, usize) -> Move, count: u32) {
+    /// `l`, `count` times: select the child — the route step first — and on a
+    /// folded node unfold it first (docs/graph/interaction.md, "Enter a
+    /// folded node"). The node entered keeps its place on screen.
+    fn graph_enter(&self, count: u32) {
         let s = &mut *self.0.borrow_mut();
         let GraphState::Open(open) = &mut s.graph else {
             return;
         };
-        let mut relaid = false;
+        let mut anchor = None;
         for _ in 0..count.max(1) {
-            match press(&open.scene, open.selected) {
-                Move::Select(at) => open.selected = at,
-                Move::Expand => {
-                    open.fold(true);
-                    relaid = true;
-                }
-                Move::Collapse => {
-                    open.fold(false);
-                    relaid = true;
-                }
+            let at = open.selected;
+            if matches!(open.scene.item(at).handle, Handle::Folded(_)) {
+                open.toggle(at);
+                anchor = Some(open.scene.item(open.selected).key.clone());
             }
+            open.selected = open.scene.step(open.selected, Step::Child);
         }
-        if relaid {
-            s.view.graph_update(&open.svg(), open.selected);
+        match anchor {
+            Some(key) => {
+                let anchor = open.scene.find(&key);
+                s.view.graph_update(&open.svg(), open.selected, anchor);
+            }
+            None => s.view.graph_select(open.selected),
+        }
+    }
+
+    /// `Space` or a click on a handle: fold or unfold item `index` (the
+    /// selection when `None`), which becomes the selection and keeps its place
+    /// on screen.
+    fn graph_toggle(&self, index: Option<usize>) {
+        let s = &mut *self.0.borrow_mut();
+        let GraphState::Open(open) = &mut s.graph else {
+            return;
+        };
+        let at = index.unwrap_or(open.selected);
+        if open.toggle(at) {
+            s.view
+                .graph_update(&open.svg(), open.selected, open.selected);
         } else {
-            s.view.graph_select(open.selected);
+            s.view.graph_select(at);
         }
     }
 
@@ -1779,37 +1798,12 @@ impl<T: Toolkit + 'static> Controller<T> {
         }
     }
 
-    /// Select item `index` and expand it if it is collapsed (a click on a
-    /// cluster or a `+n` badge).
-    fn graph_expand(&self, index: usize) {
-        let s = &mut *self.0.borrow_mut();
-        let GraphState::Open(open) = &mut s.graph else {
-            return;
-        };
-        if index >= open.scene.items().len() {
-            return;
-        }
-        open.selected = index;
-        if matches!(open.scene.item(index).fold, graph::Fold::Collapsed(_)) {
-            open.fold(true);
-            s.view.graph_update(&open.svg(), open.selected);
-        } else {
-            s.view.graph_select(index);
-        }
-    }
-
-    /// Open the note of item `index` (the selection when `None`) and close the
-    /// graph; on a cluster, expand it instead. Goes through
-    /// [`Controller::open_file`], so the jump lands on the jumplist and
-    /// `Backspace` returns. Opening the current document just closes the graph.
+    /// Open the document of item `index` (the selection when `None`) and
+    /// close the graph. Goes through [`Controller::open_file`], so the jump
+    /// lands on the jumplist and `Backspace` returns. Opening the current
+    /// document just closes the graph.
     fn graph_open(&self, index: Option<usize>) {
-        /// What `Enter` lands on.
-        enum Target {
-            Current,
-            Note(PathBuf),
-            Cluster(usize),
-        }
-        let target = {
+        let path = {
             let s = self.0.borrow();
             let GraphState::Open(open) = &s.graph else {
                 return;
@@ -1818,19 +1812,12 @@ impl<T: Toolkit + 'static> Controller<T> {
             if at >= open.scene.items().len() {
                 return;
             }
-            match open.scene.item(at).kind {
-                ItemKind::Note(node) if node == open.graph.current() => Target::Current,
-                ItemKind::Note(node) => Target::Note(open.graph.node(node).path.clone()),
-                ItemKind::Cluster { .. } => Target::Cluster(at),
-            }
+            let node = open.scene.item(at).node;
+            (node != open.graph.current()).then(|| open.graph.node(node).path.clone())
         };
-        match target {
-            Target::Cluster(at) => self.graph_expand(at),
-            Target::Current => self.0.borrow_mut().close_graph(),
-            Target::Note(path) => {
-                self.0.borrow_mut().close_graph();
-                self.open_file(path, None);
-            }
+        self.0.borrow_mut().close_graph();
+        if let Some(path) = path {
+            self.open_file(path, None);
         }
     }
 
@@ -2337,10 +2324,12 @@ impl<T: Toolkit> Session<T> {
         match &self.graph {
             GraphState::Open(open) => GraphSnapshot {
                 view: open.scene.view().name(),
-                selected: match open.scene.item(open.selected).kind {
-                    ItemKind::Note(n) => open.graph.node(n).path.to_string_lossy().into_owned(),
-                    ItemKind::Cluster { .. } => String::new(),
-                },
+                selected: open
+                    .graph
+                    .node(open.scene.item(open.selected).node)
+                    .path
+                    .to_string_lossy()
+                    .into_owned(),
                 items: open.scene.items().len(),
             },
             GraphState::Closed | GraphState::Building(_) => GraphSnapshot {
@@ -2371,7 +2360,8 @@ impl<T: Toolkit> Session<T> {
     fn relayout_graph(&mut self) {
         if let GraphState::Open(open) = &mut self.graph {
             open.relayout(self.graph_view);
-            self.view.graph_update(&open.svg(), open.selected);
+            self.view
+                .graph_update(&open.svg(), open.selected, open.selected);
             self.show_graph_view();
         }
     }
@@ -2450,15 +2440,12 @@ impl<T: Toolkit> Session<T> {
     /// anchor — the error grows with distance from the origin (the
     /// cursor-near-bottom bug).
     fn cursor_anchor(&self) -> ZoomAnchor {
-        let (x, y) = self.cursor_css();
-        ZoomAnchor::Point { x, y }
-    }
-
-    /// The pointer in the viewport's CSS px (see [`cursor_anchor`](Self::cursor_anchor)).
-    fn cursor_css(&self) -> (f64, f64) {
         let (x, y) = self.pointer;
         let zoom = self.zoom.max(0.2);
-        (x / zoom, y / zoom)
+        ZoomAnchor::Point {
+            x: x / zoom,
+            y: y / zoom,
+        }
     }
 }
 
@@ -2467,38 +2454,40 @@ impl<T: Toolkit> Session<T> {
 // ---------------------------------------------------------------------------
 
 /// The worker half of the document graph: walk from the trail's root, with
-/// the base paths display against. Paths are canonicalised here so a note
+/// the base paths display against. Paths are canonicalised here so a document
 /// reached by two spellings (`./a.md`, `sub/../a.md`, a symlink) is one node.
 fn build_graph(trail: &[PathBuf], index: &VaultIndex, base: &Path) -> Option<(Graph, PathBuf)> {
     let trail: Vec<PathBuf> = trail
         .iter()
         .filter_map(|p| std::fs::canonicalize(p).ok())
         .collect();
-    let graph = graph::build(&trail, graph::NODE_BUDGET, |path| read_note(path, index))?;
+    let graph = graph::build(&trail, graph::NODE_BUDGET, |path| {
+        read_document(path, index)
+    })?;
     let base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
     Some((graph, base))
 }
 
-/// One note for the graph walk: its head (at most [`graph::READ_CAP`] bytes)
-/// scanned, its links canonicalised, missing targets dropped. An unreadable
-/// note is a leaf, not an error.
-fn read_note(path: &Path, index: &VaultIndex) -> graph::Note {
+/// One document for the graph walk: its head (at most [`graph::READ_CAP`]
+/// bytes) scanned, its links canonicalised, missing targets dropped. An
+/// unreadable document is a node without links, not an error.
+fn read_document(path: &Path, index: &VaultIndex) -> graph::Scan {
     use std::io::Read;
     let mut bytes = Vec::new();
     let read =
         std::fs::File::open(path).and_then(|f| f.take(graph::READ_CAP).read_to_end(&mut bytes));
     if read.is_err() {
-        return graph::Note::default();
+        return graph::Scan::default();
     }
-    let mut note = graph::scan(&String::from_utf8_lossy(&bytes), path, index);
+    let mut scan = graph::scan(&String::from_utf8_lossy(&bytes), path, index);
     let mut seen = std::collections::HashSet::new();
-    note.links = note
+    scan.links = scan
         .links
         .into_iter()
         .filter_map(|link| std::fs::canonicalize(link).ok())
         .filter(|link| link.is_file() && seen.insert(link.clone()))
         .collect();
-    note
+    scan
 }
 
 fn hint_prompt(kind: HintKind) -> &'static str {
@@ -2752,7 +2741,8 @@ fn expand_env_token(token: &str) -> String {
 /// whether the pointer is inside a diagram — the flag `Ctrl`+wheel routes on,
 /// and the only way an e2e can find a diagram without guessing at the host's
 /// device scale factor; `graph_view`, `graph_selected` and `graph_items`
-/// describe an open document graph (DESIGN D14); the rest are unchanged.
+/// describe an open document graph (DESIGN D14), `graph_sel_*` its selected
+/// item's box on screen; the rest are unchanged.
 #[allow(clippy::too_many_arguments)]
 fn state_json(
     file: &str,
@@ -2784,6 +2774,8 @@ fn state_json(
          \"reveal_scroll_y\":{reveal_scroll_y},\
          \"reveal_failsafe\":{reveal_failsafe},\"restoring\":{restoring},\
          \"fn_color\":{fn_color},\
+         \"graph_sel_x\":{graph_sel_x},\"graph_sel_y\":{graph_sel_y},\
+         \"graph_sel_width\":{graph_sel_width},\
          \"dark\":{dark},\"wide\":{wide},\"diagram_fit\":{diagram_fit},\
          \"diagram_hover\":{diagram_hover},\
          \"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
@@ -2811,6 +2803,9 @@ fn state_json(
         reveal_failsafe = vs.revealed_by_failsafe,
         restoring = vs.restoring,
         fn_color = json_string(&vs.fn_color),
+        graph_sel_x = vs.graph_sel_x,
+        graph_sel_y = vs.graph_sel_y,
+        graph_sel_width = vs.graph_sel_width,
         mode = json_string(mode),
         graph_view = json_string(graph.view),
         graph_selected = json_string(&graph.selected),
@@ -2819,8 +2814,8 @@ fn state_json(
 }
 
 /// The document graph as the state snapshot reports it: `view` is `""` and
-/// `items` 0 unless the graph is open; `selected` is the selected note's path,
-/// `""` for a cluster.
+/// `items` 0 unless the graph is open; `selected` is the selected node's path,
+/// `""` when closed.
 struct GraphSnapshot {
     view: &'static str,
     selected: String,

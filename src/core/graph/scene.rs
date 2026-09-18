@@ -1,42 +1,47 @@
-//! The scene (DESIGN D14): which items are on screen and where.
+//! The scene (DESIGN D14, docs/graph/interaction.md): which items are on
+//! screen and where.
 //!
 //! A [`Scene`] is derived, never edited: it is a function of the [`Graph`],
-//! the [`View`] and the set of [`Expanded`] items. Expanding, collapsing or
-//! switching the view builds a new one; an item's [`ItemKey`] is what carries
-//! the selection across.
+//! the [`View`] and the reader's [`Folds`]. Folding, unfolding or switching
+//! the view builds a new one; an item's [`ItemKey`] is what carries the
+//! selection across.
+//!
+//! One object: every item is a node, with one fold state. Its **children** are
+//! the nodes it links to — every outgoing link in the links view, its spanning
+//! tree children in the tree view — shown when it is unfolded. The route nodes
+//! and the current node start unfolded; in the links view every other node
+//! starts folded, in the tree view unfolded. A route node's children are the
+//! next route step (always shown: the route cannot be folded away) and its
+//! other links, which sit in the next step's column as its **siblings**.
 //!
 //! The layout is a grid: an item sits in a column (link steps from the root
 //! along the displayed tree) and on a row (in item heights, `0` is the spine,
 //! negative is above). Three passes:
 //!
-//! 1. **The displayed tree.** The route root → current takes items
-//!    `0..spine`, one column per step. Around it, per view: *links* fans out
-//!    the current note's links and folds every other spine note's remaining
-//!    links into a cluster above and one below; *tree* hangs the spanning
-//!    tree's other notes where the walk put them.
-//! 2. **Packing.** The current note's children are one block centred on the
-//!    spine row. Every other spine note's children form a block above and a
+//! 1. **The displayed tree.** The route root → current takes items `0..spine`,
+//!    one column per step; everything unfolded hangs off it.
+//! 2. **Packing.** The current node's children are one block centred on the
+//!    spine row. Every other route node's siblings form a block above and a
 //!    block below, split by link order around the route child. Blocks are tidy
 //!    forests (leaves on consecutive rows, a parent midway between its first
-//!    and last child), placed deepest spine note first against a per-column
+//!    and last child), placed deepest route node first against a per-column
 //!    skyline, each as close to the spine as the columns it spans allow.
-//! 3. **Bundles.** Runs of two or more sibling leaves, which the far zoom
-//!    level draws as one bar.
+//! 3. **Bundles.** Runs of two or more sibling leaves (nodes with nothing to
+//!    unfold in this view), which the far zoom level draws as one bar.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 
 use super::{EdgeKind, Graph};
 
-/// What the scene shows around the spine (option `graph-view`, `v`).
+/// What a node's children are (option `graph-view`, `v`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum View {
-    /// What the current note leads to: its links fanned out, one item per
-    /// link; the other spine notes' links folded into clusters.
+    /// Every outgoing link, so a node can appear more than once.
     #[default]
     Links,
-    /// The whole spanning tree, every note once.
+    /// The spanning tree, so every node appears exactly once.
     Tree,
 }
 
@@ -67,59 +72,44 @@ impl View {
             View::Tree => View::Links,
         }
     }
-}
 
-/// Which side of the spine an item hangs on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Side {
-    Above,
-    Below,
-}
-
-/// One step of an [`ItemKey`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Segment {
-    /// A note, by node index.
-    Note(usize),
-    /// A spine note's cluster on one side.
-    Cluster(Side),
-}
-
-/// An item's identity across re-layouts: the node indices from the root to
-/// it along the displayed tree. A cluster adds its side; the notes inside a
-/// cluster do not name it, so a note keeps its key between the views (a
-/// spine note's link is `spine … / note` in both).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ItemKey(Vec<Segment>);
-
-impl ItemKey {
-    fn child(&self, segment: Segment) -> Self {
-        let mut path = self.0.clone();
-        path.push(segment);
-        Self(path)
-    }
-
-    /// The note this key ends on, if it ends on one.
-    fn note(&self) -> Option<usize> {
-        match self.0.last() {
-            Some(Segment::Note(n)) => Some(*n),
-            _ => None,
+    /// How a node that is not on the route starts out.
+    fn default_fold(self) -> Fold {
+        match self {
+            View::Links => Fold::Folded,
+            View::Tree => Fold::Unfolded,
         }
     }
 }
 
+/// An item's identity across re-layouts: the node indices from the root to
+/// it along the displayed tree. A route node's sibling is `route … / sibling`
+/// in both views, so a key means the same item after `v` wherever both views
+/// show it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ItemKey(Vec<usize>);
+
+impl ItemKey {
+    fn child(&self, node: usize) -> Self {
+        let mut path = self.0.clone();
+        path.push(node);
+        Self(path)
+    }
+
+    /// The node this key ends on.
+    fn node(&self) -> Option<usize> {
+        self.0.last().copied()
+    }
+}
+
 impl fmt::Display for ItemKey {
-    /// Dot-separated, a cluster as `a` (above) or `b` (below): `0.4.b`.
+    /// Dot-separated node indices: `0.4.17`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, segment) in self.0.iter().enumerate() {
+        for (i, node) in self.0.iter().enumerate() {
             if i > 0 {
                 f.write_str(".")?;
             }
-            match segment {
-                Segment::Note(n) => write!(f, "{n}")?,
-                Segment::Cluster(Side::Above) => f.write_str("a")?,
-                Segment::Cluster(Side::Below) => f.write_str("b")?,
-            }
+            write!(f, "{node}")?;
         }
         Ok(())
     }
@@ -131,58 +121,51 @@ impl FromStr for ItemKey {
     /// The [`Display`](fmt::Display) spelling back: what the overlay posts.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         s.split('.')
-            .map(|segment| match segment {
-                "a" => Ok(Segment::Cluster(Side::Above)),
-                "b" => Ok(Segment::Cluster(Side::Below)),
-                n => n
-                    .parse()
-                    .map(Segment::Note)
-                    .map_err(|_| format!("not an item key: {s:?}")),
-            })
+            .map(|n| n.parse().map_err(|_| format!("not an item key: {s:?}")))
             .collect::<Result<Vec<_>, _>>()
             .map(Self)
     }
 }
 
-/// The items the reader has expanded. Keys that name nothing in the current
-/// scene are kept: collapsing a cluster and opening it again restores what
-/// was open inside it.
-pub type Expanded = BTreeSet<ItemKey>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ItemKind {
-    /// A note, by node index. With duplicates (links view) a note can be on
-    /// screen more than once.
-    Note(usize),
-    /// A spine note's remaining links on one side, folded into one item.
-    Cluster { side: Side, members: Vec<usize> },
-}
-
-/// Whether an item's children are on screen, and whether that can change.
+/// A fold state the reader chose for one item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fold {
-    /// Nothing to show.
-    Leaf,
-    /// This many children are hidden; `l` shows them.
-    Collapsed(usize),
-    /// Children shown; `h` hides them.
-    Expanded,
-    /// Children shown, always: the spine, and every note in the tree view.
-    Fixed,
+    Folded,
+    Unfolded,
+}
+
+/// The reader's folds: only the items whose state they set. Every other item
+/// has its view's default. A choice holds in both views, so a node folded in
+/// one is folded in the other.
+pub type Folds = BTreeMap<ItemKey, Fold>;
+
+/// An item's fold handle, as drawn at its right edge. It counts the item's
+/// children *in this view*: in the tree view a node whose links all point at
+/// nodes placed elsewhere has none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Handle {
+    /// No children in this view: nothing to unfold here.
+    None,
+    /// `+n`: the children it hides, by node — what a peek shows.
+    Folded(Vec<usize>),
+    /// `−`: children shown.
+    Unfolded,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item {
     pub key: ItemKey,
-    pub kind: ItemKind,
+    /// The node it shows. In the links view a node can be on screen more than
+    /// once.
+    pub node: usize,
     pub col: usize,
     /// In item heights; `0` is the spine, negative is above it.
     pub row: f64,
     /// `None` only for the root, item 0.
     pub parent: Option<usize>,
-    /// How the item hangs under its parent. Only a spine step can be a jump.
+    /// How the item hangs under its parent. Only a route step can be a jump.
     pub edge: EdgeKind,
-    pub fold: Fold,
+    pub handle: Handle,
 }
 
 /// Two or more sibling leaves on consecutive rows, drawn as one bar when
@@ -206,14 +189,6 @@ pub enum Step {
     Child,
 }
 
-/// What `h` or `l` does to the selected item (zathura's TOC semantics).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Move {
-    Select(usize),
-    Expand,
-    Collapse,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scene {
     view: View,
@@ -226,11 +201,12 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// Lay out `graph` for `view` with `expanded` open.
-    pub fn new(graph: &Graph, view: View, expanded: &Expanded) -> Self {
+    /// Lay out `graph` for `view`, with the reader's `folds`.
+    pub fn new(graph: &Graph, view: View, folds: &Folds) -> Self {
         let mut builder = Builder {
             graph,
-            expanded,
+            view,
+            folds,
             on_route: {
                 let mut on = vec![false; graph.nodes().len()];
                 for &n in graph.route() {
@@ -241,10 +217,7 @@ impl Scene {
             items: Vec::new(),
             children: Vec::new(),
         };
-        let blocks = match view {
-            View::Links => builder.links(),
-            View::Tree => builder.tree(),
-        };
+        let blocks = builder.build();
         let spine = graph.route().len();
         let Builder {
             mut items,
@@ -283,7 +256,7 @@ impl Scene {
         index < self.spine
     }
 
-    /// The current note's item: the end of the spine.
+    /// The current node's item: the end of the spine.
     pub fn current(&self) -> usize {
         self.spine - 1
     }
@@ -302,31 +275,19 @@ impl Scene {
     }
 
     /// The item for `key`, or — when a re-layout removed it — the nearest
-    /// stand-in: the first item showing the same note, else the deepest item
-    /// on the key's path (or the collapsed cluster below it that holds the
-    /// path's next note), else the current note.
+    /// stand-in: the first item showing the same node, else the deepest item
+    /// on the key's path (the folded node that hides it), else the current
+    /// node.
     pub fn find(&self, key: &ItemKey) -> usize {
-        if let Some(i) = self.exact(key) {
-            return i;
-        }
-        let same_note = key.note().and_then(|n| {
-            self.items
-                .iter()
-                .position(|it| it.kind == ItemKind::Note(n))
-        });
-        same_note
+        self.exact(key)
             .or_else(|| {
-                (1..key.0.len()).rev().find_map(|len| {
-                    let at = self.exact(&ItemKey(key.0[..len].to_vec()))?;
-                    let Segment::Note(next) = key.0[len] else {
-                        return Some(at);
-                    };
-                    let cluster = self.children[at].iter().copied().find(|&c| {
-                        matches!(&self.items[c].kind,
-                            ItemKind::Cluster { members, .. } if members.contains(&next))
-                    });
-                    Some(cluster.unwrap_or(at))
-                })
+                let node = key.node()?;
+                self.items.iter().position(|it| it.node == node)
+            })
+            .or_else(|| {
+                (1..key.0.len())
+                    .rev()
+                    .find_map(|len| self.exact(&ItemKey(key.0[..len].to_vec())))
             })
             .unwrap_or(self.current())
     }
@@ -366,20 +327,16 @@ impl Scene {
         }
     }
 
-    /// `l`: expand a collapsed item, else descend.
-    pub fn descend(&self, from: usize) -> Move {
-        match self.items[from].fold {
-            Fold::Collapsed(_) => Move::Expand,
-            _ => Move::Select(self.step(from, Step::Child)),
-        }
-    }
-
-    /// `h`: collapse an expanded item, else ascend.
-    pub fn ascend(&self, from: usize) -> Move {
-        match self.items[from].fold {
-            Fold::Expanded => Move::Collapse,
-            _ => Move::Select(self.step(from, Step::Parent)),
-        }
+    /// The fold that flips item `index` — for [`Folds`] — or `None` when it
+    /// has no handle.
+    pub fn toggle(&self, index: usize) -> Option<(ItemKey, Fold)> {
+        let item = &self.items[index];
+        let flipped = match &item.handle {
+            Handle::None => return None,
+            Handle::Folded(_) => Fold::Unfolded,
+            Handle::Unfolded => Fold::Folded,
+        };
+        Some((item.key.clone(), flipped))
     }
 }
 
@@ -387,20 +344,29 @@ impl Scene {
 // The displayed tree
 // ---------------------------------------------------------------------------
 
-/// A spine note's off-spine children, grouped the way they are packed.
+/// Which side of the spine a block hangs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Above,
+    Below,
+}
+
+/// A route node's shown children other than the next route step, grouped the
+/// way they are packed.
 enum Block {
-    /// Above and below the spine (every spine note but the current one).
+    /// Above and below the spine (every route node but the current one).
     Split {
         above: Vec<usize>,
         below: Vec<usize>,
     },
-    /// Centred on the spine row: the current note's children.
+    /// Centred on the spine row: the current node's children.
     Centred(Vec<usize>),
 }
 
 struct Builder<'a> {
     graph: &'a Graph,
-    expanded: &'a Expanded,
+    view: View,
+    folds: &'a Folds,
     /// Per node: whether it is on the route.
     on_route: Vec<bool>,
     items: Vec<Item>,
@@ -408,14 +374,7 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    fn push(
-        &mut self,
-        key: ItemKey,
-        kind: ItemKind,
-        parent: Option<usize>,
-        edge: EdgeKind,
-        fold: Fold,
-    ) -> usize {
+    fn push(&mut self, key: ItemKey, node: usize, parent: Option<usize>, edge: EdgeKind) -> usize {
         let at = self.items.len();
         let col = parent.map_or(0, |p| self.items[p].col + 1);
         if let Some(p) = parent {
@@ -424,147 +383,93 @@ impl Builder<'_> {
         self.children.push(Vec::new());
         self.items.push(Item {
             key,
-            kind,
+            node,
             col,
             row: 0.0,
             parent,
             edge,
-            fold,
+            handle: Handle::None,
         });
         at
     }
 
-    /// Items `0..route.len()`: the route as one straight line.
-    fn spine(&mut self) {
-        let route = self.graph.route();
+    /// `node`'s children in this view, the route excepted: a route node's
+    /// next step is placed by the spine, and in the tree view the route has
+    /// its own places.
+    fn child_nodes(&self, node: usize, next: Option<usize>) -> Vec<usize> {
+        match self.view {
+            View::Links => self
+                .graph
+                .node(node)
+                .targets
+                .iter()
+                .copied()
+                .filter(|&t| Some(t) != next)
+                .collect(),
+            View::Tree => self
+                .graph
+                .node(node)
+                .children
+                .iter()
+                .copied()
+                .filter(|&c| !self.on_route[c])
+                .collect(),
+        }
+    }
+
+    /// Set item `at`'s handle for its `kids` and its state; whether they are
+    /// shown.
+    fn fold(&mut self, at: usize, kids: &[usize], default: Fold) -> bool {
+        let fold = self
+            .folds
+            .get(&self.items[at].key)
+            .copied()
+            .unwrap_or(default);
+        self.items[at].handle = match fold {
+            _ if kids.is_empty() => Handle::None,
+            Fold::Folded => Handle::Folded(kids.to_vec()),
+            Fold::Unfolded => Handle::Unfolded,
+        };
+        self.items[at].handle == Handle::Unfolded
+    }
+
+    fn build(&mut self) -> Vec<Block> {
+        let route = self.graph.route().to_vec();
+        // Items `0..route.len()`: the route as one straight line.
         let mut key = ItemKey(Vec::new());
         for (i, &node) in route.iter().enumerate() {
-            key = key.child(Segment::Note(node));
+            key = key.child(node);
             let edge = match i {
                 0 => EdgeKind::Link,
                 _ if self.graph.node(route[i - 1]).targets.contains(&node) => EdgeKind::Link,
                 _ => EdgeKind::Jump,
             };
-            self.push(
-                key.clone(),
-                ItemKind::Note(node),
-                i.checked_sub(1),
-                edge,
-                Fold::Fixed,
-            );
+            self.push(key.clone(), node, i.checked_sub(1), edge);
         }
-    }
-
-    fn links(&mut self) -> Vec<Block> {
-        self.spine();
-        let route = self.graph.route();
         let mut blocks = Vec::with_capacity(route.len());
         for (i, &node) in route.iter().enumerate() {
-            let targets = &self.graph.node(node).targets;
-            let key = self.items[i].key.clone();
-            let Some(&next) = route.get(i + 1) else {
-                let fan = targets
-                    .iter()
-                    .map(|&t| self.link_note(i, key.child(Segment::Note(t)), t))
-                    .collect();
-                blocks.push(Block::Centred(fan));
-                break;
-            };
-            // Links the source lists before the route child go above, those
-            // after it below; a step no link explains puts them all below.
-            let (above, below): (Vec<usize>, Vec<usize>) =
-                match targets.iter().position(|&t| t == next) {
-                    Some(at) => (targets[..at].to_vec(), targets[at + 1..].to_vec()),
-                    None => (Vec::new(), targets.clone()),
-                };
-            let above = self.cluster(i, &key, Side::Above, above);
-            let below = self.cluster(i, &key, Side::Below, below);
-            blocks.push(Block::Split {
-                above: above.into_iter().collect(),
-                below: below.into_iter().collect(),
-            });
-        }
-        blocks
-    }
-
-    /// Spine note `spine`'s links on one side as a cluster, with its members
-    /// when expanded. `None` when there are none.
-    fn cluster(
-        &mut self,
-        spine: usize,
-        key: &ItemKey,
-        side: Side,
-        members: Vec<usize>,
-    ) -> Option<usize> {
-        if members.is_empty() {
-            return None;
-        }
-        let cluster_key = key.child(Segment::Cluster(side));
-        let open = self.expanded.contains(&cluster_key);
-        let fold = if open {
-            Fold::Expanded
-        } else {
-            Fold::Collapsed(members.len())
-        };
-        let at = self.push(
-            cluster_key,
-            ItemKind::Cluster {
-                side,
-                members: members.clone(),
-            },
-            Some(spine),
-            EdgeKind::Link,
-            fold,
-        );
-        if open {
-            for m in members {
-                self.link_note(at, key.child(Segment::Note(m)), m);
+            let next = route.get(i + 1).copied();
+            let kids = self.child_nodes(node, next);
+            if !self.fold(i, &kids, Fold::Unfolded) {
+                blocks.push(Block::Split {
+                    above: Vec::new(),
+                    below: Vec::new(),
+                });
+                continue;
             }
-        }
-        Some(at)
-    }
-
-    /// A note in the links view: its own links shown only when expanded.
-    fn link_note(&mut self, parent: usize, key: ItemKey, node: usize) -> usize {
-        let targets = &self.graph.node(node).targets;
-        let open = self.expanded.contains(&key);
-        let fold = match targets.len() {
-            0 => Fold::Leaf,
-            _ if open => Fold::Expanded,
-            n => Fold::Collapsed(n),
-        };
-        let at = self.push(
-            key.clone(),
-            ItemKind::Note(node),
-            Some(parent),
-            EdgeKind::Link,
-            fold,
-        );
-        if open {
-            for &t in targets {
-                self.link_note(at, key.child(Segment::Note(t)), t);
-            }
-        }
-        at
-    }
-
-    fn tree(&mut self) -> Vec<Block> {
-        self.spine();
-        let route = self.graph.route();
-        let mut blocks = Vec::with_capacity(route.len());
-        for (i, &node) in route.iter().enumerate() {
             let key = self.items[i].key.clone();
-            let kids: Vec<usize> = self.off_spine_children(node).collect();
             let placed: Vec<(usize, usize)> = kids
                 .into_iter()
-                .map(|k| (k, self.tree_note(i, key.child(Segment::Note(k)), k)))
+                .map(|k| (k, self.node(i, key.child(k), k)))
                 .collect();
-            let Some(&next) = route.get(i + 1) else {
+            let Some(next) = next else {
                 blocks.push(Block::Centred(
                     placed.into_iter().map(|(_, at)| at).collect(),
                 ));
-                break;
+                continue;
             };
+            // Siblings the source lists before the route child go above, those
+            // after it below; a step no link explains puts them all below.
             let targets = &self.graph.node(node).targets;
             let rank = |n: usize| targets.iter().position(|&t| t == n);
             let (above, below): (Vec<_>, Vec<_>) = match rank(next) {
@@ -581,36 +486,16 @@ impl Builder<'_> {
         blocks
     }
 
-    /// A note in the tree view, with its whole subtree.
-    fn tree_note(&mut self, parent: usize, key: ItemKey, node: usize) -> usize {
-        let kids: Vec<usize> = self.off_spine_children(node).collect();
-        let fold = if kids.is_empty() {
-            Fold::Leaf
-        } else {
-            Fold::Fixed
-        };
-        let at = self.push(
-            key.clone(),
-            ItemKind::Note(node),
-            Some(parent),
-            EdgeKind::Link,
-            fold,
-        );
-        for k in kids {
-            self.tree_note(at, key.child(Segment::Note(k)), k);
+    /// A node off the route, with its children when it is unfolded.
+    fn node(&mut self, parent: usize, key: ItemKey, node: usize) -> usize {
+        let at = self.push(key.clone(), node, Some(parent), EdgeKind::Link);
+        let kids = self.child_nodes(node, None);
+        if self.fold(at, &kids, self.view.default_fold()) {
+            for k in kids {
+                self.node(at, key.child(k), k);
+            }
         }
         at
-    }
-
-    /// A node's tree children that are not on the route: the route has its
-    /// own places on the spine.
-    fn off_spine_children(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
-        self.graph
-            .node(node)
-            .children
-            .iter()
-            .copied()
-            .filter(|&c| !self.on_route[c])
     }
 }
 
@@ -643,7 +528,7 @@ fn pack(items: &mut [Item], children: &[Vec<usize>], spine: usize, blocks: &[Blo
         below.raise(col, 0.0, f64::max);
         above.raise(col, 0.0, f64::min);
     }
-    // Deepest spine note first, so the branches nearest the current note sit
+    // Deepest route node first, so the branches nearest the current node sit
     // nearest the line.
     for block in blocks.iter().rev() {
         match block {
@@ -741,13 +626,12 @@ fn tidy(children: &[Vec<usize>], roots: &[usize]) -> std::collections::BTreeMap<
     rows
 }
 
-/// Runs of two or more sibling notes with no links of their own, off the
-/// spine.
+/// Runs of two or more sibling nodes with nothing to unfold in this view, off
+/// the spine.
 fn bundles(items: &[Item], children: &[Vec<usize>], spine: usize) -> Vec<Bundle> {
-    // A leaf has no links of its own: a collapsed note (`+n`) stays itself.
-    let is_leaf = |i: usize| {
-        i >= spine && items[i].fold == Fold::Leaf && matches!(items[i].kind, ItemKind::Note(_))
-    };
+    // A leaf has no children in this view (no handle): a folded node (`+n`)
+    // stays itself.
+    let is_leaf = |i: usize| i >= spine && items[i].handle == Handle::None;
     let mut out = Vec::new();
     for (parent, kids) in children.iter().enumerate() {
         let mut kids = kids.clone();
@@ -779,9 +663,7 @@ mod tests {
 
     fn at(scene: &Scene, graph: &Graph, title: &str) -> Vec<usize> {
         (0..scene.items().len())
-            .filter(|&i| {
-                matches!(scene.item(i).kind, ItemKind::Note(n) if graph.node(n).title == title)
-            })
+            .filter(|&i| graph.node(scene.item(i).node).title == title)
             .collect()
     }
 
@@ -789,6 +671,13 @@ mod tests {
         let found = at(scene, graph, title);
         assert_eq!(found.len(), 1, "{title} is on screen once: {found:?}");
         found[0]
+    }
+
+    fn titles(scene: &Scene, graph: &Graph, items: &[usize]) -> Vec<String> {
+        items
+            .iter()
+            .map(|&i| graph.node(scene.item(i).node).title.clone())
+            .collect()
     }
 
     /// Items in one column closer than a row would overlap.
@@ -827,7 +716,7 @@ mod tests {
     }
 
     /// A route a → b → c through a docs tree with links on both sides of
-    /// every step, plus a hub the current note links to.
+    /// every step, plus a hub the current node links to.
     fn docs() -> Graph {
         let read = table(&[
             ("a", &["x1", "x2", "b", "y1", "y2", "y3"]),
@@ -840,19 +729,128 @@ mod tests {
         build(&[p("a"), p("b"), p("c")], NODE_BUDGET, read).unwrap()
     }
 
+    /// How many children item `i`'s `+n` hides (0 unless folded).
+    fn hidden(scene: &Scene, i: usize) -> usize {
+        match &scene.item(i).handle {
+            Handle::Folded(kids) => kids.len(),
+            Handle::None | Handle::Unfolded => 0,
+        }
+    }
+
+    fn titles_of(graph: &Graph, handle: &Handle) -> Vec<String> {
+        match handle {
+            Handle::Folded(kids) => kids.iter().map(|&n| graph.node(n).title.clone()).collect(),
+            Handle::None | Handle::Unfolded => Vec::new(),
+        }
+    }
+
+    fn fold(scene: &Scene, item: usize, folds: &mut Folds) {
+        let (key, state) = scene.toggle(item).expect("the item has a handle");
+        folds.insert(key, state);
+    }
+
+    #[test]
+    fn the_route_and_the_current_node_open_unfolded_with_their_siblings() {
+        let g = docs();
+        let s = Scene::new(&g, View::Links, &Folds::new());
+        for i in s.spine() {
+            assert_eq!(s.item(i).handle, Handle::Unfolded, "route item {i}");
+        }
+        // a's other links are b's siblings, in b's column, split around b.
+        let x1 = one(&s, &g, "x1");
+        let y1 = one(&s, &g, "y1");
+        assert_eq!((s.item(x1).col, s.item(y1).col), (1, 1));
+        assert!(s.item(x1).row < 0.0 && s.item(y1).row > 0.0);
+        // Everything else starts folded in the links view, with its count.
+        assert_eq!(hidden(&s, x1), 1);
+        assert_eq!(titles_of(&g, &s.item(y1).handle), ["y4", "y5"]);
+        assert_eq!(s.item(one(&s, &g, "x2")).handle, Handle::None);
+        assert!(at(&s, &g, "x3").is_empty());
+    }
+
+    #[test]
+    fn the_tree_view_opens_every_node_unfolded_and_once() {
+        let g = docs();
+        let s = Scene::new(&g, View::Tree, &Folds::new());
+        assert_eq!(s.items().len(), g.nodes().len());
+        for node in g.nodes() {
+            one(&s, &g, &node.title);
+        }
+        assert!(
+            s.items()
+                .iter()
+                .all(|it| !matches!(it.handle, Handle::Folded(_))),
+            "nothing starts folded in the tree view"
+        );
+        assert!(s.item(one(&s, &g, "x1")).row < 0.0);
+        assert!(s.item(one(&s, &g, "y1")).row > 0.0);
+    }
+
+    #[test]
+    fn folding_a_route_node_hides_its_siblings_but_never_the_route() {
+        let g = docs();
+        for view in [View::Links, View::Tree] {
+            let open = Scene::new(&g, view, &Folds::new());
+            let mut folds = Folds::new();
+            fold(&open, 0, &mut folds);
+            let s = Scene::new(&g, view, &folds);
+            assert_eq!(hidden(&s, 0), 5, "{view:?}");
+            assert_eq!(s.children(0), [1], "only the next route step");
+            assert_eq!(
+                titles(&s, &g, &s.spine().collect::<Vec<_>>()),
+                ["a", "b", "c"]
+            );
+            assert!(at(&s, &g, "x1").is_empty() && at(&s, &g, "y1").is_empty());
+            assert_straight_spine(&s);
+            // Folding the current node closes its fan.
+            let mut folds = Folds::new();
+            fold(&open, open.current(), &mut folds);
+            let s = Scene::new(&g, view, &folds);
+            assert!(s.children(s.current()).is_empty());
+            assert!(matches!(s.item(s.current()).handle, Handle::Folded(_)));
+        }
+    }
+
+    #[test]
+    fn a_fold_means_the_same_in_both_views() {
+        let g = docs();
+        let links = Scene::new(&g, View::Links, &Folds::new());
+        let mut folds = Folds::new();
+        // Unfold x1 in the links view: x3 shows, and still shows in the tree.
+        fold(&links, one(&links, &g, "x1"), &mut folds);
+        // Fold b, a route node, in the links view: u and w hide in both.
+        fold(&links, 1, &mut folds);
+        for view in [View::Links, View::Tree] {
+            let s = Scene::new(&g, view, &folds);
+            assert_eq!(at(&s, &g, "x3").len(), 1, "{view:?}");
+            assert!(at(&s, &g, "u").is_empty() && at(&s, &g, "w").is_empty());
+        }
+        // Fold y1 in the tree view: y4 and y5 hide in both.
+        let tree = Scene::new(&g, View::Tree, &folds);
+        fold(&tree, one(&tree, &g, "y1"), &mut folds);
+        for view in [View::Links, View::Tree] {
+            let s = Scene::new(&g, view, &folds);
+            assert!(at(&s, &g, "y4").is_empty(), "{view:?}");
+            assert_eq!(hidden(&s, one(&s, &g, "y1")), 2);
+        }
+    }
+
     #[test]
     fn the_spine_is_straight_and_nothing_overlaps_in_either_view() {
         let g = docs();
-        let mut all = Expanded::new();
-        // Everything a reader could open: both clusters on every spine note,
-        // and the fan's notes.
-        let links = Scene::new(&g, View::Links, &all);
+        let mut all = Folds::new();
+        // Everything a reader could open one level deep in the links view.
+        let links = Scene::new(&g, View::Links, &Folds::new());
         for it in links.items() {
-            all.insert(it.key.clone());
+            all.insert(it.key.clone(), Fold::Unfolded);
+        }
+        let mut route_folded = Folds::new();
+        for i in links.spine() {
+            route_folded.insert(links.item(i).key.clone(), Fold::Folded);
         }
         for view in [View::Links, View::Tree] {
-            for expanded in [Expanded::new(), all.clone()] {
-                let s = Scene::new(&g, view, &expanded);
+            for folds in [Folds::new(), all.clone(), route_folded.clone()] {
+                let s = Scene::new(&g, view, &folds);
                 assert_straight_spine(&s);
                 assert_no_overlap(&s);
             }
@@ -860,162 +858,69 @@ mod tests {
     }
 
     #[test]
-    fn links_fans_out_the_current_note_with_duplicates() {
-        let g = docs();
-        let s = Scene::new(&g, View::Links, &Expanded::new());
-        let c = s.current();
-        let fan: Vec<&str> = s
-            .children(c)
-            .iter()
-            .map(|&i| match s.item(i).kind {
-                ItemKind::Note(n) => g.node(n).title.as_str(),
-                _ => "cluster",
-            })
-            .collect();
+    fn fifty_siblings_keep_the_spine_straight_and_the_fan_near_it() {
+        let many: Vec<String> = (0..50).map(|i| format!("s{i:02}")).collect();
+        let mut root: Vec<&str> = many[..25].iter().map(String::as_str).collect();
+        root.push("b");
+        root.extend(many[25..].iter().map(String::as_str));
+        let read = table(&[("a", &root), ("b", &["f1", "f2", "f3"])]);
+        let g = build(&[p("a"), p("b")], NODE_BUDGET, read).unwrap();
+        let s = Scene::new(&g, View::Links, &Folds::new());
+        assert_straight_spine(&s);
+        assert_no_overlap(&s);
+        let fan: Vec<f64> = s.children(1).iter().map(|&i| s.item(i).row).collect();
         assert_eq!(
             fan,
-            ["d", "e", "a", "f"],
-            "one item per link, in link order"
+            [-1.0, 0.0, 1.0],
+            "the current node's fan stays centred"
         );
+    }
+
+    #[test]
+    fn links_fans_out_the_current_node_with_duplicates() {
+        let g = docs();
+        let s = Scene::new(&g, View::Links, &Folds::new());
+        let c = s.current();
+        assert_eq!(titles(&s, &g, s.children(c)), ["d", "e", "a", "f"]);
         assert_eq!(
             at(&s, &g, "a").len(),
             2,
             "the root, and the link back to it"
         );
-        // The fan is centred on the spine row.
         let rows: Vec<f64> = s.children(c).iter().map(|&i| s.item(i).row).collect();
         assert_eq!(rows, [-1.5, -0.5, 0.5, 1.5]);
     }
 
     #[test]
-    fn links_folds_the_other_spine_notes_into_counted_clusters() {
-        let g = docs();
-        let s = Scene::new(&g, View::Links, &Expanded::new());
-        let clusters = |spine: usize| -> Vec<(Side, usize, Fold)> {
-            s.children(spine)
-                .iter()
-                .filter_map(|&i| match &s.item(i).kind {
-                    ItemKind::Cluster { side, members } => {
-                        Some((*side, members.len(), s.item(i).fold))
-                    }
-                    ItemKind::Note(_) => None,
-                })
-                .collect()
-        };
-        assert_eq!(
-            clusters(0),
-            [
-                (Side::Above, 2, Fold::Collapsed(2)),
-                (Side::Below, 3, Fold::Collapsed(3))
-            ]
-        );
-        assert_eq!(
-            clusters(1),
-            [
-                (Side::Above, 1, Fold::Collapsed(1)),
-                (Side::Below, 1, Fold::Collapsed(1))
-            ]
-        );
-        for i in s
-            .items()
-            .iter()
-            .filter(|it| matches!(it.kind, ItemKind::Cluster { .. }))
-        {
-            match &i.kind {
-                ItemKind::Cluster {
-                    side: Side::Above, ..
-                } => assert!(i.row < 0.0),
-                _ => assert!(i.row > 0.0),
-            }
-        }
-    }
-
-    #[test]
-    fn tree_shows_every_note_exactly_once() {
-        let g = docs();
-        let s = Scene::new(&g, View::Tree, &Expanded::new());
-        assert_eq!(s.items().len(), g.nodes().len());
-        for node in g.nodes() {
-            one(&s, &g, &node.title);
-        }
-        // Split by link order around the route child: a lists x1, x2 before b.
-        assert!(s.item(one(&s, &g, "x1")).row < 0.0);
-        assert!(s.item(one(&s, &g, "y1")).row > 0.0);
-        assert!(
-            s.items()
-                .iter()
-                .all(|it| !matches!(it.fold, Fold::Collapsed(_) | Fold::Expanded)),
-            "nothing folds in the tree view"
-        );
-    }
-
-    #[test]
-    fn expanding_a_cluster_shows_its_members_and_keeps_the_rest() {
-        let g = docs();
-        let closed = Scene::new(&g, View::Links, &Expanded::new());
-        let below = closed.children(0)[2];
-        assert_eq!(closed.descend(below), Move::Expand);
-
-        let mut expanded = Expanded::new();
-        expanded.insert(closed.item(below).key.clone());
-        let open = Scene::new(&g, View::Links, &expanded);
-        let cluster = open.find(&closed.item(below).key);
-        assert_eq!(open.item(cluster).fold, Fold::Expanded);
-        assert_eq!(open.children(cluster).len(), 3);
-        assert_eq!(open.ascend(cluster), Move::Collapse);
-        // The members keep the tree view's keys, so `v` finds them there.
-        let y1 = open.children(cluster)[0];
-        let tree = Scene::new(&g, View::Tree, &expanded);
-        assert_eq!(
-            tree.item(tree.find(&open.item(y1).key)).key,
-            open.item(y1).key
-        );
-        // Everything that was on screen still is.
-        for it in closed.items() {
-            assert_eq!(open.item(open.find(&it.key)).key, it.key);
-        }
-    }
-
-    #[test]
     fn keys_carry_the_selection_across_views() {
         let g = docs();
-        let links = Scene::new(&g, View::Links, &Expanded::new());
-        let tree = Scene::new(&g, View::Tree, &Expanded::new());
-        // A fan item is the same note in the tree, wherever the walk put it.
-        let d = links.children(links.current())[0];
-        let found = tree.find(&links.item(d).key);
-        assert_eq!(tree.item(found).kind, links.item(d).kind);
-        // A tree note the links view folded away lands on the cluster that
-        // holds its branch: x3 hangs under x1, which is in a's cluster above.
+        let links = Scene::new(&g, View::Links, &Folds::new());
+        let tree = Scene::new(&g, View::Tree, &Folds::new());
+        // A fan item and a sibling are the same item in the tree.
+        for title in ["d", "y1"] {
+            let i = one(&links, &g, title);
+            assert_eq!(
+                tree.item(tree.find(&links.item(i).key)).key,
+                links.item(i).key
+            );
+        }
+        // A tree node the links view keeps folded away falls back to the
+        // folded node that hides it: x3 is under x1.
         let x3 = one(&tree, &g, "x3");
-        let above = links.find(&tree.item(x3).key);
-        assert!(
-            matches!(
-                &links.item(above).kind,
-                ItemKind::Cluster {
-                    side: Side::Above,
-                    ..
-                }
-            ),
-            "{}",
-            links.item(above).key
-        );
-        assert_eq!(links.item(above).parent, Some(0));
-        // A key round-trips through its spelling, which the overlay posts.
+        assert_eq!(links.find(&tree.item(x3).key), one(&links, &g, "x1"));
+        for i in links.spine() {
+            assert_eq!(tree.find(&links.item(i).key), i);
+        }
         for it in links.items() {
             assert_eq!(it.key.to_string().parse::<ItemKey>(), Ok(it.key.clone()));
         }
         assert!("0.x".parse::<ItemKey>().is_err());
-        // The spine is the spine in both.
-        for i in links.spine() {
-            assert_eq!(tree.find(&links.item(i).key), i);
-        }
     }
 
     #[test]
     fn steps_move_through_columns_and_rows() {
         let g = docs();
-        let s = Scene::new(&g, View::Tree, &Expanded::new());
+        let s = Scene::new(&g, View::Tree, &Folds::new());
         let at = |t: &str| one(&s, &g, t);
         assert_eq!(s.step(0, Step::Child), 1, "the spine child wins");
         assert_eq!(s.step(at("x1"), Step::Child), at("x3"));
@@ -1023,13 +928,17 @@ mod tests {
         assert_eq!(s.step(at("x2"), Step::Up), at("x1"));
         assert_eq!(s.step(at("d"), Step::Parent), s.current());
         assert_eq!(s.step(0, Step::Parent), 0);
-        assert_eq!(
-            s.descend(s.current()),
-            Move::Select(at("d")),
-            "the current note descends into its first link"
-        );
-        assert_eq!(s.ascend(at("d")), Move::Select(s.current()));
-        assert_eq!(s.ascend(1), Move::Select(0), "the spine never collapses");
+        assert_eq!(s.step(s.current(), Step::Child), at("d"));
+    }
+
+    #[test]
+    fn a_handle_toggles_and_a_leaf_has_none() {
+        let g = docs();
+        let s = Scene::new(&g, View::Links, &Folds::new());
+        let x1 = one(&s, &g, "x1");
+        assert_eq!(s.toggle(x1), Some((s.item(x1).key.clone(), Fold::Unfolded)));
+        assert_eq!(s.toggle(0), Some((s.item(0).key.clone(), Fold::Folded)));
+        assert_eq!(s.toggle(one(&s, &g, "x2")), None);
     }
 
     #[test]
@@ -1038,7 +947,7 @@ mod tests {
         let read = table(&[("a", &["b", "c"])]);
         let g = build(&[p("a"), p("c"), p("b")], NODE_BUDGET, read).unwrap();
         for view in [View::Links, View::Tree] {
-            let s = Scene::new(&g, view, &Expanded::new());
+            let s = Scene::new(&g, view, &Folds::new());
             assert_eq!(s.item(1).edge, EdgeKind::Link);
             assert_eq!(s.item(2).edge, EdgeKind::Jump);
             assert_straight_spine(&s);
@@ -1046,15 +955,13 @@ mod tests {
     }
 
     #[test]
-    fn sibling_leaves_bundle_and_inner_notes_break_the_run() {
+    fn sibling_leaves_bundle_and_nodes_with_children_break_the_run() {
         let read = table(&[("a", &["b", "c", "d", "e", "f"]), ("d", &["g"])]);
         let g = build(&[p("a")], NODE_BUDGET, read).unwrap();
-        let s = Scene::new(&g, View::Tree, &Expanded::new());
-        let runs: Vec<usize> = s.bundles().iter().map(|b| b.members.len()).collect();
-        assert_eq!(runs, [2, 2], "b c | d | e f");
-        for b in s.bundles() {
-            let rows: Vec<f64> = b.members.iter().map(|&m| s.item(m).row).collect();
-            assert!(rows.windows(2).all(|w| w[1] - w[0] == 1.0), "{rows:?}");
+        for view in [View::Links, View::Tree] {
+            let s = Scene::new(&g, view, &Folds::new());
+            let runs: Vec<usize> = s.bundles().iter().map(|b| b.members.len()).collect();
+            assert_eq!(runs, [2, 2], "b c | d | e f ({view:?})");
         }
     }
 

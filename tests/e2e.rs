@@ -176,10 +176,15 @@ struct State {
     /// Files in the vault index (DESIGN D11). Built off-thread, so this is also
     /// how a test waits for a background rescan to land rather than sleeping.
     vault_files: usize,
-    /// The open document graph's view (`""` when closed) and selected note's
-    /// path (`""` for a cluster), DESIGN D14.
+    /// The open document graph's view and selected node's path, both `""`
+    /// when the graph is closed (DESIGN D14).
     graph_view: String,
     graph_selected: String,
+    /// The graph's selected item on screen: pill centre and width, CSS px
+    /// (`-1` / 0 when closed).
+    graph_sel_x: f64,
+    graph_sel_y: f64,
+    graph_sel_width: f64,
 }
 
 impl State {
@@ -220,6 +225,9 @@ impl State {
             vault_files: field(json, "vault_files")?.parse().ok()?,
             graph_view: field_str(json, "graph_view")?,
             graph_selected: field_str(json, "graph_selected")?,
+            graph_sel_x: field(json, "graph_sel_x")?.parse().ok()?,
+            graph_sel_y: field(json, "graph_sel_y")?.parse().ok()?,
+            graph_sel_width: field(json, "graph_sel_width")?.parse().ok()?,
         })
     }
 }
@@ -483,6 +491,16 @@ impl Harness {
             .env("DISPLAY", format!(":{}", self.display))
             .output()
             .expect("run xdotool")
+    }
+
+    /// The window's width in X pixels — what `mouse_move` coordinates are in.
+    fn window_width(&self) -> f64 {
+        let out = self.xdotool(["getwindowgeometry", "--shell", &self.window_id]);
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|l| l.strip_prefix("WIDTH="))
+            .and_then(|w| w.trim().parse().ok())
+            .expect("window geometry")
     }
 
     fn find_window(&self) -> String {
@@ -3200,8 +3218,8 @@ fn graph_child_and_open_navigate_to_the_linked_document() {
     // (here, the document the reader launched on). The walk runs on the worker,
     // so `toggle graph` lands asynchronously — poll `GetState` for `mode ==
     // "graph"` rather than assuming it is immediate. It opens in the links
-    // view on the current note; `graph child` moves the selection onto the
-    // first item of its fan — the one linked note — and `graph open` opens it,
+    // view on the current node; `graph child` moves the selection onto the
+    // first item of its fan — the one linked node — and `graph open` opens it,
     // closing the graph and landing back in normal mode (DESIGN D14).
     let Some(_g) = setup_guard() else { return };
     let vault = temp_vault("graph");
@@ -3228,6 +3246,71 @@ fn graph_child_and_open_navigate_to_the_linked_document() {
     h.wait_for_state("opening the child closes the graph", SETTLE, |s| {
         s.mode == "normal" && s.file.ends_with("Child.md")
     });
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn ctrl_wheel_zooms_the_graph_about_the_pointer() {
+    // Regression: Ctrl+wheel over the graph moved the scene instead of zooming
+    // about the cursor. The controller converted the shell's pointer (toolkit
+    // logical px) into CSS px by dividing by the page zoom only — but WebKitGTK
+    // can lay the page out at its own screen scale on top of that (2 logical px
+    // per CSS px at zoom 1 has been seen), and the anchor landed elsewhere.
+    // The page now zooms about the pointer as it saw it itself. Asserted where
+    // it matters: the item under the pointer stays under it.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("graph-zoom");
+    let links: String = (1..=6).map(|i| format!("[n{i}](n{i}.md) ")).collect();
+    std::fs::write(vault.join("Root.md"), format!("# Root\n\n{links}\n")).expect("write");
+    for i in 1..=6 {
+        std::fs::write(vault.join(format!("n{i}.md")), format!("# Node {i}\n")).expect("write");
+    }
+    let h = Harness::launch_file_in_dir(vault.join("Root.md"), Some(vault.clone()));
+    h.key(&["t"]);
+    h.wait_for_state("the graph opens", SETTLE, |s| s.mode == "graph");
+    // Select a fan node, off the zoom's other obvious fixed points (the
+    // viewport's origin and centre).
+    h.execute_action("graph child", 1);
+    h.execute_action("graph next", 2);
+    h.wait_for_state("the selection is on screen", SETTLE, |s| {
+        s.graph_sel_width > 0.0 && s.graph_selected.ends_with("n3.md")
+    });
+    // A keyboard selection glides into view; measure once it has settled.
+    let mut before = h.get_state();
+    loop {
+        std::thread::sleep(Duration::from_millis(150));
+        let now = h.get_state();
+        let still = (now.graph_sel_x - before.graph_sel_x).abs() < 0.5
+            && (now.graph_sel_y - before.graph_sel_y).abs() < 0.5;
+        before = now;
+        if still {
+            break;
+        }
+    }
+
+    // Put the pointer on the selected pill, in X pixels.
+    let px_per_css = h.window_width() / before.viewport_width;
+    h.mouse_move(
+        (before.graph_sel_x * px_per_css).round() as i32,
+        (before.graph_sel_y * px_per_css).round() as i32,
+    );
+    h.ctrl_wheel(false, 3, 20);
+    let after = h.wait_for_state("the graph zoomed out", SETTLE, |s| {
+        s.graph_sel_width < before.graph_sel_width * 0.9
+    });
+    let moved =
+        (after.graph_sel_x - before.graph_sel_x).hypot(after.graph_sel_y - before.graph_sel_y);
+    assert!(
+        moved < 3.0,
+        "the pill under the pointer moved {moved:.1} CSS px \
+         ({:.0},{:.0} -> {:.0},{:.0}; {px_per_css} X px per CSS px)",
+        before.graph_sel_x,
+        before.graph_sel_y,
+        after.graph_sel_x,
+        after.graph_sel_y
+    );
 
     drop(h);
     let _ = std::fs::remove_dir_all(&vault);

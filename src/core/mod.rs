@@ -132,14 +132,14 @@ pub enum Action {
     GraphNext,
     /// Graph mode: select the item above in the same column.
     GraphPrevious,
-    /// Graph mode: collapse the selected item if it is expanded, else select
-    /// its parent.
+    /// Graph mode: select the selected node's parent. Never folds.
     GraphParent,
-    /// Graph mode: expand the selected item if it is collapsed, else select a
-    /// child — the one on the route, else the first.
+    /// Graph mode: select a child — the one on the route, else the first —
+    /// unfolding a folded node first.
     GraphChild,
-    /// Graph mode: open the selected note and leave graph mode; expand a
-    /// selected cluster.
+    /// Graph mode: fold or unfold the selected node.
+    GraphFold,
+    /// Graph mode: open the selected node's document and leave graph mode.
     GraphOpen,
     /// Graph mode: switch between the links and the tree view.
     GraphToggleView,

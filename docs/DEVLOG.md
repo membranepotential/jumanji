@@ -2,6 +2,78 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-09-19 (later) — the graph at every zoom level
+
+A code review of the fold pass found the model held at near zoom and frayed
+further out; [interaction.md](graph/interaction.md) gained R16–R20, and this
+pass follows them.
+
+- **Opening frame, route first (R16).** The graph opens with the whole route
+  in view — root at the left margin, the current node's children running off
+  the right when they do not fit — and only a route wider than the window
+  falls back to the current node a third across.
+- **Peek at screen scale (R17).** The peek fan is drawn in its own
+  screen-space layer, outside the scene's camera: full pills with title and
+  file name, the same size at every zoom level, next to the hovered node.
+  Resting on one node no longer restarts the delay while the pointer crosses
+  its parts, and the fan's data is a JSON array (`{title, file}`), so a title
+  with a tab or a file name with a newline survives.
+- **Handles at every zoom (R18).** Far out a node's `+n` / `−` stands beside
+  its label, clickable, and culls together with it.
+- **Hover is a brighter fill (R19)** — no accent on the pill or its edges.
+- **Wording (R20).** A handle counts children *in this view*; a bundle holds
+  nodes with nothing to unfold here — in the tree view a node whose links all
+  point elsewhere is one of those.
+- The page learns the pointer from every pointer event and the wheel, so
+  `Ctrl`+wheel zooms at the cursor even before the pointer has moved.
+
+## 2026-09-19 — the graph, one object: nodes that fold
+
+The owner reviewed the graph against one maxim — *a consistent, simple and
+intuitive interface* — and wrote the result down as the interaction model,
+[docs/graph/interaction.md](graph/interaction.md) (feature doc:
+[docs/graph/](graph/README.md);
+[D14](DESIGN.md#d14-the-document-graph--a-route-spine-with-its-links-fanned-out-2026-09-18)
+defers to it on behaviour). This pass implements its review table (R1–R7,
+R11). Also: the graph's elements are **nodes** now, in code, UI and docs (the
+owner had said "nodes"; "notes" was a mishearing), so the per-document walk
+input is `graph::Scan`.
+
+**One object (R2, R3).** Clusters are gone. Every item is a node with one fold
+state and one handle at the right end of its pill: `+n` folded, `−` unfolded,
+none without links — muted, behind a hairline, because the accent belongs to
+the route. A route node's other links are its children, shown as **siblings**
+in the next step's column (above: listed before it; below: after) and
+unfolded by default; folding a route node hides them and never the route. In
+[`scene.rs`](../src/core/graph/scene.rs) `ItemKind` and the cluster key
+segment disappear: an `ItemKey` is a path of node indices, and `Handle` carries
+the children a folded node hides (what a peek draws).
+
+**Fold state (R1, R4).** The reader's folds are one map, `Folds =
+BTreeMap<ItemKey, Fold>`, holding only the items whose state they chose; every
+other item has its view's default (route and current unfolded; links view:
+the rest folded; tree view: the rest unfolded). A choice holds in both views.
+`Space` (`graph fold`) and a click on the handle toggle; `h` only ever moves;
+`l` on a folded node unfolds it and enters its first child. A re-layout keeps
+the node acted on still on screen (`update(svg, selected, anchor)`), so after
+`l` the parent stays put and the camera follows the child only if it left the
+screen.
+
+**Peek (R5).** Resting the pointer on a folded node for 250 ms draws its
+children as a temporary fan in a layer above the scene — laid out as unfolding
+would lay it out, over a theme-coloured backdrop, clamped to the viewport —
+and nothing else moves. Core emits the fan's data (`data-peek`, title and file
+per child, capped at 30 plus "and k more").
+
+**The rest.** Links the node budget cut are said in the panel ("12 more links
+not walked", R6), no longer as a muted `+n` that could not be opened. `+`/`-`
+zoom about the selection, `Ctrl`+wheel about the cursor (R7). Far out, a bundle
+is a handle too: a click zooms in on it to where titles show (R11). Bundle
+labels now sit in their own translated group: WebKit applied the text's
+horizontal counter-scale about the SVG origin rather than the text's box, so a
+label far from its group's origin drifted left of its bar. The current node
+keeps its tint at every zoom level.
+
 ## 2026-09-18 (latest) — a resize no longer moves the reader
 
 Going fullscreen (or any window resize) moved the document: the page re-lays
@@ -18,9 +90,9 @@ the table above the reader re-wraps and the probe lands in it). 384 unit +
 ## 2026-09-18 (later) — the graph, laid out around the reader (DESIGN D14)
 
 The first cut of `t` was a plain left-to-right tidy tree. The owner's first
-look, on the scribetech-assistant `docs/` tree (a README linking 52 notes),
+look, on the scribetech-assistant `docs/` tree (a README linking 52 documents),
 found three things wrong: the route zig-zagged through the tree instead of
-reading as a line; a note's links were "all over the place" — dashed curves to
+reading as a line; a node's links were "all over the place" — dashed curves to
 wherever the walk happened to put their targets; and zoomed out, nothing was
 readable. The walk was right; the picture was not. So the scene is rewritten
 and the walk kept as it was.
@@ -30,21 +102,21 @@ and the walk kept as it was.
 `svg.rs` the rendering.
 
 - *The spine.* The route root → current is one straight row, one column per
-  step; everything else is packed above and below it. A route note's other
+  step; everything else is packed above and below it. A route node's other
   links split by source order around the route child — before it above, after
   it below.
-- *Two views, `v`* (option `graph-view`). `links` fans the current note's
+- *Two views, `v`* (option `graph-view`). `links` fans the current node's
   links out to its right, one item per link, duplicates allowed, and folds the
-  other route notes' links into a `+n` cluster per side; `l` / `Enter` / a
-  click expands a cluster or a note's `+n` in place, `h` collapses — the TOC's
-  semantics. `tree` is the whole spanning tree, every note once, with
-  cross-links for the selected note only.
-- *Selection is an item, not a note* — a note can be on screen twice. An
+  other route nodes' links into a `+n` cluster per side; `l` / `Enter` / a
+  click expands a cluster or a node's `+n` in place, `h` collapses — the TOC's
+  semantics. `tree` is the whole spanning tree, every node once, with
+  cross-links for the selected node only.
+- *Selection is an item, not a node* — a node can be on screen twice. An
   `ItemKey` (node indices from the root along the displayed tree) survives
   every re-layout, and the overlay moves the camera so the selected item keeps
   its place on screen.
 - *Level of detail.* Scale ≥ 0.7 shows pills with title and file name, 0.4–0.7
-  the title only, below that sibling leaves merge into `12 notes` bundles and
+  the title only, below that sibling leaves merge into `12 nodes` bundles and
   the remaining labels are counter-scaled by `1/k`; the levels cross-fade.
 - *The overlay.* Plain background (the dot grid is gone), the wheel zooms at
   the cursor, drag pans, hover lights an item's edges. The panel shows the
@@ -52,7 +124,7 @@ and the walk kept as it was.
   are here / Links to n" line is gone, since the tint and the fan say both.
 - `GetState` reports `graph_view`, `graph_selected`, `graph_items`.
 
-**The research it rests on.** TheBrain and ExcaliBrain put the current note at
+**The research it rests on.** TheBrain and ExcaliBrain put the current node at
 the centre of the layout and its neighbours around it, which is what "where
 does this lead" wants; SpaceTree (Plaisant et al.) collapses branches into
 counted items and expands them in place, so exploring never re-lays out the
@@ -64,7 +136,7 @@ labels come from. Force layouts stayed rejected (D14).
 but lays out DAGs by crossing minimisation: it cannot pin a spine to one row
 and reorders on every change. `tidy-tree` is one stale release that would need
 the spine patched in anyway. The packing — tidy forests against a per-column
-skyline, deepest route note first — is ~150 lines and unit-tested for its
+skyline, deepest route node first — is ~150 lines and unit-tested for its
 invariants: the spine is straight, no two items share a row in a column,
 selection keys survive expansion and view changes.
 
@@ -73,9 +145,9 @@ click that lands after a re-layout is dropped instead of hitting whatever took
 its index; the TOC closes an open graph (`Mode::Graph` holds exactly while the
 graph is open); far-level labels are cut to one column pitch and culled by
 priority when they would still collide (current, route, selection, clusters,
-branching notes, leaves); bundles take only notes with no links of their own;
-a note `v` folds away selects the cluster holding it; the graph opens framing
-the whole route and the current note's links when they fit.
+branching nodes, leaves); bundles take only nodes with no links of their own;
+a node `v` folds away selects the cluster holding it; the graph opens framing
+the whole route and the current node's links when they fit.
 
 **Owner's hands-on pass.** The statusbar names the view (`Graph: links` /
 `Graph: tree`), since `v` alone gave no sign which was on. The plain wheel pans
@@ -85,8 +157,28 @@ reflex to scroll. Hovering a cluster or a `+n` badge lists the titles inside
 rows (horizontal scale floored at 0.55, text counter-scaled so glyphs never
 stretch) and labels are 15 px, so a far label keeps noticeably more of its
 title. The tree view's dashed cross-link curves are gone ("still all over the
-place"): selecting a note outlines its link targets and dims everything else
+place"): selecting a node outlines its link targets and dims everything else
 off the route instead, Obsidian-hover style.
+
+**Zoom about the cursor, for real; text that stays readable.** The owner
+found `Ctrl`+wheel "does not zoom towards the cursor but shifts the pan".
+Root cause: the controller turned the shell's pointer (GTK logical px) into
+CSS px by dividing by the page zoom — but WebKitGTK lays pages out at a screen
+scale of its own on top of that (2 logical px per CSS px at zoom 1, reproduced
+under Xvfb and in the e2e harness), so the fixed point sat at twice the
+cursor's coordinates. The overlay now tracks the pointer itself (`clientX`/
+`clientY` are CSS px by definition) and the controller only says "at the
+pointer" or "at the centre" (`GraphZoomAt`). An e2e puts the pointer on a pill,
+zooms, and asserts the pill stayed under it (red with the old conversion).
+The same conversion still feeds the *document's* `Ctrl`+wheel anchor
+(`cursor_anchor`) — a follow-up.
+
+Text now has a minimum on-screen size at every zoom level, not just far out
+(`max(base, minimum / k)` in CSS): titles 14 px, file names 12 px, counts
+13 px, far labels 15 px. A label is cut to its pill (or, far out, its column)
+at the size it is actually drawn, by measuring it; with the file name hidden
+the title sits on the pill's middle, and badges are centred at the pill's right
+edge. A window resize keeps the world point at the centre fixed.
 
 **Also.** `:` is bound in graph mode so `:set graph-view` can reach an open
 graph; `resources/config.example.toml` now has a unit test that its key
@@ -95,39 +187,39 @@ listing equals `Keymap::default()`.
 ## 2026-09-18 — the document graph (`t`, DESIGN D14)
 
 A documentation tree (a `docs/` folder, a vault, an eval-case collection) is a
-graph of notes linking to each other. The breadcrumb (D10) only ever shows the
-one route you took to the note you are reading; nothing showed where else you
-could go. `t` opens a **document graph**: the notes reachable by links from
+graph of documents linking to each other. The breadcrumb (D10) only ever shows the
+one route you took to the document you are reading; nothing showed where else you
+could go. `t` opens a **document graph**: the documents reachable by links from
 where the reading session started, laid out left to right as a tree, with the
 route drawn through it.
 
 **Why a tree, not the graph.** Real link graphs are cyclic — a `README` and an
 `ARCHITECTURE.md` that link back and forth — and a force layout over every
 edge is exactly the "nodes jump around on every render" picture nobody wants.
-So the walk is breadth-first from the jumplist's root, each note placed once
-under the first note that reached it; cross-links are drawn only for the
-selected note (dashed, with its targets outlined), and the layout has no
+So the walk is breadth-first from the jumplist's root, each node placed once
+under the first node that reached it; cross-links are drawn only for the
+selected node (dashed, with its targets outlined), and the layout has no
 randomness, so the same files always draw the same picture. The route
 you actually took pins nodes only where a link explains the step — a jump the
 graph cannot explain (`:open`, a jump *from* the graph) draws as a dashed edge
 instead of rearranging the tree.
 
-**Where it lives.** `core::graph` is pure: `scan` reads one note's title and
+**Where it lives.** `core::graph` is pure: `scan` reads one document's title and
 links, `build` runs the walk over an injected file reader (unit-tested against
 a map, no disk), and `Graph::svg` writes a tidy-tree layout as inline SVG — no
 D3, no bundled JS, ~150 lines total against D3.js's ~90 KB. The walk runs on
 the `Host` worker thread, like the vault scan (D11): reading and parsing every
-note in a tree is not something the main loop can afford to block on.
+document in a tree is not something the main loop can afford to block on.
 `controller::session` owns the tree and the selected node and draws the SVG
 over the page through `Viewport::eval`, exactly like the hint overlay — no new
 `Toolkit` trait method, so a second shell gets this for free (D2a). Opening a
-selected note goes through the existing `open_file`, so it lands on the
+selected node goes through the existing `open_file`, so it lands on the
 jumplist and `Backspace` returns from it like any other link.
 
 **Seen on a real tree.** Checked headless against the scribetech-assistant
-`docs/` tree (a README linking 52 notes). The first cut drew S-curves, and that
+`docs/` tree (a README linking 52 documents). The first cut drew S-curves, and that
 fan-out was a thick bundle of 52 curves; tree edges are now elbows sharing one
-trunk per parent. A note whose links were all placed earlier looked like a
+trunk per parent. A node whose links were all placed earlier looked like a
 leaf while its panel said "Links to 6 notes"; hence the cross-links on selection.
 
 **What's next.** Folder-containment edges, not built: some trees (anzw-data)
