@@ -1344,6 +1344,36 @@ fn a_holds_the_reading_position() {
     assert_place_held("returning to intrinsic size", &fitted, &back);
 }
 
+/// Regression: resizing the window (going fullscreen, an i3 re-tile) moved the
+/// document under the reader. A resize re-lays the page out — here the
+/// broken-out table above the reader re-wraps at the new window width — and
+/// nothing re-anchored the position, because the controller never sees a
+/// "before". Goes red without `resize_anchor_js`.
+#[test]
+fn resizing_the_window_holds_the_reading_position() {
+    let Some(_g) = setup_guard() else { return };
+    let r = DiagramReader::launch("resizepos");
+    let wide = r.settled();
+    let before = r.scroll_to_prose();
+
+    r.h.xdotool(["windowsize", "--sync", &r.h.window_id, "700", "800"]);
+    r.h.wait_for_state("narrower viewport", SETTLE, |s| {
+        s.viewport_width < wide.viewport_width - 100.0
+    });
+    // Let the re-layout finish: the assertion is about the settled page, not
+    // the first frame at the new width.
+    std::thread::sleep(Duration::from_millis(300));
+    let narrow = r.h.get_state();
+    assert_place_held("narrowing the window", &before, &narrow);
+
+    r.h.xdotool(["windowsize", "--sync", &r.h.window_id, "1240", "800"]);
+    r.h.wait_for_state("wide viewport again", SETTLE, |s| {
+        (s.viewport_width - wide.viewport_width).abs() < 1.0
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert_place_held("widening it back", &before, &r.h.get_state());
+}
+
 #[test]
 fn a_fits_a_diagram_into_its_box_and_back() {
     // DESIGN D5a.2's fit mode: `a` answers "show me the whole thing" by scaling

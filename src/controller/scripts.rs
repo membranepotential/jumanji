@@ -106,7 +106,90 @@ pub fn capture_anchor_js(anchor: &ZoomAnchor) -> String {
 pub const RESTORE_ANCHOR_JS: &str = "(() => { const a = window.__jmnj_anchor; \
     if (a && a.el) { const nt = a.el.getBoundingClientRect().top; \
       window.scrollBy({ top: nt - a.top, left: 0, behavior: 'instant' }); } \
-    window.__jmnj_anchor = null; })();";
+    window.__jmnj_anchor = null; \
+    if (window.__jmnj_rebase) window.__jmnj_rebase(); })();";
+
+/// The page global [`resize_anchor_js`] exposes to re-take its reading anchor
+/// from the page as it is now. Called after every controller-driven anchored
+/// change ([`RESTORE_ANCHOR_JS`]) and by the no-flash gate's reveal, the two
+/// moments the position changes with no scroll event the tracker could trust.
+const REBASE_GLOBAL: &str = "window.__jmnj_rebase";
+
+/// Hold the reading position across a viewport resize (DESIGN D5a.0): a window
+/// going fullscreen, an i3 re-tile, the zoom level changing the CSS viewport.
+///
+/// A resize is the one height change with no "before" the controller sees —
+/// the shell learns of it after the engine has already re-laid the page out —
+/// so the anchor cannot be captured on demand the way [`capture_anchor_js`]
+/// is. Instead this script keeps one *continuously*: every scroll re-takes it,
+/// and a `resize` scrolls it back to where it was. Resize steps run before
+/// scroll steps in a rendering update, so the handler always sees the anchor
+/// from before the reflow.
+///
+/// The anchor is the character under the probe, not the element: a resize
+/// re-wraps prose, and pinning a long paragraph's *top* would move the line the
+/// reader was on. The element (same probe points and exclusions as
+/// [`capture_anchor_js`]) is the fallback where no text is under the probe —
+/// a diagram, an image.
+///
+/// Scrolls the tracker causes itself (the restore, and the engine clamping a
+/// document that got shorter) must not re-take the anchor, or a trip to
+/// fullscreen and back at the end of a document would come back somewhere
+/// else. `settled` holds the offset the last restore left; a scroll that lands
+/// exactly there is ours. Every resize of a burst (fullscreen can deliver
+/// several) restores from the same anchor.
+///
+/// An unscrolled page takes no anchor, so the top stays exactly the top. While
+/// the no-flash gate hides the body, or the graph overlay covers it, the probe
+/// would hit nothing useful, so the anchor is left as it was.
+fn resize_anchor_js() -> String {
+    format!(
+        "(function () {{\n\
+        let anchor = null, settled = null;\n\
+        const probe = () => {{\n\
+          const d = document.documentElement, b = document.body;\n\
+          if (!b || d.classList.contains('{restoring}') \
+              || document.getElementById('__jmnj_graph')) return;\n\
+          anchor = null;\n\
+          if (window.scrollY <= 0) return;\n\
+          const m = document.querySelector('main') || b;\n\
+          const r = m.getBoundingClientRect();\n\
+          const cx = Math.max(1, Math.min(innerWidth - 1, r.left + r.width / 2));\n\
+          for (const py of [8, 40, 80, 140]) {{\n\
+            const c = document.elementFromPoint(cx, py);\n\
+            if (!c || c === b || c === d || c.tagName === 'MAIN') continue;\n\
+            const at = document.caretRangeFromPoint ? document.caretRangeFromPoint(cx, py) : null;\n\
+            const n = at && at.startContainer;\n\
+            if (n && n.nodeType === 3 && c.contains(n) && n.length > 0) {{\n\
+              const range = document.createRange();\n\
+              const o = Math.min(at.startOffset, n.length - 1);\n\
+              const top = () => {{ range.setStart(n, o); range.setEnd(n, o + 1); \
+                const rs = range.getClientRects(); \
+                return rs.length ? rs[0].top : c.getBoundingClientRect().top; }};\n\
+              anchor = {{ top: top, at: top() }};\n\
+            }} else {{\n\
+              anchor = {{ top: () => c.getBoundingClientRect().top, \
+                          at: c.getBoundingClientRect().top }};\n\
+            }}\n\
+            return;\n\
+          }}\n\
+        }};\n\
+        {rebase} = () => {{ probe(); settled = window.scrollY; }};\n\
+        window.addEventListener('scroll', function () {{\n\
+          if (settled !== null && Math.abs(window.scrollY - settled) < 1) return;\n\
+          settled = null;\n\
+          probe();\n\
+        }}, {{ passive: true }});\n\
+        window.addEventListener('resize', function () {{\n\
+          if (!anchor) return;\n\
+          window.scrollBy({{ top: anchor.top() - anchor.at, left: 0, behavior: 'instant' }});\n\
+          settled = window.scrollY;\n\
+        }});\n\
+      }})();",
+        restoring = RESTORING_CLASS,
+        rebase = REBASE_GLOBAL,
+    )
+}
 
 /// The nearest-`data-sourcepos` search, as a JS *expression* yielding the
 /// element whose source line is the greatest at-or-before the line `line_expr`
@@ -329,7 +412,8 @@ pub fn scroll_restore_js() -> String {
            const reveal = (failsafe) => {{ if (revealed) return; \
              revealed = true; \
              {reveal_global} = {{ y: window.scrollY, failsafe: failsafe }}; \
-             root.classList.remove('{cls}'); }};\n\
+             root.classList.remove('{cls}'); \
+             if ({rebase}) {rebase}(); }};\n\
            // The failsafe, and the reason the gate is safe to have at all: it\n\
            // is not conditional on anything above working.\n\
            setTimeout(() => reveal(true), 400);\n\
@@ -402,6 +486,7 @@ pub fn scroll_restore_js() -> String {
         apply_global = APPLY_GLOBAL,
         first = FIRST_FRAME_GLOBAL,
         reveal_global = REVEAL_GLOBAL,
+        rebase = REBASE_GLOBAL,
         stable_frames = STABLE_FRAMES,
     )
 }
@@ -528,11 +613,11 @@ fn editor_sync_js() -> String {
 
 /// The scripts every shell installs at document start in the top frame, in
 /// this order, on every document: selection copy, drag-select reset, editor
-/// sync, the pointer-over-diagram flag, scroll notify, then the scroll-restore
-/// no-flash gate. Order matters
-/// only in that scripts run in insertion order and each of these is
-/// independent of the others, so this is simply the one canonical order every
-/// shell uses.
+/// sync, the pointer-over-diagram flag, scroll notify, the resize anchor, then
+/// the scroll-restore no-flash gate. Order matters only in that scripts run in
+/// insertion order; the gate calls the resize anchor's rebase if it exists, so
+/// the anchor goes first. Otherwise each is independent of the others, and
+/// this is simply the one canonical order every shell uses.
 ///
 /// Not included: the shell's own [`POST_FN`] prelude (toolkit-specific, must
 /// be installed *before* these) and [`hints_build_js`] (built on demand by
@@ -544,6 +629,7 @@ pub fn document_start() -> Vec<String> {
         editor_sync_js(),
         diagram_hover_js(),
         scroll_notify_js(),
+        resize_anchor_js(),
         scroll_restore_js(),
     ]
 }

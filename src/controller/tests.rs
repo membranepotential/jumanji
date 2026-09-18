@@ -1001,6 +1001,16 @@ fn every_document_installs_the_pointer_over_diagram_listener() {
 }
 
 #[test]
+fn every_document_holds_its_place_across_a_resize() {
+    // A resize has no "before" the controller sees, so the anchor has to be
+    // kept by the page itself — at document start, on every document.
+    let installed = super::scripts::document_start()
+        .iter()
+        .any(|js| js.contains("'resize'") && js.contains("caretRangeFromPoint"));
+    assert!(installed, "no resize anchor at document start");
+}
+
+#[test]
 fn a_re_render_keeps_whatever_the_wide_toggle_last_set() {
     // The mirror into the render options: without it, the next re-render (a
     // live reload, `r`, a `:set`) would quietly put the breakout back on.

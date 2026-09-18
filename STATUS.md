@@ -20,6 +20,9 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
 
 ## Done (recent)
 
+- **position held across window resize (2026-09-18)** — fullscreen
+  / re-tile no longer moves the reader; `resize_anchor_js` (D5a.0), e2e red
+  without it.
 - **wide blocks + merman 0.8 (v1.9.0, 2026-09-13)** — diagrams/fences/tables
   break out to window width (D5a.1), `s` toggles. merman 0.8 fixes a lexer
   parity bug that ate diagrams with `;`/`]` in a quoted `subgraph` title;

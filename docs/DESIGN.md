@@ -360,6 +360,19 @@ The one case the anchor cannot serve is a document that shrinks below the
 current offset: the browser clamps, and there is no position left to hold. That
 is not a regression, and the tests stay clear of it by sitting mid-document.
 
+**Resizes too (2026-09-18).** A window resize (fullscreen, an i3 re-tile, a
+panel opening) re-lays the page out with no "before" the controller ever sees,
+so capture-on-demand cannot serve it. A document-start script
+(`resize_anchor_js`) keeps the anchor continuously instead: every scroll
+re-takes it, and `resize` scrolls it back. It anchors the *character* under the
+probe, not the element, because a resize re-wraps prose and a long paragraph's
+top is not where the reader's line is. Scrolls it caused itself do not re-take
+it (so fullscreen and back at the end of a document returns to the same place),
+and every controller-driven anchored change and the no-flash reveal re-base it,
+so a zoom step — which changes the CSS viewport and fires `resize` too — does
+not have two anchors fighting. Guarded by
+`resizing_the_window_holds_the_reading_position`, verified red without it.
+
 ### D5a.1: Wide blocks — pictures get the window, prose keeps the measure (2026-09-13)
 
 Bounded measure is right for prose and wrong for pictures. A 1865 px diagram

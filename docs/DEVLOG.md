@@ -2,6 +2,19 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-09-18 (latest) — a resize no longer moves the reader
+
+Going fullscreen (or any window resize) moved the document: the page re-lays
+out at the new width, block heights change, `scrollY` does not. D5a.0's anchor
+did not cover it, because the controller only anchors changes it makes itself
+and a resize arrives after the engine has already reflowed. A new
+document-start script, `resize_anchor_js`, keeps a character-level anchor up to
+date on every scroll and restores it on `resize`; `RESTORE_ANCHOR_JS` and the
+no-flash reveal re-base it. New e2e
+`resizing_the_window_holds_the_reading_position` (red without the script:
+the table above the reader re-wraps and the probe lands in it). 384 unit +
+56 e2e green. DESIGN D5a.0 gained a paragraph.
+
 ## 2026-09-13 (later) — "no re-render" is not "nothing moves"
 
 v1.9.0 shipped `s` and `a` with a defect the design notes had confidently ruled
