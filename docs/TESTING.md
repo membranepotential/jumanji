@@ -1,6 +1,6 @@
 # Testing
 
-Three layers of proof, matching the three layers of code (DESIGN D2a):
+Three layers of proof, matching the three layers of code (DESIGN [D2a](architecture/README.md#d2a-three-layers--core-controller-toolkit-shell-2026-09-02)):
 
 - **Unit tests** (`src/core/**`, `src/controller/**`) — the pure core
   (pipeline, TOC, config, keymap, Obsidian dialect) and the toolkit-agnostic
@@ -36,14 +36,17 @@ tears down a WebKit instance).
 - `demo/links.md` — one internal link, for deterministic hint-follow testing.
 - **`demo/vault/`** — the D11 dialect fixture: `Welcome.md`,
   `Concepts/Callouts.md`, an `Aliased Note.md` whose filename has a space, and
-  `attachments/diagram.png`. There is no marker file — a vault is just a
-  directory of notes.
+  `attachments/diagram.png`, under an `.obsidian/` marker directory.
 
-**Wikilink tests must set the child's working directory.** The vault index is
-rooted at the process CWD (DESIGN D11), so a test that launches the reader from
-the repo root indexes the repo, not the fixture, and `[[Concepts/Callouts]]`
-comes out unresolved. Use `Harness::launch_file_in_dir(file, Some(dir))`, which
-sets `Command::current_dir`. Tests that also need to control link *ordering*
+**The vault root comes from the document, not the working directory.**
+[`vault::root_for`](../src/core/vault.rs) walks up from the document to the
+nearest `.obsidian/`, else the nearest `.git/`, else takes the document's own
+directory ([D11](obsidian/README.md#d11-obsidian-dialect--vault-resolution-post-10-implemented)).
+So `demo/vault/` roots at itself through its marker, and a throwaway fixture
+under the temp dir roots at its own directory. The wikilink tests still launch
+with `Harness::launch_file_in_dir(file, Some(dir))`, which sets
+`Command::current_dir`; that no longer decides the root, but keeps relative
+paths predictable. Tests that also need to control link *ordering*
 (which link gets the `a` hint label) build a throwaway vault under the temp dir
 — see `temp_vault`.
 
@@ -226,7 +229,7 @@ the whole trail, so the only way to lose history is 90 days without a push.
 
 The tests don't use a back door. They exercise the same per-instance D-Bus
 service (`src/shell/gtk/dbus.rs`) that is the foundation for the M3 editor-sync
-feature (DESIGN.md D7). Each running reader owns
+feature (DESIGN.md [D7](editor-sync/README.md#d7-editor-pairing--the-synctex-analogue-built)). Each running reader owns
 
 - **name** `org.membranepotential.jumanji.PID-<pid>` on the session bus,
 - **object** `/org/membranepotential/jumanji`,

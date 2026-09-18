@@ -17,14 +17,17 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
   `scripts/bench-compare.sh`. State: **e2e proven in CI (53/53)**; trail
   is a workflow artifact chain (no branch, no Pages). Next: confirm the first
   artifact-trail run.
-- **document graph (`t`)** — v2 per DESIGN D14 (route spine, links/tree
-  views, clusters + hover preview, level-of-detail zoom, `:set graph-view`,
-  D-Bus fields). State: committed on main (432 unit + 57 e2e green), not
-  released. Next: owner feel-test of the third feedback pass, then release
-  v1.10.0 (tag, gh release, AUR PKGBUILD).
+- **document pointer zoom** — the document's Ctrl+wheel anchor converts the
+  shell pointer to CSS px (the unit bug the graph had); fix: the page tracks
+  the pointer itself. State: starting. Next: fix, test, commit, push.
 
 ## Done (recent)
 
+- **document graph v2 (2026-09-19, e4aa0b2)** — [interaction model](docs/graph/interaction.md)
+  (one node, one handle, `Space` folds, peek, route-first framing); feature
+  docs in [docs/graph/](docs/graph/README.md) with screenshots; not released.
+- **docs split into feature folders (2026-09-19)** — index in
+  [docs/README.md](docs/README.md); DESIGN.md is an anchor stub.
 - **position held across window resize (2026-09-18)** — fullscreen
   / re-tile no longer moves the reader; `resize_anchor_js` (D5a.0), e2e red
   without it.

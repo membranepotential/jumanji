@@ -8,11 +8,17 @@ jumanji — a zathura-inspired markdown reader. Rust, GTK4 + system WebKitGTK 6,
 - @STATUS.md — the live project dashboard: what is in flight, what just
   landed, what is queued. Imported into every session by that `@`; keep it
   true (rules below).
-- `docs/DESIGN.md` — the architecture decision record. **Binding.** Deviations
-  from it require updating it in the same change, with reasoning.
-- `docs/DEVLOG.md` — running log. Append an entry (newest first) for every
+- [`docs/README.md`](docs/README.md) — the index of every doc, with each
+  design decision linked. Feature docs live in subfolders ([`docs/graph/`](docs/graph/README.md),
+  [`docs/reading/`](docs/reading/README.md), …); cross-cutting decisions in
+  [`docs/architecture/`](docs/architecture/README.md).
+- The decision records under `docs/`, indexed in
+  [`docs/README.md`](docs/README.md#design-decisions) — **Binding.** Deviations
+  from them require updating them in the same change, with reasoning.
+  [`docs/DESIGN.md`](docs/DESIGN.md) maps each decision ID to its home.
+- [`docs/DEVLOG.md`](docs/DEVLOG.md) — running log. Append an entry (newest first) for every
   substantial change: what, why, what's next.
-- `docs/research/` — the research the design rests on; cite it, don't re-argue
+- [`docs/research/`](docs/README.md#research) — the research the design rests on; cite it, don't re-argue
   it without new evidence.
 
 ## Project dashboard (STATUS.md)
@@ -52,7 +58,7 @@ no-op) when they're absent. See `docs/TESTING.md`.
 
 ## Architecture (enforced boundaries)
 
-Three layers (DESIGN D2a). Dependencies point one way: shell → controller →
+Three layers (DESIGN [D2a](docs/architecture/README.md#d2a-three-layers--core-controller-toolkit-shell-2026-09-02)). Dependencies point one way: shell → controller →
 core, never back.
 
 - `src/core/` — **pure, no toolkit imports, unit-tested.** Markdown → HTML

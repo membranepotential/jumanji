@@ -55,7 +55,7 @@ but has no webview there.
 the mac shell); everything shared stays under the Linux suite; deletion is one
 directory plus one cfg gate; a GitHub Actions `macos` job for compile
 visibility; README tier note ("community-contributed, may lag, may be
-dropped"); DESIGN.md amendments argued in the PR.
+dropped"); [DESIGN.md](../DESIGN.md) amendments argued in the PR.
 
 **The ask:** run a half-day spike on four assumptions and post results:
 (a) `evaluate_script_with_callback` returns structured results on macOS,
@@ -65,7 +65,7 @@ first PR — the controller extraction being the natural candidate.
 
 ## 2. How the shell actually decomposes today
 
-The issue assumes the shell is "thin" in the DESIGN.md sense. It is not, and
+The issue assumes the shell is "thin" in the [DESIGN.md](../architecture/README.md#d2-ui--gtk4-rs--system-webkitgtk-6-girara-style-shell-reimplemented) sense. It is not, and
 that is the crux of the work:
 
 | File | Lines | GTK/glib/webkit6 coupling |
@@ -153,7 +153,7 @@ upload in §5.1.
 
 ### Feasible — yes
 
-- The architecture the port needs is the one DESIGN D2 already reserves as the
+- The architecture the port needs is the one DESIGN [D2](../architecture/README.md#d2-ui--gtk4-rs--system-webkitgtk-6-girara-style-shell-reimplemented) already reserves as the
   "escape hatch": the pipeline is UI-independent, so a different front end can
   replace the shell. D2 assumed the shell would stay thin; it didn't, which is
   why step 1 (extraction) exists. Nothing in core, the HTML contract
@@ -192,7 +192,7 @@ upload in §5.1.
    - **Find is JS**, with match highlighting via the CSS Custom Highlight API,
      not the engine's FindController. Behaviourally close; not identical.
    - **Bars and TOC are in-page overlays.** Different look, and they share the
-     document's zoom/scroll context — the JS category DESIGN D12 sanctions as
+     document's zoom/scroll context — the JS category DESIGN [D12](../reading/README.md#d12-a-document-opens-where-it-is-meant-to-open-post-10-implemented) sanctions as
      "shell viewport glue", but a real UX divergence.
    - **No e2e on macOS**, at least initially: the harness is Xvfb + xdotool +
      D-Bus. The macOS job builds and unit-tests only.
@@ -203,7 +203,7 @@ upload in §5.1.
 ### What the issue gets right
 
 Everything structural: the option triage, the rejection of unifying on wry
-(DESIGN D2 and `03-rust-stack.md` already record the GTK3 reason), the
+(DESIGN [D2](../architecture/README.md#d2-ui--gtk4-rs--system-webkitgtk-6-girara-style-shell-reimplemented) and [`03-rust-stack.md`](03-rust-stack.md) already record the GTK3 reason), the
 isolation strategy, and the choice of the controller extraction as the first
 PR. The stays/changes table matches the code.
 
@@ -279,7 +279,7 @@ Staged so each step is green on `cargo test` (unit + 50 e2e):
    them to the session.
 4. **Platform hooks.** External-URI launch, selection clipboard, data dir as
    trait methods or Linux-only modules.
-5. **Docs.** DESIGN.md gains the three-layer boundary (a D2 amendment, not a
+5. **Docs.** [DESIGN.md](../DESIGN.md) gains the three-layer boundary (a D2 amendment, not a
    new decision); CLAUDE.md's architecture section and TESTING.md follow.
 
 Fast unit tests for the session land in step 3 and are the deliverable that
@@ -305,7 +305,7 @@ PRs and keeps CI green. What that shell consists of, compiled only on macOS:
   overlays) as explicit `todo!()`s named after the spike items.
 - `main.rs` cfg split; `tests/e2e.rs` gated to Linux.
 - The `macos` CI job (§5.1) building the branch.
-- Draft DESIGN.md amendments (dual-shell ADR, in-page chrome, JS find,
+- Draft [DESIGN.md](../DESIGN.md) amendments (dual-shell ADR, in-page chrome, JS find,
   automation story) and the README tier note, for the contributor to finish.
 
 The owner cannot run any of it. The contract and the fake toolkit

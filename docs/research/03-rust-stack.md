@@ -159,4 +159,4 @@ notify 8.2 · serde+toml.**
   reusable over an egui front end if WebKit disappoints (the escape hatch that
   makes the bet safe).
 
-Component boundaries: see [DESIGN.md](../DESIGN.md).
+Component boundaries: see [architecture/README.md](../architecture/README.md#component-boundaries).
