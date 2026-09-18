@@ -20,7 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::fake::{FakeChrome, FakeHost, FakeToolkit, FakeViewport, TimerEvent, ViewCall};
 use super::scripts::{
-    DIAGRAM_ZOOM_MAX, DIAGRAM_ZOOM_MIN, js_string, message, nearest_source_element_js,
+    DIAGRAM_ZOOM_MAX, DIAGRAM_ZOOM_MIN, POINTER_GLOBAL, js_string, message,
+    nearest_source_element_js,
 };
 use super::session::{Controller, Dirs, KeyOutcome};
 use super::toolkit::{Chrome, Prompt};
@@ -850,11 +851,9 @@ fn ctrl_wheel_zooms_the_graph_about_the_pages_own_pointer() {
     // that "shifts the pan". The graph zooms about the pointer the page itself
     // saw, so the controller passes no coordinates at all.
     let r = with_graph();
-    r.controller.on_pointer_moved(612.0, 344.0);
     r.view.clear();
     r.wheel_zoom(-1.0, false);
     assert!(r.view.evaled(", 'pointer');"), "about the page's pointer");
-    assert!(!r.view.evaled("612") && !r.view.evaled("306"));
     for key in ['-', '+'] {
         r.view.clear();
         r.press(key);
@@ -1405,6 +1404,38 @@ fn setting_wide_blocks_re_renders_with_the_new_eligibility() {
         "jmnj-wide jmnj-wide-diagrams jmnj-wide-fences jmnj-wide-tables \
          jmnj-wide-code jmnj-wide-math"
     );
+}
+
+#[test]
+fn ctrl_wheel_zooms_the_page_about_the_pages_own_pointer() {
+    // The shell's pointer is in toolkit px, which WebKit need not lay the page
+    // out in (2:1 under Xvfb); dividing it by the zoom anchored the zoom at
+    // twice the cursor's distance from the corner. The capture reads the
+    // pointer the page tracks itself, and it must run before the native level
+    // changes, while the page is still laid out as the pointer was seen.
+    let r = Reader::loaded(DOC);
+    r.view.clear();
+    r.wheel_zoom(-1.0, false);
+    let calls = r.view.calls();
+    let capture = calls
+        .iter()
+        .position(|c| matches!(c, ViewCall::EvalJson(js) if js.contains(POINTER_GLOBAL)))
+        .expect("the anchor is captured at the page's pointer");
+    let zoom = calls
+        .iter()
+        .position(|c| matches!(c, ViewCall::SetZoomLevel(_)))
+        .expect("the page zoomed");
+    assert!(capture < zoom, "captured after the zoom changed: {calls:?}");
+}
+
+#[test]
+fn ctrl_wheel_over_a_diagram_anchors_at_the_pages_own_pointer() {
+    let r = Reader::loaded(DOC);
+    r.message(message::DIAGRAM_HOVER, "0");
+    r.view.clear();
+    r.wheel_zoom(-1.0, false);
+    let js = eval_containing(&r.view, DIAGRAM_ZOOM_VAR);
+    assert!(js.contains(POINTER_GLOBAL), "{js}");
 }
 
 #[test]

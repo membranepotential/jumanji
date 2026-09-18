@@ -2,6 +2,40 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
+## 2026-09-19 (latest) — the document zooms about the real cursor
+
+`Ctrl`+wheel on the document anchored at the wrong place wherever WebKitGTK
+lays the page out at a screen scale of its own. The controller took the
+shell's pointer (GTK logical px, from a motion controller) and divided it by
+the page zoom to get CSS px. Under Xvfb a 1040 px window is 520 CSS px wide at
+zoom 1, so the anchor landed at twice the cursor's distance from the corner;
+on a 1× desktop the two units coincide, which is why it looked right. The
+graph had the same bug and fixed it first (e4aa0b2, entry below).
+
+- **Fix, at the root.** The page tracks the pointer itself: the document-start
+  hover script, now `pointer_js` in
+  [`scripts.rs`](../src/controller/scripts.rs), records it from
+  `pointermove`, `pointerover`, `pointerdown` and `wheel`, and the anchor
+  capture reads it. It stores the pointer as a fraction of the viewport, so the
+  second apply of a coalesced burst still finds it after the native zoom has
+  rescaled the CSS viewport. `ZoomAnchor::Point { x, y }` became
+  `ZoomAnchor::Pointer`, which carries no coordinates. Per-diagram zoom
+  ([D5a.2](reading/README.md#d5a2-diagram-fit-and-per-diagram-zoom-2026-09-13))
+  uses it too.
+- **Removed:** `Controller::on_pointer_moved`, the session's `pointer` field,
+  `cursor_anchor` and the GTK motion controller (`connect_motion`). Nothing
+  else read them.
+- **Tests.** `GetState` gained `pointer_text` / `pointer_top` (what is under
+  the page's pointer, and where). The new e2e
+  `ctrl_wheel_zooms_the_document_about_the_pointer` parks the real pointer on
+  a paragraph and zooms in with a real `Ctrl`+wheel; it fails with the old
+  conversion (a paragraph two further up ends up under the pointer) and passes
+  with the fix (drift about 3 CSS px). Two controller tests pin the contract:
+  the capture reads the page pointer and runs before the native zoom.
+- Decision text updated in
+  [D5a](reading/README.md#d5a-two-axis-zoom); the follow-up note in
+  [graph/README.md](graph/README.md) is gone.
+
 ## 2026-09-19 (later) — the graph at every zoom level
 
 A code review of the fold pass found the model held at near zoom and frayed

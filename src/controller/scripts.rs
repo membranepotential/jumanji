@@ -81,7 +81,8 @@ fn post_call(name: &str, payload_expr: &str) -> String {
 /// [`RESTORE_ANCHOR_JS`], which runs after the zoom change reflows the page.
 pub fn capture_anchor_js(anchor: &ZoomAnchor) -> String {
     // (x expression, y-probe list, guard) — Top probes a few px down the column
-    // centre and only when scrolled; Point probes exactly the given point.
+    // centre and only when scrolled; Pointer probes exactly where the page last
+    // saw the pointer, in CSS px of the layout the capture runs against.
     let (cx, ys, guard_open, guard_close) = match anchor {
         ZoomAnchor::Top => (
             "(() => { const m = document.querySelector('main') || document.body; \
@@ -91,9 +92,9 @@ pub fn capture_anchor_js(anchor: &ZoomAnchor) -> String {
             "if (window.scrollY > 0) {",
             "}",
         ),
-        ZoomAnchor::Point { x, y } => (
-            format!("Math.max(1, Math.min(innerWidth - 1, {x}))"),
-            format!("[Math.max(1, Math.min(innerHeight - 1, {y}))]"),
+        ZoomAnchor::Pointer => (
+            format!("{POINTER_GLOBAL}().x"),
+            format!("[Math.max(1, Math.min(innerHeight - 1, {POINTER_GLOBAL}().y))]"),
             "",
             "",
         ),
@@ -298,20 +299,45 @@ pub fn diagram_zoom_reset_js() -> String {
     )
 }
 
-/// Wire the pointer-over-diagram flag: a capture-phase `mouseover` / `mouseout`
-/// pair posts the index of the `.mermaid` box under the pointer (or `""` for
-/// none) via [`message::DIAGRAM_HOVER`], and only when it changes.
+/// The page global [`pointer_js`] exposes: a function returning where the
+/// pointer last was, in CSS px of the page as it is laid out *now*.
+pub const POINTER_GLOBAL: &str = "window.__jmnj_pointer";
+
+/// The page's own view of the pointer: where it is, and which diagram it is
+/// over.
 ///
-/// This exists because the obvious implementation is impossible. GTK dispatches
-/// scroll events capture-phase from the toplevel, *before* WebKit sees them
-/// (DESIGN D4) — which is what makes `Ctrl`+wheel page zoom work at all — so a
-/// `wheel` listener inside the page would never fire, and the routing decision
-/// has to be made shell-side and synchronously. Posting the flag on pointer
-/// movement (rare, and already coalesced by the change check) lets the
-/// controller decide from a cached value with no round trip inside the gesture.
-fn diagram_hover_js() -> String {
+/// **Where it is** ([`POINTER_GLOBAL`]) is what `Ctrl`+wheel zooms about
+/// (DESIGN D5a). The page tracks it itself because nothing outside can say it
+/// in CSS px: the shell's pointer is in toolkit logical px, and WebKitGTK may
+/// lay the page out at a screen scale of its own on top of the page zoom (2
+/// logical px per CSS px at zoom 1 under Xvfb), so a conversion from outside
+/// lands the anchor elsewhere. `clientX` / `clientY` are CSS px by definition.
+/// It is kept as a *fraction* of the viewport, not as CSS px: a native zoom
+/// change rescales the CSS viewport under a pointer that has not moved, and
+/// the viewport still covers the same screen, so the fraction stays true where
+/// a stored `clientY` would go stale until the next pointer event. It seeds
+/// from every pointer event, not only motion — a `Ctrl`+wheel may come before
+/// the pointer moves — and starts at the centre.
+///
+/// **Which diagram** is a flag posted via [`message::DIAGRAM_HOVER`]: a
+/// capture-phase `mouseover` / `mouseout` pair posts the index of the
+/// `.mermaid` box under the pointer (or `""` for none), and only when it
+/// changes. This exists because the obvious implementation is impossible. GTK
+/// dispatches scroll events capture-phase from the toplevel, *before* WebKit
+/// sees them (DESIGN D4) — which is what makes `Ctrl`+wheel page zoom work at
+/// all — so a `wheel` listener inside the page would never fire, and the
+/// routing decision has to be made shell-side and synchronously. Posting the
+/// flag on pointer movement (rare, and already coalesced by the change check)
+/// lets the controller decide from a cached value with no round trip inside
+/// the gesture.
+fn pointer_js() -> String {
     format!(
         "(function () {{
+        let fx = 0.5, fy = 0.5;
+        const track = (e) => {{ fx = e.clientX / innerWidth; fy = e.clientY / innerHeight; }};
+        for (const type of ['pointermove', 'pointerover', 'pointerdown', 'wheel'])
+          document.addEventListener(type, track, {{ capture: true, passive: true }});
+        {POINTER_GLOBAL} = () => ({{ x: fx * innerWidth, y: fy * innerHeight }});
         let last = null;
         const report = (v) => {{ if (v === last) return; last = v; {post} }};
         const boxOf = (node) => (node && node.closest ? node.closest('.mermaid') : null);
@@ -623,7 +649,7 @@ fn editor_sync_js() -> String {
 
 /// The scripts every shell installs at document start in the top frame, in
 /// this order, on every document: selection copy, drag-select reset, editor
-/// sync, the pointer-over-diagram flag, scroll notify, the resize anchor, then
+/// sync, the page's pointer (position and diagram flag), scroll notify, the resize anchor, then
 /// the scroll-restore no-flash gate. Order matters only in that scripts run in
 /// insertion order; the gate calls the resize anchor's rebase if it exists, so
 /// the anchor goes first. Otherwise each is independent of the others, and
@@ -637,7 +663,7 @@ pub fn document_start() -> Vec<String> {
         selection_copy_js(),
         DRAG_SELECT_RESET.to_string(),
         editor_sync_js(),
-        diagram_hover_js(),
+        pointer_js(),
         scroll_notify_js(),
         resize_anchor_js(),
         scroll_restore_js(),

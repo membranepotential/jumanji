@@ -47,15 +47,31 @@ Zoom has two independent axes, both count-multiplied and reset together by `=`:
   - **The reading position is anchored, not accidental.** One anchor
     mechanism (capture `elementFromPoint` + viewport offset before the change,
     scroll it back after) is shared by both axes, parameterised by probe
-    point: `Ctrl`+wheel anchors **at the cursor** (pointer tracked via a
-    motion controller; GTK-logical → CSS px is `v / zoom`, evaluated at the
-    **pre-change** zoom the page is still laid out at — using the post-change
-    zoom misplaces the anchor, worst near the viewport bottom), keyboard/D-Bus
-    zoom and text zoom anchor at the top of the viewport. Sequencing is
-    race-free: capture-JS → (completion callback) native `set_zoom_level` →
-    restore-JS. `Shell.zoom` is the source of truth (the native level lands
+    point: `Ctrl`+wheel anchors **at the cursor** (the pointer as the page
+    itself tracks it, probed in the layout the page is still in — before the
+    native zoom changes; probing after it misplaces the anchor, worst near the
+    viewport bottom), keyboard/D-Bus zoom and text zoom anchor at the top of
+    the viewport. Sequencing is race-free: capture-JS → (completion callback)
+    native `set_zoom_level` → restore-JS. `Shell.zoom` is the source of truth (the native level lands
     async); the native level survives a document reload (a WebView property), so
     no re-apply is needed on load.
+  - **The page tracks the pointer itself (2026-09-19).** The cursor anchor
+    used to be the shell's pointer (a GTK motion controller, logical px)
+    divided by the page zoom. That holds only if a logical px is a CSS px at
+    zoom 1, and WebKitGTK does not promise it: it lays the page out at a
+    screen scale of its own (under Xvfb, 2 logical px per CSS px), so the
+    anchor landed at twice the cursor's distance from the corner. It happened
+    to coincide on a 1× desktop, which is why it looked right. The document
+    graph hit the same mismatch first and fixed it the same way
+    ([design.md](../graph/design.md)): a document-start script
+    (`pointer_js` in [`scripts.rs`](../../src/controller/scripts.rs)) records
+    the pointer from every pointer event, `clientX`/`clientY` being CSS px by
+    definition, and the capture reads it — no coordinate crosses the
+    shell/page boundary. It keeps the pointer as a fraction of the viewport,
+    because a native zoom rescales the CSS viewport under a pointer that has
+    not moved, and the second apply of a coalesced burst must still find it.
+    `GetState`'s `pointer_text`/`pointer_top` report what is under that
+    pointer, for the e2e.
   - **Wheel zoom is coalesced, leading-edge** (~40 ms trailing window): the
     first tick of a burst applies immediately (a single tick feels instant), and
     any ticks arriving within the window after it are batched into one further
@@ -242,6 +258,9 @@ state — a look-closer gesture, unlike [D5a](#d5a-two-axis-zoom)'s session-scop
 DOM is its only home and a reload drops it. `=` clears it along with both zoom
 axes, inside the same anchored capture, because a diagram left at 4× after a
 reset would make `=` a lie.
+Each tick is anchored at the cursor exactly as the page zoom is — at the
+pointer the page tracks itself ([D5a](#d5a-two-axis-zoom)) — because stepping onto or off 1.0
+changes the box's height and moves the page below it.
 
 **The routing had to be shell-side and synchronous.** GTK dispatches the scroll
 capture-phase from the toplevel before WebKit sees it ([D4](../keys/README.md#d4-keybindings--gtk-capture-phase-zathura-semantics)), so a page `wheel`

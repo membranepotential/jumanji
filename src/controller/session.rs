@@ -240,11 +240,6 @@ struct Session<T: Toolkit> {
     /// Current text-zoom factor (1.0 = 100%). Session-scoped exactly like
     /// [`Session::zoom`].
     text_zoom: f64,
-    /// Last pointer position in **viewport** logical px, as the shell reports it
-    /// (see [`Controller::on_pointer_moved`]) — already translated out of window
-    /// coordinates, so anchoring a wheel zoom at the cursor needs nothing but the
-    /// zoom divisor.
-    pointer: (f64, f64),
     /// Ctrl+wheel ticks accumulated but not yet applied (+ = zoom in). Coalesced
     /// so a rapid burst becomes one anchored reflow, not one per tick.
     pending_zoom_steps: i32,
@@ -470,7 +465,6 @@ impl<T: Toolkit + 'static> Controller<T> {
             font_base_px: options.font_size_px as f64,
             zoom: 1.0,
             text_zoom: 1.0,
-            pointer: (0.0, 0.0),
             pending_zoom_steps: 0,
             zoom_flush_scheduled: false,
             matcher: Matcher::new(Mode::Normal),
@@ -952,8 +946,7 @@ impl<T: Toolkit + 'static> Controller<T> {
         let s = self.0.borrow();
         let step = 1.0 + s.zoom_step;
         let factor = if dy < 0.0 { step } else { 1.0 / step };
-        let anchor = s.cursor_anchor();
-        s.view.zoom_diagram(index, factor, anchor);
+        s.view.zoom_diagram(index, factor, ZoomAnchor::Pointer);
     }
 
     /// Accumulate one Ctrl+wheel tick. Leading-edge coalescing: the first tick of a
@@ -994,25 +987,16 @@ impl<T: Toolkit + 'static> Controller<T> {
                 None
             } else {
                 let level = (s.zoom + s.zoom_step * steps as f64).max(0.2);
-                // Capture the anchor from the *current* (pre-change) zoom: the page
-                // is still laid out at `s.zoom`, and `cursor_anchor` divides by that
-                // to convert to CSS px. Must run before `s.zoom` is updated.
-                let anchor = s.cursor_anchor();
                 s.zoom = level;
-                s.view.zoom_to(level, anchor);
+                // `zoom_to` captures the anchor before it sets the native level,
+                // so the page probes the pointer in the layout it is still in.
+                s.view.zoom_to(level, ZoomAnchor::Pointer);
                 Some(())
             }
         };
         if applied.is_some() {
             self.refresh_status();
         }
-    }
-
-    /// The pointer moved to (`x`, `y`) — **viewport** logical px, so the shell
-    /// translates out of its window coordinates first. Remembered so a Ctrl+wheel
-    /// zoom can anchor at the cursor.
-    pub fn on_pointer_moved(&self, x: f64, y: f64) {
-        self.0.borrow_mut().pointer = (x, y);
     }
 
     /// `Enter` in the input bar: run a search or a `:` command depending on the
@@ -2428,25 +2412,6 @@ impl<T: Toolkit> Session<T> {
         let file = self.file.clone();
         self.history.record(&file, state);
     }
-
-    /// The current cursor as a [`ZoomAnchor`] in the viewport's CSS-px
-    /// coordinates. [`pointer`](Self::pointer) is already in viewport logical px,
-    /// so this only divides by the zoom level: the CSS viewport is `deviceWidth /
-    /// (scale × zoom)` and a logical px is `deviceWidth / scale`, so the display
-    /// scale factor cancels and only the zoom divisor remains. **Must be evaluated
-    /// at the zoom level the page is currently laid out at** (the pre-change
-    /// zoom): the divisor is that level, so calling it after updating
-    /// [`zoom`](Self::zoom) would convert with the wrong scale and misplace the
-    /// anchor — the error grows with distance from the origin (the
-    /// cursor-near-bottom bug).
-    fn cursor_anchor(&self) -> ZoomAnchor {
-        let (x, y) = self.pointer;
-        let zoom = self.zoom.max(0.2);
-        ZoomAnchor::Point {
-            x: x / zoom,
-            y: y / zoom,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2770,6 +2735,7 @@ fn state_json(
          \"math_width\":{math_width},\"msup_shift_ratio\":{msup_shift_ratio},\
          \"fence_width\":{fence_width},\"frontmatter_width\":{frontmatter_width},\
          \"probe_text\":{probe_text},\"probe_top\":{probe_top},\
+         \"pointer_text\":{pointer_text},\"pointer_top\":{pointer_top},\
          \"first_frame_scroll_y\":{first_frame_scroll_y},\
          \"reveal_scroll_y\":{reveal_scroll_y},\
          \"reveal_failsafe\":{reveal_failsafe},\"restoring\":{restoring},\
@@ -2798,6 +2764,8 @@ fn state_json(
         frontmatter_width = vs.frontmatter_width,
         probe_text = json_string(&vs.probe_text),
         probe_top = vs.probe_top,
+        pointer_text = json_string(&vs.pointer_text),
+        pointer_top = vs.pointer_top,
         first_frame_scroll_y = vs.first_frame_scroll_y,
         reveal_scroll_y = vs.reveal_scroll_y,
         reveal_failsafe = vs.revealed_by_failsafe,

@@ -133,6 +133,3 @@ flowchart LR
   edges would cover that case; not built.
 - Search inside the graph (`/`, `n`/`N`) is an open question in
   [interaction.md](interaction.md).
-- The document's own `Ctrl`+wheel zoom has the same pointer-unit mismatch the
-  graph had (WebKit renders at its own scale; see [D5a](../reading/README.md#d5a-two-axis-zoom)); the graph fixed it by reading the
-  pointer in page pixels.

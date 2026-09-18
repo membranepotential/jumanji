@@ -114,6 +114,10 @@ struct State {
     /// `scroll_y` is *supposed* to change when an anchored toggle reflows.
     probe_text: String,
     probe_top: f64,
+    /// The same pair for the element under the pointer, as the page tracks
+    /// it in CSS px — what `Ctrl`+wheel must keep in place.
+    pointer_text: String,
+    pointer_top: f64,
     /// First `<math>` rendered width in CSS px (0 if none). Nonzero proves the
     /// MathML actually laid out.
     math_width: f64,
@@ -203,6 +207,8 @@ impl State {
             diagram_box_width: field(json, "diagram_box_width")?.parse().ok()?,
             probe_text: field_str(json, "probe_text")?,
             probe_top: field(json, "probe_top")?.parse().ok()?,
+            pointer_text: field_str(json, "pointer_text")?,
+            pointer_top: field(json, "pointer_top")?.parse().ok()?,
             math_width: field(json, "math_width")?.parse().ok()?,
             msup_shift_ratio: field(json, "msup_shift_ratio")?.parse().ok()?,
             fence_width: field(json, "fence_width")?.parse().ok()?,
@@ -1575,12 +1581,11 @@ fn ctrl_wheel_zooms_towards_cursor_without_overflow() {
 
 #[test]
 fn ctrl_wheel_zoom_anchors_with_cursor_near_bottom() {
-    // Regression for the cursor-near-bottom anchor bug: the capture JS runs while
-    // the page is still laid out at the OLD zoom, so the window→CSS px conversion
-    // (`cursor_anchor` divides by the zoom) must use the OLD zoom. The bug set
-    // `s.zoom` to the new level *before* computing the anchor, so the divisor was
-    // wrong and the error grew with distance from the origin — worst with the
-    // cursor low in the viewport. Precise element-level anchoring isn't
+    // Regression for the cursor-near-bottom anchor bug: the capture must probe
+    // the pointer in the layout the page is still in, before the native zoom
+    // changes. The bug converted the shell's pointer with the *new* zoom, so the
+    // error grew with distance from the origin — worst with the cursor low in
+    // the viewport. (The page now tracks the pointer itself, in CSS px.) Precise element-level anchoring isn't
     // observable over the GetState surface, so we assert the robust invariants
     // the brief calls for: no page h-scroll, and the reflow moves the reading
     // position in the correct direction (zoom-in anchored below the top scrolls
@@ -1638,6 +1643,84 @@ fn ctrl_wheel_burst_coalesces_without_losing_steps() {
         z.doc_scroll_width <= z.viewport_width + 1.0,
         "no page h-scroll after burst"
     );
+}
+
+#[test]
+fn ctrl_wheel_zooms_the_document_about_the_pointer() {
+    // Regression: Ctrl+wheel anchored the zoom at the shell's pointer divided
+    // by the page zoom — toolkit logical px taken for CSS px. WebKitGTK can lay
+    // the page out at its own screen scale on top of the page zoom (2 logical
+    // px per CSS px at zoom 1 under Xvfb), so the anchor landed at twice the
+    // cursor's distance from the corner and something else was held in place.
+    // The page now tracks the pointer itself. Asserted where it matters: what
+    // is under the pointer stays where it was.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("doc-zoom");
+    let body: String = (1..=40)
+        .map(|i| {
+            let words = "words to make the paragraph several lines tall ".repeat(6);
+            format!("Paragraph {i}: {words}\n\n")
+        })
+        .collect();
+    let doc = vault.join("long.md");
+    std::fs::write(&doc, format!("# Long\n\n{body}")).expect("write");
+    let h = Harness::launch_file(doc);
+    h.wait_for_state("loaded", SETTLE, |s| s.loaded && s.viewport_width > 0.0);
+
+    // Park the pointer a little way down the viewport, in X pixels, and scroll
+    // until a paragraph's top sits a comfortable distance above it — so the
+    // paragraph still spans the pointer after zooming in (the pointer's CSS y
+    // shrinks with the zoom while the anchor holds the paragraph's).
+    let s = h.get_state();
+    let px_per_css = h.window_width() / s.viewport_width;
+    let css_y = 120.0;
+    h.mouse_move(
+        (s.viewport_width / 2.0 * px_per_css).round() as i32,
+        (css_y * px_per_css).round() as i32,
+    );
+    h.execute_action("scroll down", 20);
+    let mut before = None;
+    for _ in 0..60 {
+        let s = h.get_state();
+        let above = css_y - s.pointer_top;
+        if s.pointer_text.starts_with("Paragraph") && (40.0..=70.0).contains(&above) {
+            before = Some(s);
+            break;
+        }
+        h.execute_action("scroll down", 1);
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    let before = before.expect("never parked the pointer inside a paragraph");
+
+    // Ticks 2 ms apart fall into one coalesce window: two applies, the second
+    // well after the first has settled.
+    h.ctrl_wheel(true, 3, 2);
+    let mut after = h.wait_for_state("the page zoomed in", SETTLE, |s| s.zoom > 1.25);
+    // The trailing flush of the burst lands after the leading one; settle.
+    loop {
+        std::thread::sleep(Duration::from_millis(150));
+        let now = h.get_state();
+        let still = (now.pointer_top - after.pointer_top).abs() < 0.5 && now.zoom == after.zoom;
+        after = now;
+        if still {
+            break;
+        }
+    }
+    assert_eq!(
+        before.pointer_text, after.pointer_text,
+        "a different paragraph is under the pointer ({px_per_css} X px per CSS px)"
+    );
+    let drift = (after.pointer_top - before.pointer_top).abs();
+    assert!(
+        drift <= 6.0,
+        "the paragraph under the pointer moved {drift:.1} CSS px ({:.0} -> {:.0}; \
+         {px_per_css} X px per CSS px)",
+        before.pointer_top,
+        after.pointer_top
+    );
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
 }
 
 #[test]

@@ -12,9 +12,8 @@ use gtk::glib;
 use gtk::glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk::{
-    Application, ApplicationWindow, EventControllerKey, EventControllerMotion,
-    EventControllerScroll, EventControllerScrollFlags, EventSequenceState, GestureClick,
-    PropagationPhase,
+    Application, ApplicationWindow, EventControllerKey, EventControllerScroll,
+    EventControllerScrollFlags, EventSequenceState, GestureClick, PropagationPhase,
 };
 use webkit6::LoadEvent;
 use webkit6::prelude::*;
@@ -117,7 +116,6 @@ fn build_ui(
     connect_keys(&controller, &window);
     connect_scroll(&controller, &window);
     connect_buttons(&controller, &window);
-    connect_motion(&controller, &window, &view);
     connect_input_entry(&controller, &chrome);
     connect_close(&controller, &window);
     serve_dbus(&controller);
@@ -227,27 +225,6 @@ fn connect_buttons(controller: &Controller<Gtk>, window: &ApplicationWindow) {
     });
 
     window.add_controller(clicks);
-}
-
-/// Track the pointer so Ctrl+wheel can anchor at the cursor. Capture phase on
-/// the toplevel, mirroring the key/scroll controllers — a controller on the
-/// WebView itself never sees these events (DESIGN.md D5a) — so the coordinates
-/// arrive in *window* space and are translated into the view here, which is the
-/// one step that needs a widget hierarchy.
-fn connect_motion(controller: &Controller<Gtk>, window: &ApplicationWindow, view: &View) {
-    let motion = EventControllerMotion::new();
-    motion.set_propagation_phase(PropagationPhase::Capture);
-
-    let controller = controller.clone();
-    let webview = view.widget().clone();
-    let toplevel = window.clone();
-    motion.connect_motion(move |_, x, y| {
-        let src = gtk::graphene::Point::new(x as f32, y as f32);
-        let p = toplevel.compute_point(&webview, &src).unwrap_or(src);
-        controller.on_pointer_moved(p.x() as f64, p.y() as f64);
-    });
-
-    window.add_controller(motion);
 }
 
 /// Wire the input bar's `Enter`.

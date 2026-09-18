@@ -13,10 +13,10 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::controller::scripts::{
-    APPLY_GLOBAL, FIRST_FRAME_GLOBAL, OPEN_ATTRIBUTE, RESTORE_ANCHOR_JS, RESTORING_CLASS,
-    REVEAL_GLOBAL, capture_anchor_js, diagram_fit_class_js, diagram_zoom_js, diagram_zoom_reset_js,
-    graph_call_js, graph_show_js, graph_update_js, hints_build_js, js_string,
-    nearest_source_element_js, wide_class_js,
+    APPLY_GLOBAL, FIRST_FRAME_GLOBAL, OPEN_ATTRIBUTE, POINTER_GLOBAL, RESTORE_ANCHOR_JS,
+    RESTORING_CLASS, REVEAL_GLOBAL, capture_anchor_js, diagram_fit_class_js, diagram_zoom_js,
+    diagram_zoom_reset_js, graph_call_js, graph_show_js, graph_update_js, hints_build_js,
+    js_string, nearest_source_element_js, wide_class_js,
 };
 use crate::controller::toolkit::Viewport;
 use crate::core::RenderedDocument;
@@ -34,9 +34,11 @@ pub enum ZoomAnchor {
     /// zoom, and text zoom). Only anchors when scrolled, so an exact top stays
     /// exactly at the top.
     Top,
-    /// Keep the element under a viewport point (CSS px) fixed — the cursor, for
-    /// Ctrl+wheel zoom ("zoom towards the cursor").
-    Point { x: f64, y: f64 },
+    /// Keep the element under the pointer fixed — `Ctrl`+wheel zoom ("zoom
+    /// towards the cursor"). The pointer as the page itself last saw it, for
+    /// the reason [`GraphZoomAt::Pointer`] gives: no position from outside the
+    /// page is in CSS px.
+    Pointer,
 }
 
 /// Which point a graph zoom keeps fixed on screen (DESIGN D14).
@@ -134,6 +136,12 @@ pub struct ViewportState {
     pub probe_text: String,
     /// See [`probe_text`](Self::probe_text).
     pub probe_top: f64,
+    /// The same pair for the element under the pointer, as the page itself
+    /// tracks it: the observable for "`Ctrl`+wheel keeps what is under the
+    /// cursor in place" (DESIGN D5a). Empty / 0 over nothing.
+    pub pointer_text: String,
+    /// See [`pointer_text`](Self::pointer_text).
+    pub pointer_top: f64,
     /// Rendered width of the first `<math>` element (0 if none). CSS px. Lets
     /// e2e assert MathML actually laid out with nonzero geometry.
     pub math_width: f64,
@@ -224,6 +232,8 @@ struct Snapshot {
     fw: f64,
     pt: String,
     py: f64,
+    qt: String,
+    qy: f64,
     fc: String,
     ff: f64,
     rv: f64,
@@ -250,6 +260,8 @@ impl From<Snapshot> for ViewportState {
             frontmatter_width: s.fw,
             probe_text: s.pt,
             probe_top: s.py,
+            pointer_text: s.qt,
+            pointer_top: s.qy,
             first_frame_scroll_y: s.ff,
             reveal_scroll_y: s.rv,
             revealed_by_failsafe: s.rt,
@@ -282,6 +294,8 @@ impl ViewportState {
             frontmatter_width: 0.0,
             probe_text: String::new(),
             probe_top: 0.0,
+            pointer_text: String::new(),
+            pointer_top: 0.0,
             // Matches the in-page sentinel: nothing was recorded.
             first_frame_scroll_y: -1.0,
             reveal_scroll_y: -1.0,
@@ -673,11 +687,12 @@ pub trait Page: Viewport + Clone + 'static {
              for (const ppy of [8, 40, 80, 140]) { \
                const c = document.elementFromPoint(pcx, ppy); \
                if (c && c !== b && c !== d && c.tagName !== 'MAIN') { pn = c; break; } } \
-             const ptxt = pn ? (pn.textContent || '').replace(/\\s+/g, ' ').trim() : ''; \
              /* An SVG <path> identifies nothing by text; name it by tag instead \
                 of climbing, which would walk right up into main. */ \
-             const pt = pn ? (ptxt ? ptxt.slice(0, 48) \
-                                   : '<' + pn.tagName.toLowerCase() + '>') : ''; \
+             const label = (n) => { \
+               const t = (n.textContent || '').replace(/\\s+/g, ' ').trim(); \
+               return t ? t.slice(0, 48) : '<' + n.tagName.toLowerCase() + '>'; }; \
+             const pt = pn ? label(pn) : ''; \
              const py = pn ? pn.getBoundingClientRect().top : 0; \
              let ms = 0; \
              if (msup && msup.children.length >= 2) { \
@@ -703,7 +718,11 @@ pub trait Page: Viewport + Clone + 'static {
              ? {FIRST_FRAME_GLOBAL} : -1, \
              rv: {REVEAL_GLOBAL} ? {REVEAL_GLOBAL}.y : -1, \
              rt: {REVEAL_GLOBAL} ? {REVEAL_GLOBAL}.failsafe : false, \
-             rs: d.classList.contains('{RESTORING_CLASS}') }}; }})()"
+             rs: d.classList.contains('{RESTORING_CLASS}'), \
+             ...(() => {{ const q = {POINTER_GLOBAL} ? {POINTER_GLOBAL}() : null; \
+               const n = q ? document.elementFromPoint(q.x, q.y) : null; \
+               return {{ qt: n ? label(n) : '', \
+                         qy: n ? n.getBoundingClientRect().top : 0 }}; }})() }}; }})()"
         );
         self.eval_json(&script, move |json| {
             let state = json
