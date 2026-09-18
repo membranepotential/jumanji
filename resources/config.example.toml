@@ -82,12 +82,57 @@
 # graphviz = "dot -Tsvg"          #   alias for the same
 # typst = "typst compile - -"     # Typst → SVG         (```typst fences)
 
-[keys.normal]
-# Remap examples, zathura key notation (bare chars are literal, angle
-# brackets denote specials/modifiers: <C-r>, <Tab>, <Esc>, <S-Tab>, <Space>).
-# Uncomment and edit to override the defaults; unspecified keys keep their
-# built-in bindings.
+# Key tables, one per mode: [keys.normal] and [keys.toc] (the table of
+# contents, opened with Tab).
+# Zathura key notation: bare chars are literal (`gg`, `J`); angle brackets
+# denote specials and modifiers (<C-r>, <Tab>, <CR>, <BS>, <Esc>, <Space>,
+# <S-Tab>). A count prefix (`5j`) works with every binding.
+#
+# Every binding below is the built-in default. Uncomment a line and edit it to
+# override that key; keys you leave out keep their defaults. `mark set` and
+# `mark jump` take the next typed character as the register (`ma`, `'a`).
 
+[keys.normal]
+# "j" = "scroll down"
+# "k" = "scroll up"
+# "h" = "scroll left"
+# "l" = "scroll right"
+# "d" = "half-page down"
+# "u" = "half-page up"
 # "J" = "section next"
 # "K" = "section previous"
+# "gg" = "goto top"
+# "G" = "goto bottom"              # <count>G jumps to section <count>
+# "+" = "zoom in"
+# "-" = "zoom out"
+# "=" = "zoom reset"
+# "/" = "search"
+# "n" = "search next"
+# "N" = "search previous"
 # "<C-r>" = "recolor"
+# "r" = "reload"
+# "s" = "toggle wide"
+# "a" = "toggle diagram fit"
+# "<Tab>" = "toggle toc"
+# ":" = "command line"
+# "f" = "follow link"
+# "F" = "show link target"
+# "m" = "mark set"
+# "'" = "mark jump"
+# "<C-o>" = "jump backward"
+# "<C-i>" = "jump forward"
+# "<BS>" = "jump backward"
+# "<Esc>" = "abort"
+# "q" = "quit"
+#
+# Actions with no default key (bind one here if you want it): toggle
+# frontmatter, text zoom in, text zoom out.
+
+# [keys.toc]
+# "j" = "toc next"
+# "k" = "toc previous"
+# "l" = "toc expand"
+# "h" = "toc collapse"
+# "<CR>" = "toc select"
+# "<Tab>" = "toggle toc"
+# "q" = "quit"
