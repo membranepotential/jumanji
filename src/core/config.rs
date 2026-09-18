@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::editor::EditorCommand;
+use super::graph::View as GraphView;
 use super::keymap::{CharArgKind, Key, KeyPress, KeySequence, Keymap};
 use super::{Action, Direction, Mode};
 
@@ -270,6 +271,11 @@ pub struct Options {
     /// behaviour (a shrunk-to-fit diagram is unreadably small), and the
     /// wide-block breakout already recovers most of the missing width.
     pub diagram_fit: bool,
+    /// What the document graph shows around its spine (DESIGN D14): the
+    /// current note's links (`links`, the default) or the whole spanning tree
+    /// (`tree`). What `v` starts out flipping; `:set` applies it to an open
+    /// graph.
+    pub graph_view: GraphView,
     /// Which clipboard a selection is copied to on select.
     pub selection_clipboard: SelectionClipboard,
     /// Reverse editor sync (DESIGN D7): the command spawned on Ctrl+click, with
@@ -300,6 +306,7 @@ impl Default for Options {
             wide_blocks: WideBlocks::default(),
             wide: true,
             diagram_fit: false,
+            graph_view: GraphView::Links,
             selection_clipboard: SelectionClipboard::Primary,
             editor_command: EditorCommand::default(),
             renderers: BTreeMap::new(),
@@ -314,6 +321,8 @@ pub enum SetEffect {
     Rerender,
     /// Only re-apply the dark/light recolor state; no re-render needed.
     Recolor,
+    /// Re-lay out the document graph, if it is open.
+    Relayout,
     /// Nothing to do now — picked up the next time the option is used.
     None,
 }
@@ -368,6 +377,11 @@ impl Options {
                 // The *toggle* (`a`) is still a class flip with no re-render.
                 self.diagram_fit = parse_scalar::<bool>(value, "diagram-fit")?;
                 Ok(SetEffect::Rerender)
+            }
+            "graph-view" => {
+                self.graph_view =
+                    GraphView::parse(value).map_err(|m| format!("graph-view: {m}"))?;
+                Ok(SetEffect::Relayout)
             }
             "scroll-step" => {
                 self.scroll_step_px = parse_scalar::<u32>(value, "scroll-step")?;
@@ -481,6 +495,13 @@ impl Config {
             })?,
             None => defaults.wide_blocks.clone(),
         };
+        let graph_view = match raw_opts.graph_view {
+            Some(s) => GraphView::parse(&s).map_err(|message| ConfigError::OptionValue {
+                key: "graph-view",
+                message,
+            })?,
+            None => defaults.graph_view,
+        };
         let options = Options {
             scroll_step_px: raw_opts.scroll_step.unwrap_or(defaults.scroll_step_px),
             zoom_step: raw_opts.zoom_step.unwrap_or(defaults.zoom_step),
@@ -497,6 +518,7 @@ impl Config {
             wide_blocks,
             wide: raw_opts.wide.unwrap_or(defaults.wide),
             diagram_fit: raw_opts.diagram_fit.unwrap_or(defaults.diagram_fit),
+            graph_view,
             selection_clipboard,
             editor_command,
             // Normalise fence-language keys to lowercase so the lookup (which
@@ -513,6 +535,7 @@ impl Config {
         if let Some(keys) = raw.keys {
             apply_key_table(&mut keymap, Mode::Normal, "normal", keys.normal)?;
             apply_key_table(&mut keymap, Mode::Toc, "toc", keys.toc)?;
+            apply_key_table(&mut keymap, Mode::Graph, "graph", keys.graph)?;
         }
 
         Ok(Self { options, keymap })
@@ -706,6 +729,13 @@ pub fn parse_action(s: &str) -> Result<Action, String> {
         "toc expand" => TocExpand,
         "toc collapse" => TocCollapse,
         "toc select" => TocSelect,
+        "toggle graph" | "graph" => ToggleGraph,
+        "graph next" => GraphNext,
+        "graph previous" | "graph prev" => GraphPrevious,
+        "graph parent" => GraphParent,
+        "graph child" => GraphChild,
+        "graph open" => GraphOpen,
+        "graph view" => GraphToggleView,
         "abort" => Abort,
         "quit" => Quit,
         other => return Err(format!("unknown action '{other}'")),
@@ -749,6 +779,7 @@ pub fn option_keys() -> &'static [&'static str] {
         "wide-blocks",
         "wide",
         "diagram-fit",
+        "graph-view",
         "selection-clipboard",
     ]
 }
@@ -792,6 +823,13 @@ pub fn action_names() -> &'static [&'static str] {
         "toc expand",
         "toc collapse",
         "toc select",
+        "toggle graph",
+        "graph next",
+        "graph previous",
+        "graph parent",
+        "graph child",
+        "graph open",
+        "graph view",
         "abort",
     ]
 }
@@ -837,6 +875,8 @@ struct RawOptions {
     wide: Option<bool>,
     #[serde(rename = "diagram-fit")]
     diagram_fit: Option<bool>,
+    #[serde(rename = "graph-view")]
+    graph_view: Option<String>,
     #[serde(rename = "selection-clipboard")]
     selection_clipboard: Option<String>,
     #[serde(rename = "editor-command")]
@@ -848,6 +888,7 @@ struct RawOptions {
 struct RawKeys {
     normal: Option<BTreeMap<String, String>>,
     toc: Option<BTreeMap<String, String>>,
+    graph: Option<BTreeMap<String, String>>,
 }
 
 #[cfg(test)]
@@ -1217,6 +1258,33 @@ mod tests {
     }
 
     #[test]
+    fn graph_key_table_remaps_and_t_opens_the_graph_by_default() {
+        let c = Config::parse(
+            r#"
+            [keys.graph]
+            "o" = "graph open"
+            "#,
+        )
+        .unwrap();
+        let mut m = Matcher::new(Mode::Graph);
+        assert_eq!(
+            m.feed(KeyPress::char('o'), &c.keymap),
+            MatchResult::Matched {
+                action: Action::GraphOpen,
+                count: None
+            }
+        );
+        let mut n = Matcher::new(Mode::Normal);
+        assert_eq!(
+            n.feed(KeyPress::char('t'), &c.keymap),
+            MatchResult::Matched {
+                action: Action::ToggleGraph,
+                count: None
+            }
+        );
+    }
+
+    #[test]
     fn runtime_set_rerender_options() {
         let mut o = Options::default();
         assert_eq!(o.set("page-width", "900").unwrap(), SetEffect::Rerender);
@@ -1446,6 +1514,60 @@ mod tests {
         // selection-clipboard cannot change at runtime, even with a valid value.
         assert!(o.set("selection-clipboard", "clipboard").is_err());
         assert_eq!(o.selection_clipboard, SelectionClipboard::Primary);
+    }
+
+    #[test]
+    fn graph_view_defaults_to_links_and_is_a_set_target_that_re_lays_out() {
+        assert_eq!(Options::default().graph_view, GraphView::Links);
+        let c = Config::parse("[options]\ngraph-view = \"tree\"\n").unwrap();
+        assert_eq!(c.options.graph_view, GraphView::Tree);
+        let err = Config::parse("[options]\ngraph-view = \"forest\"\n").unwrap_err();
+        assert!(err.to_string().contains("forest"), "{err}");
+
+        let mut o = Options::default();
+        assert_eq!(o.set("graph-view", "tree").unwrap(), SetEffect::Relayout);
+        assert_eq!(o.graph_view, GraphView::Tree);
+        assert!(
+            o.set("graph-view", "forest")
+                .unwrap_err()
+                .contains("graph-view")
+        );
+        assert!(option_keys().contains(&"graph-view"));
+        assert_eq!(parse_action("graph view").unwrap(), Action::GraphToggleView);
+        assert!(action_names().contains(&"graph view"));
+    }
+
+    /// The example config lists every built-in binding, one commented line
+    /// each. Uncommented and applied to an empty keymap, that listing must be
+    /// exactly the defaults — a new default key, or a changed one, has to show
+    /// up there too.
+    #[test]
+    fn the_example_config_lists_exactly_the_default_bindings() {
+        let example = include_str!("../../resources/config.example.toml");
+        // The key section starts at the `[keys.normal]` table header line
+        // (the prose above it mentions the name too).
+        let keys = &example[example
+            .find("\n[keys.normal]\n")
+            .expect("the example has a key section")..];
+        let listing: String = keys
+            .lines()
+            .map(|line| {
+                let binding = line.starts_with("# \"") && line.contains("\" = ");
+                if line.starts_with("# [keys.") || binding {
+                    &line[2..]
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let raw: RawConfig = toml::from_str(&listing).expect("the listing is valid TOML");
+        let tables = raw.keys.expect("the listing has key tables");
+        let mut keymap = Keymap::empty();
+        apply_key_table(&mut keymap, Mode::Normal, "normal", tables.normal).unwrap();
+        apply_key_table(&mut keymap, Mode::Toc, "toc", tables.toc).unwrap();
+        apply_key_table(&mut keymap, Mode::Graph, "graph", tables.graph).unwrap();
+        assert_eq!(keymap, Keymap::default());
     }
 
     #[test]

@@ -25,6 +25,7 @@ use crate::controller::watch::{FileEvent, Watch};
 use crate::core::command::{self, Command, Completions};
 use crate::core::config::{self, Options, SetEffect};
 use crate::core::editor::EditorCommand;
+use crate::core::graph::{self, Expanded, Graph, ItemKey, ItemKind, Move, Scene, Step, View};
 use crate::core::history::{FileState, History};
 use crate::core::jumplist::{Jumplist, Location};
 use crate::core::keymap::{Key, KeyPress, Keymap, MatchResult, Matcher};
@@ -63,6 +64,68 @@ enum Input {
         typed: String,
         links: Vec<HintLink>,
     },
+}
+
+/// The document graph's lifecycle (DESIGN D14). The walk runs on a worker, so
+/// there is a state between asking and seeing. A landing is drawn only if it
+/// finds the state still [`Building`](Self::Building) *with its own
+/// generation*: `Esc`, a document load, or a later `t` that started a newer
+/// walk all make it stale.
+enum GraphState {
+    Closed,
+    Building(u64),
+    /// On screen. `Mode::Graph` is set exactly while the graph is open.
+    Open(OpenGraph),
+}
+
+/// The graph on screen: the walk, and the scene derived from it for the
+/// session's [`View`](graph::View) and what the reader expanded.
+struct OpenGraph {
+    graph: Graph,
+    /// What paths display relative to: the vault root.
+    base: PathBuf,
+    expanded: Expanded,
+    scene: Scene,
+    /// An item index into `scene`.
+    selected: usize,
+}
+
+impl OpenGraph {
+    fn new(graph: Graph, base: PathBuf, view: View) -> Self {
+        let expanded = Expanded::new();
+        let scene = Scene::new(&graph, view, &expanded);
+        let selected = scene.current();
+        Self {
+            graph,
+            base,
+            expanded,
+            scene,
+            selected,
+        }
+    }
+
+    /// Lay the scene out again (an expansion or the view changed), keeping
+    /// the selection on the same item — or its nearest stand-in.
+    fn relayout(&mut self, view: View) {
+        let key = self.scene.item(self.selected).key.clone();
+        self.scene = Scene::new(&self.graph, view, &self.expanded);
+        self.selected = self.scene.find(&key);
+    }
+
+    /// Expand (`open`) or collapse the selected item.
+    fn fold(&mut self, open: bool) {
+        let key = self.scene.item(self.selected).key.clone();
+        if open {
+            self.expanded.insert(key);
+        } else {
+            self.expanded.remove(&key);
+        }
+        self.relayout(self.scene.view());
+    }
+
+    fn svg(&self) -> String {
+        self.scene.svg(&self.graph, &self.base)
+    }
 }
 
 /// An in-progress tab-completion cycle for the `:` command line.
@@ -227,6 +290,13 @@ struct Session<T: Toolkit> {
     last_scroll: f64,
     /// Link-hint / other out-of-band interaction state.
     input: Input,
+    /// The document graph, when it is open or being built (DESIGN D14).
+    graph: GraphState,
+    /// What the graph shows around its spine: from the `graph-view` option,
+    /// flipped by `v` (the way `s` flips [`wide`](Self::wide)).
+    graph_view: View,
+    /// The generation the next graph walk is stamped with.
+    graph_generation: u64,
     /// Pending `:`-completion cycle, if any.
     completion: Option<Completion>,
     /// Jumplist for `Ctrl-o` / `Ctrl-i` (per document; reset on `:open`).
@@ -417,6 +487,9 @@ impl<T: Toolkit + 'static> Controller<T> {
             loaded: false,
             last_scroll: 0.0,
             input: Input::None,
+            graph: GraphState::Closed,
+            graph_view: options.graph_view,
+            graph_generation: 0,
             completion: None,
             jumplist: Jumplist::new(),
             marks: Marks::new(),
@@ -530,6 +603,24 @@ impl<T: Toolkit + 'static> Controller<T> {
             // the encoding, not an error to report.
             message::DIAGRAM_HOVER => {
                 self.0.borrow_mut().hovered_diagram = payload.parse::<usize>().ok();
+            }
+            // Graph posts name an item by key, not index: a click can arrive
+            // after a re-layout it did not see, and a key that no longer
+            // names an item is dropped rather than applied to another one.
+            message::GRAPH_SELECT => {
+                if let Some(index) = self.graph_item(payload) {
+                    self.graph_select(index);
+                }
+            }
+            message::GRAPH_OPEN => {
+                if let Some(index) = self.graph_item(payload) {
+                    self.graph_open(Some(index));
+                }
+            }
+            message::GRAPH_EXPAND => {
+                if let Some(index) = self.graph_item(payload) {
+                    self.graph_expand(index);
+                }
             }
             _ => {}
         }
@@ -664,6 +755,9 @@ impl<T: Toolkit + 'static> Controller<T> {
         // have, and a flag left standing would make the scan's landing (or the
         // failsafe) fire a redundant render over the document being read.
         s.initial_render_deferred = false;
+        // A load replaces the page the graph overlay lives in; a graph still
+        // being built belongs to the document being left.
+        s.close_graph();
         // User CSS themes are reloaded on every render so edits hot-swap in.
         s.render_opts.extra_css = load_themes(&s.config_dir);
         let path = s.file.clone();
@@ -791,6 +885,9 @@ impl<T: Toolkit + 'static> Controller<T> {
                 KeyOutcome::Consumed
             }
             MatchResult::Pending => KeyOutcome::Consumed,
+            // The graph covers the page: a key it does not bind must not
+            // scroll the document behind it.
+            MatchResult::NoMatch if self.0.borrow().mode == Mode::Graph => KeyOutcome::Consumed,
             MatchResult::NoMatch => KeyOutcome::PassThrough,
         };
         self.refresh_status();
@@ -811,6 +908,17 @@ impl<T: Toolkit + 'static> Controller<T> {
     /// it (D4): the page never gets a `wheel` event to decide with, and a round
     /// trip per tick is not an option.
     pub fn on_wheel_zoom(&self, dy: f64, text: bool) {
+        // The graph covers the page, so every Ctrl+wheel zooms the graph, at the
+        // cursor (DESIGN D14).
+        {
+            let s = self.0.borrow();
+            if s.mode == Mode::Graph {
+                let step = 1.0 + s.zoom_step;
+                let factor = if dy < 0.0 { step } else { 1.0 / step };
+                s.view.graph_zoom(factor, Some(s.cursor_css()));
+                return;
+            }
+        }
         if text {
             let action = if dy < 0.0 {
                 Action::TextZoomIn
@@ -1022,7 +1130,7 @@ impl<T: Toolkit + 'static> Controller<T> {
     pub fn state(&self, callback: impl FnOnce(String) + 'static) {
         #[rustfmt::skip]
         let (view, file, trail, dark, wide, diagram_fit, diagram_hover, zoom, text_zoom, section,
-             toc_len, loaded, mode, vault_files) = {
+             toc_len, loaded, mode, vault_files, graph) = {
             let s = self.0.borrow();
             // Report `stdin` for a stream, not its CWD sentinel path: it is
             // honest, and it keeps the D-Bus forward-search (which matches on
@@ -1047,6 +1155,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.loaded,
                 s.mode_str().to_string(),
                 s.vault.index().file_count(),
+                s.graph_state(),
             )
         };
         view.scroll_state(move |vs| {
@@ -1065,6 +1174,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 loaded,
                 &mode,
                 vault_files,
+                &graph,
             ));
         });
     }
@@ -1200,6 +1310,18 @@ impl<T: Toolkit + 'static> Controller<T> {
                     s.view.scroll_to_anchor(&anchor);
                 }
             }
+            // In graph mode the zoom keys zoom what is on screen: the graph,
+            // about the viewport centre, never the page behind it (D14).
+            Action::ZoomIn | Action::ZoomOut if s.mode == Mode::Graph => {
+                let step = (1.0 + s.zoom_step).powi(count_i as i32);
+                let factor = if action == Action::ZoomIn {
+                    step
+                } else {
+                    1.0 / step
+                };
+                s.view.graph_zoom(factor, None);
+            }
+            Action::ZoomReset if s.mode == Mode::Graph => s.view.graph_reset(),
             // Keyboard / automation zoom is immediate (counts already batch) and
             // top-anchored — the reflow keeps the top of the viewport fixed.
             Action::ZoomIn => {
@@ -1368,6 +1490,34 @@ impl<T: Toolkit + 'static> Controller<T> {
                 drop(s);
                 self.toc_select();
             }
+            Action::ToggleGraph => {
+                drop(s);
+                self.toggle_graph();
+            }
+            Action::GraphNext => {
+                drop(s);
+                self.graph_step(Step::Down, count);
+            }
+            Action::GraphPrevious => {
+                drop(s);
+                self.graph_step(Step::Up, count);
+            }
+            Action::GraphParent => {
+                drop(s);
+                self.graph_fold(Scene::ascend, count);
+            }
+            Action::GraphChild => {
+                drop(s);
+                self.graph_fold(Scene::descend, count);
+            }
+            Action::GraphOpen => {
+                drop(s);
+                self.graph_open(None);
+            }
+            Action::GraphToggleView => {
+                s.graph_view = s.graph_view.toggled();
+                s.relayout_graph();
+            }
             Action::Abort => {
                 // Read the mode *before* resetting it: leaving the TOC page is
                 // decided by the mode the abort interrupted, not the one it is
@@ -1378,6 +1528,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 if in_toc {
                     s.leave_toc();
                 }
+                s.close_graph();
                 if matches!(s.input, Input::Hint { .. }) {
                     s.view.clear_hints();
                     s.input = Input::None;
@@ -1447,6 +1598,9 @@ impl<T: Toolkit + 'static> Controller<T> {
                     s.chrome.set_message("no headings");
                     return;
                 }
+                // One overlay at a time: `Mode::Graph` holds exactly while the
+                // graph is open, so the TOC closes it (or drops its walk).
+                s.close_graph();
                 let (toc, section, dark) = (s.toc.clone(), s.section, s.dark);
                 s.mode = Mode::Toc;
                 s.matcher.set_mode(Mode::Toc);
@@ -1462,6 +1616,11 @@ impl<T: Toolkit + 'static> Controller<T> {
     fn toc_select(&self) {
         let target = {
             let mut s = self.0.borrow_mut();
+            // Only from the TOC: `toc select` from anywhere else (`:exec`,
+            // D-Bus) must not drop the reader into Normal mode under a graph.
+            if s.mode != Mode::Toc {
+                return;
+            }
             match s.chrome.toc_selected() {
                 Some(sel) => {
                     s.leave_toc();
@@ -1475,6 +1634,203 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.section = heading_index;
                 s.view.scroll_to_anchor(&anchor);
             });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Document graph (`t`, DESIGN D14)
+    // -----------------------------------------------------------------------
+
+    /// Open the document graph, or close it. The walk reads files, so it runs
+    /// on the worker; [`Controller::on_graph_built`] draws what it finds.
+    fn toggle_graph(&self) {
+        let (trail, index, base, host, generation) = {
+            let mut s = self.0.borrow_mut();
+            if !matches!(s.graph, GraphState::Closed) {
+                s.close_graph();
+                return;
+            }
+            if s.is_stdin() {
+                s.chrome.set_message("no document graph for standard input");
+                return;
+            }
+            // Until the load finishes, an overlay would be drawn into the
+            // page being replaced.
+            if !s.loaded {
+                return;
+            }
+            let trail: Vec<PathBuf> = s
+                .jumplist
+                .trail(Some(&s.file))
+                .into_iter()
+                .flatten()
+                .map(Path::to_path_buf)
+                .collect();
+            s.graph_generation += 1;
+            s.graph = GraphState::Building(s.graph_generation);
+            s.chrome.set_message("reading links…");
+            (
+                trail,
+                s.vault.index().clone(),
+                s.vault_root.clone(),
+                s.host.clone(),
+                s.graph_generation,
+            )
+        };
+        // Weak: a walk outliving its window must not keep the session alive.
+        let weak = Rc::downgrade(&self.0);
+        host.spawn_blocking(
+            move || build_graph(&trail, &index, &base),
+            move |built| {
+                if let Some(inner) = weak.upgrade() {
+                    Self(inner).on_graph_built(generation, built.flatten());
+                }
+            },
+        );
+    }
+
+    /// The walk landed. Dropped unless this walk is still the one wanted (see
+    /// [`GraphState`]), and — since the graph takes over the keys — unless the
+    /// reader is still in Normal mode: a TOC or input bar opened meanwhile wins.
+    fn on_graph_built(&self, generation: u64, built: Option<(Graph, PathBuf)>) {
+        self.show_built_graph(generation, built);
+        self.refresh_status();
+    }
+
+    fn show_built_graph(&self, generation: u64, built: Option<(Graph, PathBuf)>) {
+        let s = &mut *self.0.borrow_mut();
+        if !matches!(s.graph, GraphState::Building(g) if g == generation) {
+            return;
+        }
+        if s.mode != Mode::Normal || s.chrome.prompt().is_some() {
+            s.graph = GraphState::Closed;
+            return;
+        }
+        let Some((graph, base)) = built else {
+            s.graph = GraphState::Closed;
+            s.chrome.set_message("cannot read the document graph");
+            return;
+        };
+        let open = OpenGraph::new(graph, base, s.graph_view);
+        s.view.show_graph(&open.svg(), open.selected);
+        s.mode = Mode::Graph;
+        s.matcher.set_mode(Mode::Graph);
+        s.graph = GraphState::Open(open);
+        s.show_graph_view();
+    }
+
+    /// Move the selection `count` steps up or down its column.
+    fn graph_step(&self, step: Step, count: u32) {
+        let s = &mut *self.0.borrow_mut();
+        let GraphState::Open(open) = &mut s.graph else {
+            return;
+        };
+        let scene = &open.scene;
+        open.selected = (0..count.max(1)).fold(open.selected, |at, _| scene.step(at, step));
+        s.view.graph_select(open.selected);
+    }
+
+    /// `h` / `l`, `count` times: each press moves the selection, or expands or
+    /// collapses the selected item in place (DESIGN D14).
+    fn graph_fold(&self, press: fn(&Scene, usize) -> Move, count: u32) {
+        let s = &mut *self.0.borrow_mut();
+        let GraphState::Open(open) = &mut s.graph else {
+            return;
+        };
+        let mut relaid = false;
+        for _ in 0..count.max(1) {
+            match press(&open.scene, open.selected) {
+                Move::Select(at) => open.selected = at,
+                Move::Expand => {
+                    open.fold(true);
+                    relaid = true;
+                }
+                Move::Collapse => {
+                    open.fold(false);
+                    relaid = true;
+                }
+            }
+        }
+        if relaid {
+            s.view.graph_update(&open.svg(), open.selected);
+        } else {
+            s.view.graph_select(open.selected);
+        }
+    }
+
+    /// The open graph's item whose key the page posted, if it is on screen.
+    fn graph_item(&self, key: &str) -> Option<usize> {
+        let key = key.parse::<ItemKey>().ok()?;
+        match &self.0.borrow().graph {
+            GraphState::Open(open) => open.scene.exact(&key),
+            GraphState::Closed | GraphState::Building(_) => None,
+        }
+    }
+
+    /// Select item `index` (a click in the overlay).
+    fn graph_select(&self, index: usize) {
+        let s = &mut *self.0.borrow_mut();
+        let GraphState::Open(open) = &mut s.graph else {
+            return;
+        };
+        if index < open.scene.items().len() {
+            open.selected = index;
+            s.view.graph_select(index);
+        }
+    }
+
+    /// Select item `index` and expand it if it is collapsed (a click on a
+    /// cluster or a `+n` badge).
+    fn graph_expand(&self, index: usize) {
+        let s = &mut *self.0.borrow_mut();
+        let GraphState::Open(open) = &mut s.graph else {
+            return;
+        };
+        if index >= open.scene.items().len() {
+            return;
+        }
+        open.selected = index;
+        if matches!(open.scene.item(index).fold, graph::Fold::Collapsed(_)) {
+            open.fold(true);
+            s.view.graph_update(&open.svg(), open.selected);
+        } else {
+            s.view.graph_select(index);
+        }
+    }
+
+    /// Open the note of item `index` (the selection when `None`) and close the
+    /// graph; on a cluster, expand it instead. Goes through
+    /// [`Controller::open_file`], so the jump lands on the jumplist and
+    /// `Backspace` returns. Opening the current document just closes the graph.
+    fn graph_open(&self, index: Option<usize>) {
+        /// What `Enter` lands on.
+        enum Target {
+            Current,
+            Note(PathBuf),
+            Cluster(usize),
+        }
+        let target = {
+            let s = self.0.borrow();
+            let GraphState::Open(open) = &s.graph else {
+                return;
+            };
+            let at = index.unwrap_or(open.selected);
+            if at >= open.scene.items().len() {
+                return;
+            }
+            match open.scene.item(at).kind {
+                ItemKind::Note(node) if node == open.graph.current() => Target::Current,
+                ItemKind::Note(node) => Target::Note(open.graph.node(node).path.clone()),
+                ItemKind::Cluster { .. } => Target::Cluster(at),
+            }
+        };
+        match target {
+            Target::Cluster(at) => self.graph_expand(at),
+            Target::Current => self.0.borrow_mut().close_graph(),
+            Target::Note(path) => {
+                self.0.borrow_mut().close_graph();
+                self.open_file(path, None);
+            }
         }
     }
 
@@ -1823,6 +2179,11 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.view.set_dark(dark);
                 s.chrome.set_dark(dark);
             }
+            Ok(SetEffect::Relayout) => {
+                let mut s = self.0.borrow_mut();
+                s.graph_view = s.options.graph_view;
+                s.relayout_graph();
+            }
             Ok(SetEffect::None) => {
                 let mut s = self.0.borrow_mut();
                 s.scroll_step = s.options.scroll_step_px as i64;
@@ -1966,8 +2327,59 @@ impl<T: Toolkit> Session<T> {
         }
         match self.mode {
             Mode::Toc => "toc",
+            Mode::Graph => "graph",
             Mode::Normal => "normal",
         }
+    }
+
+    /// The graph fields of the state snapshot.
+    fn graph_state(&self) -> GraphSnapshot {
+        match &self.graph {
+            GraphState::Open(open) => GraphSnapshot {
+                view: open.scene.view().name(),
+                selected: match open.scene.item(open.selected).kind {
+                    ItemKind::Note(n) => open.graph.node(n).path.to_string_lossy().into_owned(),
+                    ItemKind::Cluster { .. } => String::new(),
+                },
+                items: open.scene.items().len(),
+            },
+            GraphState::Closed | GraphState::Building(_) => GraphSnapshot {
+                view: "",
+                selected: String::new(),
+                items: 0,
+            },
+        }
+    }
+
+    /// Close the document graph, or drop a walk still in flight, and return to
+    /// Normal mode. A no-op when the graph is closed.
+    fn close_graph(&mut self) {
+        match std::mem::replace(&mut self.graph, GraphState::Closed) {
+            GraphState::Closed => return,
+            GraphState::Building(_) => {}
+            GraphState::Open(_) => self.view.hide_graph(),
+        }
+        if self.mode == Mode::Graph {
+            self.mode = Mode::Normal;
+            self.matcher.set_mode(Mode::Normal);
+        }
+        self.show_trail();
+    }
+
+    /// Redraw an open graph for [`graph_view`](Self::graph_view), the camera
+    /// kept on the selected item. A no-op when the graph is not open.
+    fn relayout_graph(&mut self) {
+        if let GraphState::Open(open) = &mut self.graph {
+            open.relayout(self.graph_view);
+            self.view.graph_update(&open.svg(), open.selected);
+            self.show_graph_view();
+        }
+    }
+
+    /// Name the open graph's view in the statusbar: `Graph: links`.
+    fn show_graph_view(&self) {
+        self.chrome
+            .set_message(&format!("Graph: {}", self.graph_view.name()));
     }
 
     /// Return to the content page and Normal mode.
@@ -2038,18 +2450,56 @@ impl<T: Toolkit> Session<T> {
     /// anchor — the error grows with distance from the origin (the
     /// cursor-near-bottom bug).
     fn cursor_anchor(&self) -> ZoomAnchor {
+        let (x, y) = self.cursor_css();
+        ZoomAnchor::Point { x, y }
+    }
+
+    /// The pointer in the viewport's CSS px (see [`cursor_anchor`](Self::cursor_anchor)).
+    fn cursor_css(&self) -> (f64, f64) {
         let (x, y) = self.pointer;
         let zoom = self.zoom.max(0.2);
-        ZoomAnchor::Point {
-            x: x / zoom,
-            y: y / zoom,
-        }
+        (x / zoom, y / zoom)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The worker half of the document graph: walk from the trail's root, with
+/// the base paths display against. Paths are canonicalised here so a note
+/// reached by two spellings (`./a.md`, `sub/../a.md`, a symlink) is one node.
+fn build_graph(trail: &[PathBuf], index: &VaultIndex, base: &Path) -> Option<(Graph, PathBuf)> {
+    let trail: Vec<PathBuf> = trail
+        .iter()
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .collect();
+    let graph = graph::build(&trail, graph::NODE_BUDGET, |path| read_note(path, index))?;
+    let base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    Some((graph, base))
+}
+
+/// One note for the graph walk: its head (at most [`graph::READ_CAP`] bytes)
+/// scanned, its links canonicalised, missing targets dropped. An unreadable
+/// note is a leaf, not an error.
+fn read_note(path: &Path, index: &VaultIndex) -> graph::Note {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    let read =
+        std::fs::File::open(path).and_then(|f| f.take(graph::READ_CAP).read_to_end(&mut bytes));
+    if read.is_err() {
+        return graph::Note::default();
+    }
+    let mut note = graph::scan(&String::from_utf8_lossy(&bytes), path, index);
+    let mut seen = std::collections::HashSet::new();
+    note.links = note
+        .links
+        .into_iter()
+        .filter_map(|link| std::fs::canonicalize(link).ok())
+        .filter(|link| link.is_file() && seen.insert(link.clone()))
+        .collect();
+    note
+}
 
 fn hint_prompt(kind: HintKind) -> &'static str {
     match kind {
@@ -2301,7 +2751,8 @@ fn expand_env_token(token: &str) -> String {
 /// one); `diagram_fit` is D5a.2's fit-to-width switch and `diagram_hover`
 /// whether the pointer is inside a diagram — the flag `Ctrl`+wheel routes on,
 /// and the only way an e2e can find a diagram without guessing at the host's
-/// device scale factor; the rest are unchanged.
+/// device scale factor; `graph_view`, `graph_selected` and `graph_items`
+/// describe an open document graph (DESIGN D14); the rest are unchanged.
 #[allow(clippy::too_many_arguments)]
 fn state_json(
     file: &str,
@@ -2318,6 +2769,7 @@ fn state_json(
     loaded: bool,
     mode: &str,
     vault_files: usize,
+    graph: &GraphSnapshot,
 ) -> String {
     format!(
         "{{\"file\":{file},\"trail\":{trail},\
@@ -2336,7 +2788,9 @@ fn state_json(
          \"diagram_hover\":{diagram_hover},\
          \"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded},\
-         \"vault_files\":{vault_files}}}",
+         \"vault_files\":{vault_files},\
+         \"graph_view\":{graph_view},\"graph_selected\":{graph_selected},\
+         \"graph_items\":{graph_items}}}",
         file = json_string(file),
         trail = json_string(trail),
         scroll_y = vs.scroll_y,
@@ -2358,7 +2812,19 @@ fn state_json(
         restoring = vs.restoring,
         fn_color = json_string(&vs.fn_color),
         mode = json_string(mode),
+        graph_view = json_string(graph.view),
+        graph_selected = json_string(&graph.selected),
+        graph_items = graph.items,
     )
+}
+
+/// The document graph as the state snapshot reports it: `view` is `""` and
+/// `items` 0 unless the graph is open; `selected` is the selected note's path,
+/// `""` for a cluster.
+struct GraphSnapshot {
+    view: &'static str,
+    selected: String,
+    items: usize,
 }
 
 /// Encode `s` as a JSON string literal (double-quoted, minimally escaped).

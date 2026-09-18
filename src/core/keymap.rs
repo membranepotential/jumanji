@@ -90,12 +90,21 @@ pub enum Binding {
 
 /// The bindings for every mode. Built from [`Keymap::default`] and then
 /// overlaid with user overrides from the config.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Keymap {
     bindings: HashMap<Mode, HashMap<KeySequence, Binding>>,
 }
 
 impl Keymap {
+    /// A keymap with no bindings at all, for tests that build one up from a
+    /// listing rather than overlay the defaults.
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self {
+            bindings: HashMap::new(),
+        }
+    }
+
     /// Install or replace a plain action binding for `mode`.
     pub fn bind(&mut self, mode: Mode, seq: KeySequence, action: Action) {
         self.bindings
@@ -260,6 +269,31 @@ impl Default for Keymap {
             ToggleToc,
         );
         km.bind(t, c('q'), Quit);
+
+        // The document graph (DESIGN D14). `g` would be the mnemonic, but it
+        // prefixes `gg`; `t` is free and the graph is drawn as a tree. Inside,
+        // `jk` walk a column, `hl` collapse/ascend and expand/descend (the TOC's
+        // semantics), `v` switches the view, and the zoom keys zoom the graph.
+        km.bind(n, c('t'), ToggleGraph);
+        let g = Mode::Graph;
+        km.bind(g, c('t'), ToggleGraph);
+        km.bind(g, c('j'), GraphNext);
+        km.bind(g, c('k'), GraphPrevious);
+        km.bind(g, c('h'), GraphParent);
+        km.bind(g, c('l'), GraphChild);
+        km.bind(g, c('v'), GraphToggleView);
+        // `:` stays reachable over the graph, so `:set graph-view` can change
+        // what is on screen.
+        km.bind(g, c(':'), CommandLine);
+        km.bind(
+            g,
+            KeySequence::single(KeyPress::new(Key::Enter, false, false)),
+            GraphOpen,
+        );
+        km.bind(g, c('+'), ZoomIn);
+        km.bind(g, c('-'), ZoomOut);
+        km.bind(g, c('='), ZoomReset);
+        km.bind(g, c('q'), Quit);
         km
     }
 }

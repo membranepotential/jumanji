@@ -62,6 +62,7 @@ webview sees a keypress, so the vim layer is absolute. See
 | `/` | search (`n` / `N` for next / previous match) |
 | `Tab` | table of contents (`j`/`k` move, `l`/`h` expand/collapse, `Enter` jump) |
 | `f` / `F` | follow link via hints / show link target |
+| `t` | document graph: the route you took as a line, and where its notes lead (see below) |
 | `m<x>` / `'<x>` | set / jump to quickmark `x` |
 | `Ctrl-o` / `Ctrl-i`, `Backspace` | jumplist back / forward — spans documents, so `Ctrl-o` / `Backspace` returns to the previous file after following a link |
 | `Ctrl-r` | recolor (dark mode) |
@@ -173,6 +174,59 @@ scan runs off the UI thread, so opening a document never waits on it.
 **Frontmatter is hidden** so a note opens as prose. `:frontmatter` shows it as a
 properties table (or set `show-frontmatter = true` to start that way).
 
+## Document graph
+
+`t` draws the notes around the one you are reading — the breadcrumb only shows
+the route you took; this shows where else you could go. The route from the
+first document of your session to the current one is a straight line in the
+accent colour, one column per step; everything else hangs above and below it,
+and nothing jumps around between openings. A step no link explains (`:open`, a
+jump from the graph) is dashed.
+
+Two views, `v` switches (option `graph-view`, default `links`); the statusbar
+names the one on screen (`Graph: links`):
+
+- **links** — what the current note leads to: its links fan out to the right,
+  one item per link (a link back to a note on the route is there too). The
+  other route notes' links fold into a `+n` cluster above and below the line.
+  A cluster, or a note with `+n` links of its own, expands in place; hovering
+  one (or the `+n` badge) lists the titles it holds.
+- **tree** — every note reachable from where you started, once each, under the
+  first note that reached it. Selecting a note outlines the notes it links to
+  and fades everything else off the route.
+
+Inside the graph:
+
+| Key | Action |
+|---|---|
+| `j` / `k` | next / previous item in the column |
+| `l` | expand the selected item, else select a child (the route first) |
+| `h` | collapse the selected item, else select its parent |
+| `Enter`, double-click | open the selected note (on a cluster: expand it) |
+| `v` | switch between the links and the tree view |
+| click | select an item; on a cluster or a `+n` badge, expand it |
+| `+` / `-` / `=` | zoom in / out / back to 1:1 on the current note |
+| wheel, `Shift`+wheel, drag | pan (up/down, sideways, freely) |
+| `Ctrl`+wheel | zoom at the cursor |
+| `:` | command line (`:set graph-view tree` redraws the open graph) |
+| `t`, `Esc` | close, back to normal mode |
+
+The graph opens with the whole route and the current note's links in view
+when they fit the window, else with the current note a third of the way
+across. The panel bottom left shows the selected note's title and path, and
+the route as a breadcrumb: click a segment to select that note. Zoomed out,
+the graph shows less but stays readable: file names go first, then sibling
+notes without links of their own merge into one `12 notes` bar, and the labels
+that remain keep a readable size — columns shrink less than rows, labels are
+shortened to fit a column, and where two would still collide, the one nearer
+the route wins (hover shows the other).
+
+Opening a note goes through the same jumplist as a clicked link, so
+`Backspace` / `Ctrl-o` returns. Markdown links and wikilinks resolve exactly as
+they do when reading; only `.md`/`.markdown` targets become items. All of it —
+the walk, the layout, the SVG — is Rust in `core::graph`; no bundled JS
+library.
+
 ## External fence renderers
 
 Extend diagram support to any tool without a plugin API: map a fence language to
@@ -212,12 +266,16 @@ page-width = 960        # px, content column width
 wide-blocks = "diagrams,fences,tables"  # kinds that may break out (see below)
 wide = true             # start with the breakout on (`s` toggles it)
 diagram-fit = false     # start with diagrams fit to width (`a` toggles it)
+graph-view = "links"    # document graph: "links" or "tree" (`v` toggles it)
 background = false      # detach from the terminal at startup (see below)
 editor-command = "$EDITOR +%l %f"  # reverse editor sync (Ctrl+click), %l line / %f file
 
 [keys.normal]
 "J" = "section next"
 "K" = "section previous"
+
+[keys.graph]             # remap the document graph's own mode (`t` opens it)
+"o" = "graph open"
 
 [renderers]              # optional: fence language → shell command (stdin → stdout)
 d2 = "d2 - -"            # ```d2 fences rendered with d2lang.com

@@ -228,7 +228,7 @@ pub fn render(md: &str, opts: &Options, vault: &Vault) -> RenderedDocument {
 /// comrak options: GFM (tables, strikethrough, autolink, tasklist), footnotes,
 /// and GitHub-style header ids, with inline HTML passed through (we render
 /// local, trusted files; the CSP is the downstream guard).
-fn comrak_options<'a>() -> ComrakOptions<'a> {
+pub(crate) fn comrak_options<'a>() -> ComrakOptions<'a> {
     let mut o = ComrakOptions::default();
     o.extension.strikethrough = true;
     o.extension.table = true;

@@ -6,6 +6,7 @@ pub mod command;
 pub mod config;
 pub mod editor;
 pub mod frontmatter;
+pub mod graph;
 pub mod history;
 pub mod jumplist;
 pub mod keymap;
@@ -125,6 +126,23 @@ pub enum Action {
     TocCollapse,
     /// TOC-mode: jump to the selected entry and leave TOC mode.
     TocSelect,
+    /// Open or close the document graph (DESIGN D14).
+    ToggleGraph,
+    /// Graph mode: select the item below in the same column.
+    GraphNext,
+    /// Graph mode: select the item above in the same column.
+    GraphPrevious,
+    /// Graph mode: collapse the selected item if it is expanded, else select
+    /// its parent.
+    GraphParent,
+    /// Graph mode: expand the selected item if it is collapsed, else select a
+    /// child — the one on the route, else the first.
+    GraphChild,
+    /// Graph mode: open the selected note and leave graph mode; expand a
+    /// selected cluster.
+    GraphOpen,
+    /// Graph mode: switch between the links and the tree view.
+    GraphToggleView,
     Abort,
     Quit,
 }
@@ -135,4 +153,6 @@ pub enum Mode {
     Normal,
     /// Table-of-contents overlay.
     Toc,
+    /// Document-graph overlay (DESIGN D14).
+    Graph,
 }

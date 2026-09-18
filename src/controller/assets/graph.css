@@ -1,0 +1,325 @@
+/* The document-graph overlay (DESIGN D14). Built from the document theme's
+   variables, so it follows recolor. Quiet pills; the one strong element is
+   the spine, in the accent colour.
+
+   Level of detail: the overlay carries `lod-near` / `lod-mid` / `lod-far`
+   and `--k` (the scale). Near shows pills with title and file name; mid the
+   title only; far hides bundled leaves behind their bundle bars and
+   counter-scales the labels that remain by 1/k, so they stay readable. The
+   levels cross-fade. */
+#__jmnj_graph {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  overflow: hidden;
+  cursor: grab;
+  color: var(--fg);
+  background-color: var(--bg);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.35;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#__jmnj_graph.dragging {
+  cursor: grabbing;
+}
+#__jmnj_graph .jg-stage {
+  position: absolute;
+  inset: 0;
+}
+#__jmnj_graph .jg-stage > svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  transform-origin: 0 0;
+  font-family: inherit;
+}
+#__jmnj_graph .jg-stage.glide > svg {
+  transition: transform 200ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  #__jmnj_graph .jg-stage.glide > svg {
+    transition: none;
+  }
+}
+
+#__jmnj_graph .jg-edge {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.25;
+}
+#__jmnj_graph .jg-route-edge {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+#__jmnj_graph .jg-jump {
+  stroke-dasharray: 2 7;
+}
+#__jmnj_graph .jg-edge.hover {
+  stroke: var(--accent);
+  stroke-width: 1.75;
+}
+#__jmnj_graph .jg-route-edge.hover {
+  stroke-width: 3.5;
+}
+
+/* Text and dots undo the scene's extra horizontal scale (`--sx` = k / kx,
+   graph.js), so glyphs never stretch when columns shrink less than rows. */
+#__jmnj_graph .jg-stage text,
+#__jmnj_graph .jg-node .dot {
+  transform-box: fill-box;
+  transform-origin: left center;
+  transform: scaleX(var(--sx, 1));
+}
+#__jmnj_graph .jg-node.cluster .t,
+#__jmnj_graph .jg-node .dot {
+  transform-origin: center;
+}
+
+/* Tree view: the selection's link targets are outlined (`linked`) and
+   everything else off the route fades back (`dim`), Obsidian-hover style. */
+#__jmnj_graph .jg-node.dim,
+#__jmnj_graph .jg-edge.dim {
+  opacity: 0.35;
+}
+
+/* The hover preview of a collapsed cluster or `+n` badge. */
+#__jmnj_graph .jg-peek {
+  position: absolute;
+  max-width: 34ch;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.45;
+  pointer-events: none;
+  /* Over the panel and the help line, which come later in the overlay. */
+  z-index: 1;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+#__jmnj_graph .jg-peek.shown {
+  opacity: 1;
+}
+#__jmnj_graph .jg-peek > div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#__jmnj_graph .jg-peek > .more {
+  color: var(--fg-muted);
+}
+
+#__jmnj_graph .jg-node {
+  cursor: pointer;
+}
+#__jmnj_graph .jg-node rect {
+  fill: color-mix(in srgb, var(--fg) 6%, var(--bg));
+  stroke: transparent;
+  stroke-width: 1.5;
+}
+#__jmnj_graph .jg-node.hover rect {
+  fill: color-mix(in srgb, var(--fg) 11%, var(--bg));
+  stroke: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+#__jmnj_graph .jg-node .dot {
+  fill: var(--border-strong);
+}
+#__jmnj_graph .jg-node.route .dot {
+  fill: var(--accent);
+}
+#__jmnj_graph .jg-node .t {
+  fill: var(--fg);
+  font-size: 14px;
+}
+#__jmnj_graph .jg-node .f {
+  fill: var(--fg-muted);
+  font-size: 11.5px;
+}
+#__jmnj_graph .jg-node.current rect {
+  fill: color-mix(in srgb, var(--accent) 22%, var(--bg));
+}
+#__jmnj_graph .jg-node.current .t {
+  fill: var(--heading);
+  font-weight: 600;
+}
+#__jmnj_graph .jg-node.linked rect {
+  stroke: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+#__jmnj_graph .jg-node.sel rect {
+  stroke: var(--fg);
+}
+#__jmnj_graph .jg-more,
+#__jmnj_graph .jg-badge {
+  fill: var(--fg-muted);
+  font-size: 12px;
+}
+#__jmnj_graph .jg-badge {
+  fill: var(--accent);
+  font-weight: 600;
+}
+#__jmnj_graph .jg-node.cluster rect {
+  fill: transparent;
+  stroke: var(--border-strong);
+  stroke-dasharray: 3 4;
+}
+#__jmnj_graph .jg-node.cluster .t {
+  fill: var(--fg-muted);
+  font-weight: 600;
+}
+#__jmnj_graph .jg-node.cluster.sel rect {
+  stroke: var(--fg);
+}
+
+#__jmnj_graph .jg-bundle rect {
+  fill: var(--border-strong);
+}
+#__jmnj_graph .jg-bundle-edge {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 1.25;
+}
+#__jmnj_graph .jg-bundle .t {
+  fill: var(--fg-muted);
+  font-size: 14px;
+  dominant-baseline: central;
+}
+
+/* Levels of detail, cross-faded. */
+#__jmnj_graph .jg-node,
+#__jmnj_graph .jg-node .t,
+#__jmnj_graph .jg-node .f,
+#__jmnj_graph .jg-node rect,
+#__jmnj_graph .jg-badge,
+#__jmnj_graph .jg-edge,
+#__jmnj_graph .jg-bundle {
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+#__jmnj_graph .jg-bundle {
+  opacity: 0;
+  pointer-events: none;
+}
+#__jmnj_graph.lod-mid .jg-node .f,
+#__jmnj_graph.lod-far .jg-node .f,
+#__jmnj_graph.lod-far .jg-badge,
+#__jmnj_graph.lod-far .jg-more {
+  opacity: 0;
+}
+#__jmnj_graph.lod-mid .jg-node:not(.cluster) .t {
+  transform: translateY(8px) scaleX(var(--sx, 1));
+}
+#__jmnj_graph.lod-far .jg-node.bundled:not(.sel),
+#__jmnj_graph.lod-far .jg-edge.bundled {
+  opacity: 0;
+  pointer-events: none;
+}
+#__jmnj_graph.lod-far .jg-bundle {
+  opacity: 1;
+}
+#__jmnj_graph.lod-far .jg-bundle.dim {
+  opacity: 0.35;
+}
+#__jmnj_graph.lod-far .jg-node:not(.cluster):not(.sel) rect {
+  opacity: 0;
+}
+#__jmnj_graph.lod-far .jg-node .t,
+#__jmnj_graph.lod-far .jg-bundle .t {
+  /* graph.js FAR_FONT: the on-screen size, whatever the scale. */
+  font-size: calc(15px / var(--k));
+  dominant-baseline: central;
+}
+/* Far labels that would overlap a higher-ranked one (graph.js `declutter`). */
+#__jmnj_graph .t.culled {
+  opacity: 0;
+}
+#__jmnj_graph .jg-node.hover .t.culled,
+#__jmnj_graph .jg-node.sel .t.culled {
+  opacity: 1;
+}
+#__jmnj_graph.lod-far .jg-node:not(.cluster) .t {
+  transform: translateY(3px) scaleX(var(--sx, 1));
+}
+#__jmnj_graph.lod-far .jg-node.cluster .t {
+  transform: translateY(-5px) scaleX(var(--sx, 1));
+}
+@media (prefers-reduced-motion: reduce) {
+  #__jmnj_graph .jg-node,
+  #__jmnj_graph .jg-node .t,
+  #__jmnj_graph .jg-node .f,
+  #__jmnj_graph .jg-node rect,
+  #__jmnj_graph .jg-badge,
+  #__jmnj_graph .jg-edge,
+  #__jmnj_graph .jg-bundle {
+    transition: none;
+  }
+}
+
+#__jmnj_graph .jg-info {
+  position: absolute;
+  left: 20px;
+  bottom: 18px;
+  /* Leaves the bottom-right key line clear. */
+  max-width: min(56ch, calc(100vw - 40px), 45vw);
+  padding: 10px 16px 11px 14px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  background: var(--bg);
+  cursor: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+#__jmnj_graph .jg-info-title {
+  color: var(--heading);
+  font-size: 16px;
+  font-weight: 600;
+}
+#__jmnj_graph .jg-info-path {
+  margin-top: 2px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+#__jmnj_graph .jg-info-route {
+  margin-top: 6px;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+#__jmnj_graph .jg-crumb {
+  cursor: pointer;
+}
+#__jmnj_graph .jg-crumb:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+#__jmnj_graph .jg-crumb.sel {
+  color: var(--accent);
+}
+#__jmnj_graph .jg-keys {
+  position: absolute;
+  right: 20px;
+  bottom: 18px;
+  padding: 4px 8px;
+  background: var(--bg);
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+#__jmnj_graph .jg-keys kbd {
+  color: var(--fg);
+  font: inherit;
+}
+@media (max-width: 760px) {
+  #__jmnj_graph .jg-keys {
+    display: none;
+  }
+  #__jmnj_graph .jg-info {
+    max-width: calc(100vw - 40px);
+  }
+}

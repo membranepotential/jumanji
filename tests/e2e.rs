@@ -176,6 +176,10 @@ struct State {
     /// Files in the vault index (DESIGN D11). Built off-thread, so this is also
     /// how a test waits for a background rescan to land rather than sleeping.
     vault_files: usize,
+    /// The open document graph's view (`""` when closed) and selected note's
+    /// path (`""` for a cluster), DESIGN D14.
+    graph_view: String,
+    graph_selected: String,
 }
 
 impl State {
@@ -214,6 +218,8 @@ impl State {
             toc_len: field(json, "toc_len")?.parse().ok()?,
             loaded: field(json, "loaded")? == "true",
             vault_files: field(json, "vault_files")?.parse().ok()?,
+            graph_view: field_str(json, "graph_view")?,
+            graph_selected: field_str(json, "graph_selected")?,
         })
     }
 }
@@ -3178,6 +3184,49 @@ fn unresolved_wikilink_is_not_hintable() {
     h.key(&["a"]);
     h.wait_for_state("the first hint is the resolvable link", SETTLE, |s| {
         s.mode == "normal" && s.file.ends_with("Target.md")
+    });
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+// ---------------------------------------------------------------------------
+// Document graph (DESIGN D14)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn graph_child_and_open_navigate_to_the_linked_document() {
+    // `t` opens the document graph rooted at the jumplist trail's first entry
+    // (here, the document the reader launched on). The walk runs on the worker,
+    // so `toggle graph` lands asynchronously — poll `GetState` for `mode ==
+    // "graph"` rather than assuming it is immediate. It opens in the links
+    // view on the current note; `graph child` moves the selection onto the
+    // first item of its fan — the one linked note — and `graph open` opens it,
+    // closing the graph and landing back in normal mode (DESIGN D14).
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("graph");
+    std::fs::write(vault.join("Root.md"), "# Root\n\nSee [Child](Child.md).\n")
+        .expect("write Root.md");
+    std::fs::write(vault.join("Child.md"), "# Child\n\nArrived.\n").expect("write Child.md");
+
+    let h = Harness::launch_file_in_dir(vault.join("Root.md"), Some(vault.clone()));
+    assert!(h.get_state().file.ends_with("Root.md"), "starts on Root.md");
+
+    h.key(&["t"]);
+    h.wait_for_state("the graph opens", SETTLE, |s| s.mode == "graph");
+    let s = h.get_state();
+    assert_eq!(s.graph_view, "links");
+    assert!(
+        s.graph_selected.ends_with("Root.md"),
+        "{}",
+        s.graph_selected
+    );
+
+    h.execute_action("graph child", 1);
+    assert!(h.get_state().graph_selected.ends_with("Child.md"));
+    h.execute_action("graph open", 1);
+    h.wait_for_state("opening the child closes the graph", SETTLE, |s| {
+        s.mode == "normal" && s.file.ends_with("Child.md")
     });
 
     drop(h);

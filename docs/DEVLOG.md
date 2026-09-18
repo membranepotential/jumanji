@@ -15,6 +15,125 @@ no-flash reveal re-base it. New e2e
 the table above the reader re-wraps and the probe lands in it). 384 unit +
 56 e2e green. DESIGN D5a.0 gained a paragraph.
 
+## 2026-09-18 (later) — the graph, laid out around the reader (DESIGN D14)
+
+The first cut of `t` was a plain left-to-right tidy tree. The owner's first
+look, on the scribetech-assistant `docs/` tree (a README linking 52 notes),
+found three things wrong: the route zig-zagged through the tree instead of
+reading as a line; a note's links were "all over the place" — dashed curves to
+wherever the walk happened to put their targets; and zoomed out, nothing was
+readable. The walk was right; the picture was not. So the scene is rewritten
+and the walk kept as it was.
+
+**What changed.** `core::graph` is a module directory now: `mod.rs` the walk
+(unchanged semantics and tests), `scene.rs` the layout and navigation,
+`svg.rs` the rendering.
+
+- *The spine.* The route root → current is one straight row, one column per
+  step; everything else is packed above and below it. A route note's other
+  links split by source order around the route child — before it above, after
+  it below.
+- *Two views, `v`* (option `graph-view`). `links` fans the current note's
+  links out to its right, one item per link, duplicates allowed, and folds the
+  other route notes' links into a `+n` cluster per side; `l` / `Enter` / a
+  click expands a cluster or a note's `+n` in place, `h` collapses — the TOC's
+  semantics. `tree` is the whole spanning tree, every note once, with
+  cross-links for the selected note only.
+- *Selection is an item, not a note* — a note can be on screen twice. An
+  `ItemKey` (node indices from the root along the displayed tree) survives
+  every re-layout, and the overlay moves the camera so the selected item keeps
+  its place on screen.
+- *Level of detail.* Scale ≥ 0.7 shows pills with title and file name, 0.4–0.7
+  the title only, below that sibling leaves merge into `12 notes` bundles and
+  the remaining labels are counter-scaled by `1/k`; the levels cross-fade.
+- *The overlay.* Plain background (the dot grid is gone), the wheel zooms at
+  the cursor, drag pans, hover lights an item's edges. The panel shows the
+  selected title, its path and the route as a clickable breadcrumb — the "You
+  are here / Links to n" line is gone, since the tint and the fan say both.
+- `GetState` reports `graph_view`, `graph_selected`, `graph_items`.
+
+**The research it rests on.** TheBrain and ExcaliBrain put the current note at
+the centre of the layout and its neighbours around it, which is what "where
+does this lead" wants; SpaceTree (Plaisant et al.) collapses branches into
+counted items and expands them in place, so exploring never re-lays out the
+rest; Obsidian fades labels out below a zoom threshold instead of shrinking
+them to noise, which is where the far level's bundles and counter-scaled
+labels come from. Force layouts stayed rejected (D14).
+
+**Why no crate.** `dugong`, the dagre port merman already pulls in, is free
+but lays out DAGs by crossing minimisation: it cannot pin a spine to one row
+and reorders on every change. `tidy-tree` is one stale release that would need
+the spine patched in anyway. The packing — tidy forests against a per-column
+skyline, deepest route note first — is ~150 lines and unit-tested for its
+invariants: the spine is straight, no two items share a row in a column,
+selection keys survive expansion and view changes.
+
+**Fix pass after review.** Page posts name items by key, not index, so a
+click that lands after a re-layout is dropped instead of hitting whatever took
+its index; the TOC closes an open graph (`Mode::Graph` holds exactly while the
+graph is open); far-level labels are cut to one column pitch and culled by
+priority when they would still collide (current, route, selection, clusters,
+branching notes, leaves); bundles take only notes with no links of their own;
+a note `v` folds away selects the cluster holding it; the graph opens framing
+the whole route and the current note's links when they fit.
+
+**Owner's hands-on pass.** The statusbar names the view (`Graph: links` /
+`Graph: tree`), since `v` alone gave no sign which was on. The plain wheel pans
+again and only `Ctrl`+wheel zooms (at the cursor) — wheel-zoom fought the
+reflex to scroll. Hovering a cluster or a `+n` badge lists the titles inside
+(core emits `data-members`, capped at 15). Far out, columns shrink less than
+rows (horizontal scale floored at 0.55, text counter-scaled so glyphs never
+stretch) and labels are 15 px, so a far label keeps noticeably more of its
+title. The tree view's dashed cross-link curves are gone ("still all over the
+place"): selecting a note outlines its link targets and dims everything else
+off the route instead, Obsidian-hover style.
+
+**Also.** `:` is bound in graph mode so `:set graph-view` can reach an open
+graph; `resources/config.example.toml` now has a unit test that its key
+listing equals `Keymap::default()`.
+
+## 2026-09-18 — the document graph (`t`, DESIGN D14)
+
+A documentation tree (a `docs/` folder, a vault, an eval-case collection) is a
+graph of notes linking to each other. The breadcrumb (D10) only ever shows the
+one route you took to the note you are reading; nothing showed where else you
+could go. `t` opens a **document graph**: the notes reachable by links from
+where the reading session started, laid out left to right as a tree, with the
+route drawn through it.
+
+**Why a tree, not the graph.** Real link graphs are cyclic — a `README` and an
+`ARCHITECTURE.md` that link back and forth — and a force layout over every
+edge is exactly the "nodes jump around on every render" picture nobody wants.
+So the walk is breadth-first from the jumplist's root, each note placed once
+under the first note that reached it; cross-links are drawn only for the
+selected note (dashed, with its targets outlined), and the layout has no
+randomness, so the same files always draw the same picture. The route
+you actually took pins nodes only where a link explains the step — a jump the
+graph cannot explain (`:open`, a jump *from* the graph) draws as a dashed edge
+instead of rearranging the tree.
+
+**Where it lives.** `core::graph` is pure: `scan` reads one note's title and
+links, `build` runs the walk over an injected file reader (unit-tested against
+a map, no disk), and `Graph::svg` writes a tidy-tree layout as inline SVG — no
+D3, no bundled JS, ~150 lines total against D3.js's ~90 KB. The walk runs on
+the `Host` worker thread, like the vault scan (D11): reading and parsing every
+note in a tree is not something the main loop can afford to block on.
+`controller::session` owns the tree and the selected node and draws the SVG
+over the page through `Viewport::eval`, exactly like the hint overlay — no new
+`Toolkit` trait method, so a second shell gets this for free (D2a). Opening a
+selected note goes through the existing `open_file`, so it lands on the
+jumplist and `Backspace` returns from it like any other link.
+
+**Seen on a real tree.** Checked headless against the scribetech-assistant
+`docs/` tree (a README linking 52 notes). The first cut drew S-curves, and that
+fan-out was a thick bundle of 52 curves; tree edges are now elbows sharing one
+trunk per parent. A note whose links were all placed earlier looked like a
+leaf while its panel said "Links to 6 notes"; hence the cross-links on selection.
+
+**What's next.** Folder-containment edges, not built: some trees (anzw-data)
+have READMEs that name their children as backtick paths, not links, so the
+link graph there is a single node.
+
 ## 2026-09-13 (later) — "no re-render" is not "nothing moves"
 
 v1.9.0 shipped `s` and `a` with a defect the design notes had confidently ruled

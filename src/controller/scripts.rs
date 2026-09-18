@@ -57,6 +57,16 @@ pub mod message {
     /// fire, and asking the page per tick would put an IPC round trip inside the
     /// gesture. See `Controller::on_wheel_zoom`.
     pub const DIAGRAM_HOVER: &str = "diagramhover";
+    /// A click on a document-graph item (DESIGN D14), or on a spine note in
+    /// the panel's breadcrumb — the payload is the item's key (`0.4.b`, see
+    /// `core::graph::ItemKey`). A key, not an index: indices change with every
+    /// re-layout, and a click can land after one it never saw.
+    pub const GRAPH_SELECT: &str = "graphselect";
+    /// A double-click on a document-graph item — the payload is its key.
+    pub const GRAPH_OPEN: &str = "graphopen";
+    /// A click on a cluster or a `+n` badge: select the item and expand it —
+    /// the payload is its key.
+    pub const GRAPH_EXPAND: &str = "graphexpand";
 }
 
 /// Build a `window.__jmnj_post('<name>', <payload_expr>);` statement. Keeps
@@ -632,6 +642,42 @@ pub fn document_start() -> Vec<String> {
         resize_anchor_js(),
         scroll_restore_js(),
     ]
+}
+
+/// The document-graph overlay (DESIGN D14): a function expression taking
+/// `(svgMarkup, css, selected, post)`. Kept as a real `.js` file so it reads as
+/// JavaScript; [`graph_show_js`] calls it.
+const GRAPH_JS: &str = include_str!("assets/graph.js");
+
+/// The overlay's stylesheet, injected with it rather than shipped in every
+/// document's CSS: a document that never opens the graph pays nothing.
+const GRAPH_CSS: &str = include_str!("assets/graph.css");
+
+/// Draw the document graph over the page: `svg` from `core::graph`, with item
+/// `selected` selected and centred.
+pub fn graph_show_js(svg: &str, selected: usize) -> String {
+    let post = format!(
+        "{{select: key => {{ {} }}, open: key => {{ {} }}, expand: key => {{ {} }}}}",
+        post_call(message::GRAPH_SELECT, "key"),
+        post_call(message::GRAPH_OPEN, "key"),
+        post_call(message::GRAPH_EXPAND, "key"),
+    );
+    format!(
+        "({GRAPH_JS})({svg}, {css}, {selected}, {post});",
+        svg = js_string(svg),
+        css = js_string(GRAPH_CSS),
+    )
+}
+
+/// Swap the open graph's scene for `svg` (a re-layout), item `selected`
+/// selected and kept where it was on screen.
+pub fn graph_update_js(svg: &str, selected: usize) -> String {
+    graph_call_js(&format!("update({}, {selected})", js_string(svg)))
+}
+
+/// Call one method of the open graph overlay; a no-op when it is gone.
+pub fn graph_call_js(call: &str) -> String {
+    format!("if (window.__jmnj_graph) window.__jmnj_graph.{call};")
 }
 
 /// The overlay-building script for `Page::request_hints`. Finds visible

@@ -15,7 +15,8 @@ use serde::Deserialize;
 use crate::controller::scripts::{
     APPLY_GLOBAL, FIRST_FRAME_GLOBAL, OPEN_ATTRIBUTE, RESTORE_ANCHOR_JS, RESTORING_CLASS,
     REVEAL_GLOBAL, capture_anchor_js, diagram_fit_class_js, diagram_zoom_js, diagram_zoom_reset_js,
-    hints_build_js, js_string, nearest_source_element_js, wide_class_js,
+    graph_call_js, graph_show_js, graph_update_js, hints_build_js, js_string,
+    nearest_source_element_js, wide_class_js,
 };
 use crate::controller::toolkit::Viewport;
 use crate::core::RenderedDocument;
@@ -409,6 +410,43 @@ pub trait Page: Viewport + Clone + 'static {
                  el.style.display = el.getAttribute('data-label').indexOf(t)===0 ? '' : 'none'; }} }})();",
             typed = js_string(typed)
         ));
+    }
+
+    /// Draw the document graph (DESIGN D14) over the page, item `selected`
+    /// selected and centred.
+    fn show_graph(&self, svg: &str, selected: usize) {
+        self.eval(&graph_show_js(svg, selected));
+    }
+
+    /// Replace the open graph's scene after a re-layout, keeping the camera
+    /// so item `selected` stays where it is on screen.
+    fn graph_update(&self, svg: &str, selected: usize) {
+        self.eval(&graph_update_js(svg, selected));
+    }
+
+    /// Move the graph's selection to item `index`, panning it into view.
+    fn graph_select(&self, index: usize) {
+        self.eval(&graph_call_js(&format!("select({index})")));
+    }
+
+    /// Scale the graph by `factor` about a viewport point in CSS px, or about
+    /// the viewport's centre when `at` is `None`.
+    fn graph_zoom(&self, factor: f64, at: Option<(f64, f64)>) {
+        let (x, y) = match at {
+            Some((x, y)) => (x.to_string(), y.to_string()),
+            None => ("innerWidth / 2".into(), "innerHeight / 2".into()),
+        };
+        self.eval(&graph_call_js(&format!("zoom({factor}, {x}, {y})")));
+    }
+
+    /// Back to 1:1, on the current note.
+    fn graph_reset(&self) {
+        self.eval(&graph_call_js("reset()"));
+    }
+
+    /// Remove the graph overlay.
+    fn hide_graph(&self) {
+        self.eval(&graph_call_js("close()"));
     }
 
     /// Remove the hint overlay.

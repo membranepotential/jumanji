@@ -47,6 +47,13 @@
 # Base body font size in pixels. Also the 100% reference point for text zoom.
 # font-size = 18
 
+# What the document graph (`t`) shows around the route you took: "links" —
+# the current note's links fanned out, the other route notes' links folded
+# into clusters you expand with `l` — or "tree", the whole spanning tree of
+# notes reachable from where you started. `v` switches while the graph is
+# open; `:set graph-view` changes an open graph too.
+# graph-view = "links"
+
 # Which system selection a copied text selection is written to, zathura-style:
 # "primary" (X11 PRIMARY, middle-click paste) or "clipboard" (Ctrl-V paste).
 # selection-clipboard = "primary"
@@ -82,8 +89,8 @@
 # graphviz = "dot -Tsvg"          #   alias for the same
 # typst = "typst compile - -"     # Typst → SVG         (```typst fences)
 
-# Key tables, one per mode: [keys.normal] and [keys.toc] (the table of
-# contents, opened with Tab).
+# Key tables, one per mode: [keys.normal], [keys.toc] (the table of contents,
+# opened with Tab) and [keys.graph] (the document graph, opened with `t`).
 # Zathura key notation: bare chars are literal (`gg`, `J`); angle brackets
 # denote specials and modifiers (<C-r>, <Tab>, <CR>, <BS>, <Esc>, <Space>,
 # <S-Tab>). A count prefix (`5j`) works with every binding.
@@ -123,6 +130,7 @@
 # "<C-i>" = "jump forward"
 # "<BS>" = "jump backward"
 # "<Esc>" = "abort"
+# "t" = "toggle graph"
 # "q" = "quit"
 #
 # Actions with no default key (bind one here if you want it): toggle
@@ -135,4 +143,18 @@
 # "h" = "toc collapse"
 # "<CR>" = "toc select"
 # "<Tab>" = "toggle toc"
+# "q" = "quit"
+
+# [keys.graph]
+# "j" = "graph next"
+# "k" = "graph previous"
+# "h" = "graph parent"               # collapse the item, else up to its parent
+# "l" = "graph child"                # expand the item, else down to a child
+# "<CR>" = "graph open"              # on a cluster: expand it
+# "v" = "graph view"
+# ":" = "command line"
+# "+" = "zoom in"
+# "-" = "zoom out"
+# "=" = "zoom reset"
+# "t" = "toggle graph"
 # "q" = "quit"

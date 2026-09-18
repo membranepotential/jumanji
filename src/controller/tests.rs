@@ -500,6 +500,322 @@ fn tab_reports_a_document_with_no_headings() {
 }
 
 // ---------------------------------------------------------------------------
+// Document graph (DESIGN D14)
+// ---------------------------------------------------------------------------
+
+/// The id of the graph overlay; every graph script addresses it (or the
+/// `window.__jmnj_graph` handle of the same name).
+const GRAPH_OVERLAY_ID: &str = "__jmnj_graph";
+
+/// A reader over `DOC` (which links `other.md`) with the graph open: `t`, then
+/// the walk landed.
+fn with_graph() -> Reader {
+    let r = Reader::loaded_with_sibling(DOC);
+    r.press('t');
+    r.land_work();
+    r
+}
+
+fn mode(r: &Reader) -> String {
+    let v: serde_json::Value = serde_json::from_str(&r.state()).expect("state is JSON");
+    v["mode"].as_str().unwrap_or_default().to_string()
+}
+
+#[test]
+fn t_draws_the_link_tree_once_the_walk_lands() {
+    let r = Reader::loaded_with_sibling(DOC);
+    r.press('t');
+    assert_eq!(r.chrome.message(), "reading links…");
+    assert!(
+        !r.view.evaled(GRAPH_OVERLAY_ID),
+        "nothing is drawn before the walk lands"
+    );
+
+    r.land_work();
+    assert!(r.view.evaled(GRAPH_OVERLAY_ID));
+    // The linked sibling is a node, titled by its H1, path relative to the vault.
+    assert!(r.view.evaled(r#"data-title="Other" data-path="other.md""#));
+    assert_eq!(mode(&r), "graph");
+}
+
+#[test]
+fn l_selects_the_child_and_enter_opens_it() {
+    let r = with_graph();
+    r.press('l');
+    assert!(r.view.evaled("select(1)"));
+    r.view.clear();
+
+    r.press_key(Key::Enter);
+    let loads = r.view.loads();
+    assert_eq!(loads.len(), 1);
+    assert_eq!(
+        std::fs::canonicalize(&loads[0].1).unwrap(),
+        std::fs::canonicalize(r.sibling()).unwrap()
+    );
+    assert_eq!(mode(&r), "normal");
+    assert_eq!(
+        r.chrome.trail(),
+        ["doc.md", "other.md"],
+        "the jump is on the jumplist"
+    );
+}
+
+#[test]
+fn a_double_click_opens_the_node_it_names() {
+    let r = with_graph();
+    r.view.clear();
+    // Posts name items by key: doc.md (node 0) → other.md (node 1).
+    r.message(message::GRAPH_OPEN, "0.1");
+    assert_eq!(r.view.loads().len(), 1);
+}
+
+#[test]
+fn a_click_on_a_node_out_of_range_is_ignored() {
+    let r = with_graph();
+    r.view.clear();
+    r.message(message::GRAPH_SELECT, "0.7");
+    r.message(message::GRAPH_OPEN, "0.7");
+    r.message(message::GRAPH_OPEN, "not a key");
+    assert!(r.view.calls().is_empty());
+}
+
+#[test]
+fn escape_before_the_walk_lands_drops_it() {
+    let r = Reader::loaded_with_sibling(DOC);
+    r.press('t');
+    r.press_key(Key::Escape);
+    r.land_work();
+    assert!(!r.view.evaled(GRAPH_OVERLAY_ID));
+    assert_eq!(mode(&r), "normal");
+}
+
+#[test]
+fn only_the_newest_walk_is_drawn() {
+    // A walk started on doc.md is still out when the reader follows the link
+    // and asks again on other.md; the first must not land as the second.
+    let r = Reader::loaded_with_sibling(DOC);
+    r.press('t');
+    r.navigate(&file_uri(&r.sibling()));
+    r.finish_load();
+    r.press('t');
+    r.land_work();
+    assert!(
+        r.view
+            .evaled(r#"class="jg-node route current spine" data-i="1""#),
+        "other.md is where the reader is"
+    );
+    assert!(!r.view.evaled(r#"class="jg-node root route current spine""#));
+}
+
+#[test]
+fn a_toc_opened_while_the_walk_runs_wins() {
+    let r = Reader::loaded_with_sibling(DOC);
+    r.press('t');
+    r.press_key(Key::Tab);
+    r.land_work();
+    assert!(!r.view.evaled(GRAPH_OVERLAY_ID));
+    assert_eq!(mode(&r), "toc");
+}
+
+#[test]
+fn t_before_the_first_load_finishes_does_nothing() {
+    let r = Reader::open(DOC);
+    r.press('t');
+    r.land_work();
+    assert!(!r.view.evaled(GRAPH_OVERLAY_ID));
+}
+
+#[test]
+fn t_closes_the_graph_again() {
+    let r = with_graph();
+    r.view.clear();
+    r.press('t');
+    assert!(r.view.evaled("close()"));
+    assert_eq!(mode(&r), "normal");
+}
+
+#[test]
+fn an_unbound_key_does_not_reach_the_page_behind_the_graph() {
+    let r = with_graph();
+    assert_eq!(r.press('z'), KeyOutcome::Consumed);
+}
+
+/// The graph fields of the state snapshot: view, selected note, item count.
+fn graph_state(r: &Reader) -> (String, String, u64) {
+    let v: serde_json::Value = serde_json::from_str(&r.state()).expect("state is JSON");
+    (
+        v["graph_view"].as_str().unwrap_or_default().to_string(),
+        v["graph_selected"].as_str().unwrap_or_default().to_string(),
+        v["graph_items"].as_u64().unwrap_or_default(),
+    )
+}
+
+#[test]
+fn the_state_reports_the_open_graph() {
+    let r = Reader::loaded_with_sibling(DOC);
+    assert_eq!(graph_state(&r), (String::new(), String::new(), 0));
+    r.press('t');
+    r.land_work();
+    let (view, selected, items) = graph_state(&r);
+    assert_eq!(view, "links");
+    assert_eq!(r.chrome.message(), "Graph: links");
+    assert!(selected.ends_with("doc.md"), "the current note: {selected}");
+    assert_eq!(items, 2, "doc.md and its one link");
+    r.press('t');
+    assert_eq!(graph_state(&r).2, 0);
+}
+
+#[test]
+fn v_switches_the_view_and_keeps_the_selection() {
+    let r = with_graph();
+    r.press('l');
+    r.view.clear();
+    r.press('v');
+    assert!(r.view.evaled("update("), "a re-layout keeps the camera");
+    let (view, selected, _) = graph_state(&r);
+    assert_eq!(view, "tree");
+    assert!(selected.ends_with("other.md"), "{selected}");
+    assert_eq!(r.chrome.message(), "Graph: tree", "the view is named");
+    r.press('v');
+    assert_eq!(r.chrome.message(), "Graph: links");
+    assert_eq!(graph_state(&r).0, "links");
+    assert!(graph_state(&r).1.ends_with("other.md"));
+}
+
+#[test]
+fn set_graph_view_re_lays_out_an_open_graph() {
+    let r = with_graph();
+    r.view.clear();
+    r.press(':');
+    r.submit_input("set graph-view tree");
+    assert!(r.view.evaled("update("));
+    assert!(r.view.evaled(r#"data-view="tree""#));
+    assert_eq!(graph_state(&r).0, "tree");
+    assert_eq!(r.chrome.message(), "Graph: tree");
+    // It is the session's view now: the next graph opens in it too.
+    r.press('t');
+    r.press('t');
+    r.land_work();
+    assert_eq!(graph_state(&r).0, "tree");
+}
+
+/// A route `doc.md → other.md` where doc.md also links a note before and one
+/// after other.md — the two clusters — with the graph open on other.md.
+fn with_clusters() -> Reader {
+    let r = Reader::open_with(
+        "# Doc\n\n[x](x.md) [other](other.md) [y](y.md)\n",
+        |vault| {
+            std::fs::write(vault.join("other.md"), "# Other\n").expect("write other");
+            std::fs::write(vault.join("x.md"), "# X\n").expect("write x");
+            std::fs::write(vault.join("y.md"), "# Y\n").expect("write y");
+        },
+    );
+    r.finish_load();
+    r.navigate(&file_uri(&r.sibling()));
+    r.finish_load();
+    r.press('t');
+    r.land_work();
+    r
+}
+
+#[test]
+fn l_on_a_cluster_expands_it_and_h_collapses_it() {
+    let r = with_clusters();
+    let (_, _, closed) = graph_state(&r);
+    // other.md's column: the cluster above it, then other.md.
+    r.press('k');
+    assert_eq!(graph_state(&r).1, "", "a cluster is not a note");
+    r.view.clear();
+    r.press('l');
+    assert!(r.view.evaled("update("));
+    assert_eq!(graph_state(&r).2, closed + 1, "x.md is on screen");
+    r.press('l');
+    assert!(graph_state(&r).1.ends_with("x.md"));
+    r.press('h');
+    assert_eq!(graph_state(&r).1, "", "back on the cluster");
+    r.press('h');
+    assert_eq!(graph_state(&r).2, closed);
+}
+
+#[test]
+fn enter_on_a_cluster_expands_it_rather_than_opening_anything() {
+    let r = with_clusters();
+    let (_, _, closed) = graph_state(&r);
+    r.press('j');
+    r.view.clear();
+    r.press_key(Key::Enter);
+    assert!(r.view.loads().is_empty());
+    assert_eq!(mode(&r), "graph");
+    assert_eq!(graph_state(&r).2, closed + 1, "y.md is on screen");
+}
+
+#[test]
+fn a_click_on_a_cluster_expands_it() {
+    let r = with_clusters();
+    let (_, _, closed) = graph_state(&r);
+    r.press('k');
+    let v: serde_json::Value = serde_json::from_str(&r.state()).unwrap();
+    assert_eq!(v["graph_selected"], "");
+    r.press('j');
+    // doc.md's cluster above, by key (doc.md is node 0).
+    r.message(message::GRAPH_EXPAND, "0.a");
+    assert_eq!(graph_state(&r).2, closed + 1);
+    r.message(message::GRAPH_EXPAND, "0.9");
+    assert_eq!(graph_state(&r).2, closed + 1, "an unknown key is ignored");
+}
+
+#[test]
+fn a_click_on_an_item_a_re_layout_removed_is_dropped() {
+    let r = with_clusters();
+    r.message(message::GRAPH_EXPAND, "0.a");
+    // x.md (node 1) is on screen inside the cluster; the page is told so.
+    r.message(message::GRAPH_SELECT, "0.1");
+    assert!(graph_state(&r).1.ends_with("x.md"));
+    r.press('h');
+    r.press('h');
+    r.press('j');
+    assert!(graph_state(&r).1.ends_with("other.md"));
+    // A click on x.md posted before the collapse landed arrives after it: it
+    // names nothing now, and must select neither whatever took its index nor
+    // a stand-in for it.
+    r.message(message::GRAPH_SELECT, "0.1");
+    assert!(
+        graph_state(&r).1.ends_with("other.md"),
+        "the selection stays"
+    );
+    assert_eq!(mode(&r), "graph");
+}
+
+#[test]
+fn the_toc_closes_the_graph_it_would_cover() {
+    let r = with_graph();
+    r.view.clear();
+    r.execute_str("toggle toc", 1).unwrap();
+    assert_eq!(mode(&r), "toc");
+    assert!(r.view.evaled("close()"), "the overlay is gone");
+    assert_eq!(graph_state(&r), (String::new(), String::new(), 0));
+}
+
+#[test]
+fn toc_select_outside_the_toc_leaves_the_graph_alone() {
+    let r = with_graph();
+    r.execute_str("toc select", 1).unwrap();
+    assert_eq!(mode(&r), "graph");
+    assert_eq!(graph_state(&r).0, "links");
+}
+
+#[test]
+fn ctrl_wheel_zooms_the_graph_and_not_the_page() {
+    let r = with_graph();
+    r.view.clear();
+    r.wheel_zoom(-1.0, false);
+    assert!(r.view.evaled("zoom("));
+    assert!(r.view.zoom_levels().is_empty());
+    r.press('+');
+    assert!(r.view.zoom_levels().is_empty());
+}
+
+// ---------------------------------------------------------------------------
 // Link hints
 // ---------------------------------------------------------------------------
 

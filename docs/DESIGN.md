@@ -1146,6 +1146,162 @@ as a workflow-artifact chain; a data-only branch or a Pages site were
 rejected — a branch that shares no history with `main` is not what branches
 are for, and nothing about this project should publish anywhere.
 
+### D14: The document graph — a route spine with its links fanned out (2026-09-18)
+
+Documentation trees (a `docs/` folder, an eval-case collection, a vault) are
+graphs of notes that link to each other. The breadcrumb (D10) shows the one
+route you took; nothing showed where else you could go. `t` opens a **document
+graph** over the page: the route you took drawn as a straight line, the notes
+around it, and where the current note leads.
+
+**The walk (data).** Unchanged from the first cut, and still the only I/O:
+
+- **Root = the first document of the jumplist trail** (`Jumplist::trail`,
+  D10); a trail that revisits a note is cut back to the first visit (`A > B >
+  A` is `A`), so the route is a path. Recomputed on every open.
+- **A spanning tree of the link graph.** Breadth-first from the root, each note
+  placed once under the first note that reached it, children in source link
+  order. Deterministic: the same files give the same picture, no simulation.
+- **The route pins only what a link explains.** A trail step `A → B` where `A`
+  links to `B` moves `B`'s subtree under `A` — a pass over the finished walk,
+  skipped when `A` lies inside that subtree (the reader went back up a chain).
+  A step no link explains (`:open`, a jump from the graph) pins nothing; a
+  route note the walk cannot reach at all hangs under its trail predecessor on
+  a dashed edge.
+- **Bounded**: `NODE_BUDGET` notes, `READ_CAP` bytes per note, on the `Host`
+  worker (like the vault scan, D11). **Same link semantics as the reader**:
+  path links against the note's directory, wikilinks via the vault index,
+  only existing `.md`/`.markdown` targets. **Titles**: frontmatter `title`, else
+  the first `# H1`, else the file stem.
+- Each note keeps `targets`: every placed note it links to, tree child or not.
+
+**The scene (layout) — rewritten after the owner's first look.** The first cut
+was a plain left-to-right tidy tree. On a real tree (scribetech-assistant
+`docs/`, a README linking 52 notes) three things were wrong: the route zig-zagged
+through the tree instead of reading as a line; a note's links were "all over
+the place" (dashed curves to wherever its targets happened to sit); and zoomed
+out, nothing was readable. So the graph is now laid out *around the reader*,
+in the manner of TheBrain and ExcaliBrain (current note as the layout anchor)
+with SpaceTree-style collapsed branches:
+
+- **The spine.** The route root → … → current sits on one horizontal row,
+  one column per step, joined by a straight accent line. Everything else hangs
+  above or below it. A spine note's other children split by link order: those
+  its source lists *before* the route child go above, those after go below.
+- **Two views, `v` toggles** (option `graph-view`, default `links`):
+  - **`links`** — what the current note leads to. The current note's outgoing
+    links fan out to its right, one node per link, **duplicates allowed** (a
+    link back to the root is a node in the fan too, marked as on the route).
+    Every other spine note's remaining links fold into at most two **clusters**
+    (above, below) — a single item reading `+12` — because they are context,
+    not focus. Any collapsed item (a cluster, or a note with links of its own,
+    which shows a `+n` badge) expands in place with `l`, `Enter` or a click,
+    and collapses with `h`: the zathura TOC semantics (`l` expands or descends,
+    `h` collapses or ascends). Expansion is per item, so exploring a fan never
+    re-lays out the rest.
+  - **`tree`** — the whole spanning tree, every note once, spine still
+    straight. Selecting a note answers "where else does this link": its
+    targets get the accent outline and everything else off the spine dims
+    (Obsidian's hover highlight). No lines are drawn across the tree — dashed
+    cross-link curves were tried twice and read as clutter both times.
+  - The status line names the view (`Graph: links`, `Graph: tree`), since the
+    two can look alike on a small tree and `v` gives no other feedback.
+  - Hovering a cluster or a `+n` badge previews the titles it holds; a click
+    or `l` still expands it. Automatic expansion on zoom was considered and
+    left out: a layout that changes shape as you zoom is the jumping-around
+    this design exists to avoid.
+- **Packing.** Hand-written, not a crate: `dugong` (the dagre port merman
+  already pulls in) is free but lays out DAGs by crossing minimisation, which
+  cannot pin a spine and re-orders on every change; `tidy-tree` is one stale
+  2023 release that would need patching for the spine anyway. Off-spine
+  subtrees are classic tidy trees (leaves in consecutive rows, a parent midway
+  between its first and last child). They are packed against a per-column
+  **skyline** above and below the spine, deepest spine note first, so the
+  branches nearest the current note sit nearest the line; each block goes as
+  close to the spine as the columns it spans allow. No two items share a row
+  in a column, and the spine never bends. Tree edges are elbows sharing one
+  trunk per parent (a fan of fifty is one line with fifty branches).
+- **Level of detail (semantic zoom).** The scene is one SVG; the overlay sets
+  a zoom-level class and a `--k` scale variable, and CSS does the rest — the
+  representation changes with scale, not just its size:
+  - *near* (scale ≥ 0.7): pills with title and file name;
+  - *mid* (0.4–0.7): title only;
+  - *far* (< 0.4): leaves disappear into **bundles** — core emits, for every
+    parent with two or more leaf children, a bar spanning their rows labelled
+    `12 notes` — and the labels that remain (spine, clusters, inner nodes,
+    bundles) are counter-scaled by `1/k` so they stay readable on screen.
+  Levels fade into each other (opacity), after Obsidian's text-fade threshold.
+  Zoomed out, **columns shrink less than rows** (horizontal scale
+  `max(k, KX_MIN)`, text counter-scaled so glyphs never distort), so a far
+  label gets more characters before its ellipsis. Far labels sit at 15 px on
+  screen.
+  Counter-scaled labels are wider than a column once zoomed out, so the overlay
+  also **culls labels by collision**: after each zoom it walks the visible
+  labels in priority order (current, spine, selection, clusters and bundles,
+  notes that lead further, plain leaves) and hides any whose on-screen box
+  would overlap one already kept; far labels are also cut to one column's
+  width. Only true leaves — notes with no links of their own — are bundled; a
+  note with a `+n` badge stays visible, because it is where the reader can go
+  next.
+- **Selection is an item, not a note**: with duplicates a note can be on screen
+  twice. Items carry a stable key (the path of node indices from the root in
+  the displayed tree); the page posts keys, never indices, so a click racing a
+  re-layout cannot land on the wrong item, and a note that disappears into a
+  collapsed cluster leaves the selection on that cluster. A re-layout — expand, collapse, `v`, `:set
+  graph-view` — keeps the selection and keeps the selected item's position on
+  screen fixed (the camera compensates).
+
+**The overlay (interaction).**
+
+- **In-page, not a widget**: core writes the SVG, the controller draws it
+  through `Viewport::eval` like the hint overlay; no new trait method (D2a).
+- **Mouse**: the wheel pans (`Shift` for sideways), drag pans, `Ctrl`+wheel
+  zooms toward the cursor — the reader's own convention (D5a), and the owner's
+  pick after trying wheel-zooms-like-Obsidian. GTK takes `Ctrl`+wheel first
+  (D4), so the controller routes it. Hover highlights the
+  item and its edges. Click selects; double-click opens.
+- **Keys** (mode `graph`, `[keys.graph]`): `j`/`k` next/previous item in the
+  column, `h`/`l` as above, `Enter` opens a note (or expands a cluster), `v`
+  toggles the view, `+`/`-` zoom at the centre, `=` back to 1:1 on the
+  current note, `t`/`Esc` close, `:` opens the command line (so `:set
+  graph-view` reaches an open graph). Every other key is consumed while the
+  overlay is up. The view is session state, like `s`: the next `t` reopens in
+  the view last chosen. Tree view has nothing to fold, so `h`/`l` only move
+  there. Opening a TOC (`Tab`, `:toggle toc`) closes the graph first — graph
+  mode holds exactly while the graph is open.
+- **Opening frame**: root → current → the fan's first column, centred, when it
+  fits the window at 1:1; otherwise the current note a third of the way
+  across, since the tree grows to the right.
+- **Panel (bottom left)**: the selected note's title and path, and the route as
+  a clickable breadcrumb (click a segment to select that spine note). No
+  restated facts — "you are here" is what the tint already says, and a link
+  count is what the fan or badge already shows. A one-note route shows no
+  breadcrumb (it would repeat the title). **Help line (bottom right)**:
+  the keys. Background plain.
+- **Lifecycle**: a walk's landing is drawn only if it is still the newest one
+  asked for (a generation number), the document has finished loading, and the
+  reader is still in Normal mode. Opening a note goes through `open_file`, so
+  it lands on the jumplist and `Backspace` returns.
+
+**A core part, not an add-on.** The same surfaces as every other feature:
+`:graph` / `:toggle graph` and every graph action through `:` exec and D-Bus
+`ExecuteAction`; the `graph-view` option in the config file, in `:set` (with
+completion) and applied live to an open graph; `GetState` reports
+`graph_view` (`""` when closed), `graph_selected` (the selected note's path,
+or `""` for a cluster) and `graph_items`; `[keys.graph]` remaps.
+
+**Look.** The document's theme variables, so it follows `Ctrl-r`. Quiet pills;
+the one strong element is the spine in the accent colour.
+
+**Key.** `g` prefixes `gg`, so the default is `t` (it draws a tree).
+
+- Rejected — **D3.js** or any bundled JS library: the layout is the part worth
+  testing, and in core it is unit-tested; the overlay JS only pans, zooms and
+  swaps classes. Rejected — **a force layout** (Obsidian's): positions that
+  depend on a simulation are exactly the "nodes jump around" the owner ruled
+  out. Rejected — **a second WebView or a native widget**: a cold web process
+  costs ~700 ms (Risks) and a widget is per-shell work.
+
 ## Non-goals
 
 - Editing. Ever. Pair with an editor instead (D7).
@@ -1200,6 +1356,7 @@ Adapted from zathura; "page" becomes "section" (heading-delimited).
 | `m<x>`, `'<x>` | set / jump to quickmark | M2 |
 | `Ctrl-o`/`Ctrl-i`, `Backspace` | jumplist back/forward (spans documents) | M2 |
 | `:` | command line (open, set, exec; tab completion) | M2 |
+| `t` | document graph (`hjkl` move/expand, `v` view, `Enter` open; D14) | post-1.0 |
 
 ## Component boundaries
 
@@ -1213,6 +1370,7 @@ The core is pure and toolkit-free; so is the controller.
 │               ├─ diagram.rs    ```mermaid → merman SVG inline  │
 │               └─ math.rs       $…$/$$…$$ → pulldown-latex MathML│
 │ toc.rs        heading extraction → outline tree + anchors      │
+│ graph/        link walk → spine scene → level-of-detail SVG    │
 │ config.rs     serde+toml: typed options, key tables            │
 │ keymap.rs     mode × count × key-seq → Action (pure lookup)    │
 │ jumplist.rs / marks.rs / history.rs / vault.rs  session models  │

@@ -17,6 +17,11 @@ Shipped through **v1.8.0** (tag + GitHub release + AUR PKGBUILD pointed at it).
   `scripts/bench-compare.sh`. State: **e2e proven in CI (53/53)**; trail
   is a workflow artifact chain (no branch, no Pages). Next: confirm the first
   artifact-trail run.
+- **document graph (`t`)** — v2 per DESIGN D14 (route spine, links/tree
+  views, clusters + hover preview, level-of-detail zoom, `:set graph-view`,
+  D-Bus fields). State: committed on main (432 unit + 57 e2e green), not
+  released. Next: owner feel-test of the third feedback pass, then release
+  v1.10.0 (tag, gh release, AUR PKGBUILD).
 
 ## Done (recent)
 
