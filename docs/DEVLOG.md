@@ -2,7 +2,17 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-19 (latest) — the graph's zoom has ends
+## 2026-09-19 (latest) — every mermaid diagram is checked
+
+The diagram in docs/graph/README.md failed to render: a node named `graph`,
+which is a keyword in merman and mermaid.js alike. It is `model` now. A new
+unit test, `every_mermaid_diagram_in_the_repository_renders`, renders every
+mermaid fence in the repo's markdown with merman and names file, line and
+error; the demo's deliberately broken fence is marked
+`<!-- mermaid: expected to fail -->` and must fail. All twelve fences were also
+checked with mermaid-cli (the mermaid.js parser GitHub uses).
+
+## 2026-09-19 — the graph's zoom has ends
 
 The graph zoomed from 8 % to 300 %: out until a graph was a speck, in until
 one pill filled the window. `graph.js` `zoom()` now clamps to

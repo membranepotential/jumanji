@@ -71,8 +71,8 @@ The full model, with the reasons behind each choice, is in
 flowchart LR
   trail["jumplist trail"] --> walk["walk: core::graph::build"]
   files[("markdown files")] --> walk
-  walk --> graph["Graph: nodes + route"]
-  graph --> scene["Scene: view + folds"]
+  walk --> model["Graph: nodes + route"]
+  model --> scene["Scene: view + folds"]
   scene --> svg["SVG: core::graph::svg"]
   svg --> overlay["overlay: graph.js"]
   overlay -- "select / fold / open" --> controller["controller::session"]

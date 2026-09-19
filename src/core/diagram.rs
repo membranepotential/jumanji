@@ -208,6 +208,83 @@ mod tests {
         intrinsic_max_width(svg).map(|(px, _, _)| px)
     }
 
+    /// The line before a fence that is broken on purpose (the demo's
+    /// graceful-degradation sample). Such a fence must *fail* to render.
+    const EXPECTED_FAILURE: &str = "<!-- mermaid: expected to fail -->";
+
+    /// Every markdown file in the repository, outside build and tool output.
+    fn markdown_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if !matches!(
+                    name.to_str(),
+                    Some("target" | ".git" | ".claude" | "node_modules" | "packaging")
+                ) {
+                    markdown_files(&path, out);
+                }
+            } else if path.extension().is_some_and(|e| e == "md") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The docs are read in jumanji, so their diagrams must parse in merman,
+    /// the engine the reader renders with. (A node named `graph` broke
+    /// docs/graph/README.md: it is a keyword in merman and mermaid.js alike.)
+    #[test]
+    fn every_mermaid_diagram_in_the_repository_renders() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        markdown_files(root, &mut files);
+        files.sort();
+        let renderer = Renderer::new();
+        let (mut checked, mut problems) = (0, Vec::new());
+        for file in &files {
+            let md = std::fs::read_to_string(file).expect("read markdown");
+            let lines: Vec<&str> = md.lines().collect();
+            let arena = comrak::Arena::new();
+            let doc = comrak::parse_document(&arena, &md, &crate::core::pipeline::comrak_options());
+            for node in doc.descendants() {
+                let data = node.data.borrow();
+                let NodeValue::CodeBlock(block) = &data.value else {
+                    continue;
+                };
+                if !block.fenced || !is_mermaid_fence(&block.info) {
+                    continue;
+                }
+                checked += 1;
+                let line = data.sourcepos.start.line;
+                let expected_failure = line >= 2 && lines[line - 2].trim() == EXPECTED_FAILURE;
+                let at = format!(
+                    "{}:{line}",
+                    file.strip_prefix(root).unwrap_or(file).display()
+                );
+                match (render(&renderer, &block.literal, "check"), expected_failure) {
+                    (Rendered::Svg(_), false) | (Rendered::Failed(_), true) => {}
+                    (Rendered::Failed(reason), false) => problems.push(format!("{at}: {reason}")),
+                    (Rendered::Svg(_), true) => {
+                        problems.push(format!("{at}: marked {EXPECTED_FAILURE} but renders"))
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no mermaid fences found under {}",
+            root.display()
+        );
+        assert!(
+            problems.is_empty(),
+            "mermaid diagrams that fail:\n{}",
+            problems.join("\n")
+        );
+    }
+
     #[test]
     fn detects_mermaid_fences() {
         assert!(is_mermaid_fence("mermaid"));

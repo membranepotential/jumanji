@@ -7,7 +7,10 @@ Three layers of proof, matching the three layers of code (DESIGN [D2a](architect
   controller, the latter driven through a fake toolkit so hint mode, the
   jumplist, `:` completion and the deferred initial render are exercised
   without a display. Run everywhere: `cargo test --lib`, or the full
-  `cargo test`.
+  `cargo test`. One of them, `every_mermaid_diagram_in_the_repository_renders`
+  (`src/core/diagram.rs`), renders every mermaid fence in the repo's markdown
+  with merman, the engine the reader uses; a fence broken on purpose follows
+  the line `<!-- mermaid: expected to fail -->` and must fail.
 - **Headless end-to-end** (`tests/e2e.rs`) — drives the *real* application: a
   real (virtual) X server, real GTK key events, real WebKit, asserting on state
   read back over D-Bus. Most of this document is about that layer.

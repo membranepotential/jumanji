@@ -282,6 +282,7 @@ timeline
 A diagram merman cannot parse must never break the page — it degrades to a
 highlighted fence with an error note:
 
+<!-- mermaid: expected to fail -->
 ```mermaid
 flowchart LR
     A --> B -->
