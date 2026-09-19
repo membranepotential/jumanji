@@ -59,6 +59,9 @@
   // How long the pointer rests on a folded node before its peek appears, so a
   // passing pointer does not flash fans.
   const PEEK_DELAY = 250;
+  // The least distance between a peek's rows on screen, in CSS px: a far
+  // label is 15 px tall.
+  const PEEK_PITCH = 22;
   // Scene units of a pill's padding: the text starts 16 in, and keeps 10 clear
   // of the right edge — or of the fold handle, the pill's last 38.
   const PAD_LEFT = 16, PAD_RIGHT = 10, HANDLE_W = 38;
@@ -107,36 +110,7 @@
       const lod = root.dataset.lod;
       const column = Number(svg.dataset.column);
       for (const c of svg.querySelectorAll('.culled')) c.classList.remove('culled');
-      for (const g of svg.querySelectorAll('.jg-nodes .jg-node')) {
-        const pill = g.querySelector('rect').width.baseVal.value;
-        const title = g.querySelector('.t');
-        const handle = g.querySelector('.jg-handle > g');
-        if (handle && handle.dataset.home === undefined) {
-          handle.dataset.home = handle.getAttribute('transform');
-        }
-        if (lod === 'far') {
-          // Far out the handle stands beside the label, which leaves room
-          // for it within the column.
-          const sx = k / kx();
-          const gap = 8 / kx();
-          const hw = handle ? handle.querySelector('text').getComputedTextLength() * sx : 0;
-          const room = column - PAD_LEFT - PAD_RIGHT - (handle ? hw + gap : 0);
-          fit(title, g.dataset.title, room);
-          if (handle) {
-            const end = PAD_LEFT + title.getComputedTextLength() * sx + gap + hw / 2;
-            handle.setAttribute('transform', 'translate(' + end + ' ' + NODE_MID + ')');
-          }
-        } else {
-          const room = pill - (handle ? HANDLE_W : 0) - PAD_LEFT - PAD_RIGHT;
-          fit(title, g.dataset.title, room);
-          if (handle) handle.setAttribute('transform', handle.dataset.home);
-        }
-        const name = g.querySelector('.f');
-        if (lod === 'near') {
-          if (name.dataset.full === undefined) name.dataset.full = name.textContent;
-          fit(name, name.dataset.full, pill - (handle ? HANDLE_W : 0) - PAD_LEFT - PAD_RIGHT);
-        }
-      }
+      for (const g of svg.querySelectorAll('.jg-nodes .jg-node')) fitLabels(g, lod, column);
       if (lod !== 'far') return;
       const labels = svg.querySelectorAll('.jg-nodes .t, .jg-bundle .t');
       const kept = [];
@@ -159,6 +133,40 @@
         else kept.push(b);
       }
     });
+  }
+
+  // Cut one node's labels to what fits at level `lod` — its pill near and
+  // mid, one `column` far out, beside its handle — at the size it is drawn.
+  // The scene's nodes and the peek's are both fitted here.
+  function fitLabels(g, lod, column) {
+    const pill = g.querySelector('rect').width.baseVal.value;
+    const title = g.querySelector('.t');
+    const handle = g.querySelector('.jg-handle > g');
+    if (handle && handle.dataset.home === undefined) {
+      handle.dataset.home = handle.getAttribute('transform');
+    }
+    if (lod === 'far') {
+      // Far out the handle stands beside the label, which leaves room
+      // for it within the column.
+      const sx = k / kx();
+      const gap = 8 / kx();
+      const hw = handle ? handle.querySelector('text').getComputedTextLength() * sx : 0;
+      const room = column - PAD_LEFT - PAD_RIGHT - (handle ? hw + gap : 0);
+      fit(title, g.dataset.title, room);
+      if (handle) {
+        const end = PAD_LEFT + title.getComputedTextLength() * sx + gap + hw / 2;
+        handle.setAttribute('transform', 'translate(' + end + ' ' + NODE_MID + ')');
+      }
+    } else {
+      const room = pill - (handle ? HANDLE_W : 0) - PAD_LEFT - PAD_RIGHT;
+      fit(title, g.dataset.title, room);
+      if (handle) handle.setAttribute('transform', handle.dataset.home);
+    }
+    const name = g.querySelector('.f');
+    if (lod === 'near') {
+      if (name.dataset.full === undefined) name.dataset.full = name.textContent;
+      fit(name, name.dataset.full, pill - (handle ? HANDLE_W : 0) - PAD_LEFT - PAD_RIGHT);
+    }
   }
 
   // Set `t` to `full`, cut with an ellipsis to `room` units of its pill's
@@ -379,8 +387,9 @@
   }, { passive: false });
 
   // The peek: resting the pointer on a folded node draws its children as a
-  // temporary fan next to it — full pills at screen scale, whatever the zoom,
-  // in their own layer outside the scene's camera, laid out as unfolding
+  // temporary fan next to it — scene nodes under the scene's camera, so they
+  // look as the nodes around them do at every level — in their own layer
+  // over the scene, laid out as unfolding
   // would lay them out (one column right, centred on the node, one row apart,
   // an elbow trunk), over a backdrop so nothing beneath shows through, and
   // clamped to the viewport. Nothing else moves. It stays while the pointer
@@ -424,36 +433,53 @@
     const more = Number(el.dataset.peekMore || 0);
     if (more > 0) entries.push({ title: 'and ' + more + ' more', file: '' });
     if (!entries.length) return;
-    // Pills at 1:1, the grid's own pitch: as they would be at scale 1.
+    // The fan is scene markup under the scene's own camera, so every rule
+    // that styles a node at this zoom level styles these alike. Only the
+    // pitch differs far out, where the scene's bare labels sit a few px
+    // apart and are culled against each other, which a fan cannot be: there
+    // its rows keep a readable distance.
+    const lod = root.dataset.lod;
     const pill = layoutBox(el);
     const w = pill.w, h = pill.h;
-    const column = Number(svg.dataset.column), row = Number(svg.dataset.row);
-    const node = box(el);
-    const from = node.x + node.w, midY = node.y + node.h / 2;
+    const column = Number(svg.dataset.column);
+    const row = Math.max(Number(svg.dataset.row), PEEK_PITCH / k);
+    const from = pill.x + w, midY = pill.y + h / 2;
     const n = entries.length;
-    const pad = 8;
+    const pad = 8 / k;
     let x = from + (column - w);
     let first = midY - ((n - 1) / 2) * row;
+    // Clamp to the viewport, in scene units.
+    const view = { top: -ty / k, bottom: (innerHeight - ty) / k, right: (innerWidth - tx) / kx() };
     const top = first - h / 2, bottom = first + (n - 1) * row + h / 2;
-    if (bottom - top < innerHeight - 2 * pad) {
-      if (top < pad) first += pad - top;
-      else if (bottom > innerHeight - pad) first -= bottom - innerHeight + pad;
+    if (bottom - top < view.bottom - view.top - 2 * pad) {
+      if (top < view.top + pad) first += view.top + pad - top;
+      else if (bottom > view.bottom - pad) first -= bottom - view.bottom + pad;
     }
     // At the right edge the fan slides left, but never over its own node.
-    if (x + w + pad > innerWidth) x = Math.max(from + 2 * pad, innerWidth - w - pad);
-    ghost = svgEl('g', { class: 'jg-ghost' }, peekLayer);
+    const padX = 8 / kx();
+    if (x + w + padX > view.right) x = Math.max(from + 2 * padX, view.right - w - padX);
+    ghost = svgEl('g', {
+      class: 'jg-ghost',
+      transform: 'translate(' + tx + ' ' + ty + ') scale(' + kx() + ' ' + k + ')',
+    }, peekLayer);
     svgEl('rect', {
-      class: 'backdrop', x: from + 2, y: first - h / 2 - pad,
-      width: x + w + pad - from - 2, height: (n - 1) * row + h + 2 * pad, rx: 8,
+      class: 'backdrop', x: from + 2 / kx(), y: first - h / 2 - pad,
+      width: x + w + padX - from - 2 / kx(), height: (n - 1) * row + h + 2 * pad, rx: 8,
     }, ghost);
-    const room = w - PAD_LEFT - PAD_RIGHT;
+    const edges = svgEl('g', { class: 'jg-edges' }, ghost);
+    const nodes = svgEl('g', { class: 'jg-nodes' }, ghost);
     entries.forEach(({ title, file }, j) => {
       const y = first + j * row;
-      svgEl('path', { class: 'trunk', d: elbowPath(from, midY, x, y) }, ghost);
-      const g = svgEl('g', { class: 'jg-ghost-node', transform: 'translate(' + x + ' ' + (y - h / 2) + ')' }, ghost);
+      svgEl('path', { class: 'jg-edge', d: elbowPath(from, midY, x, y) }, edges);
+      const g = svgEl('g', {
+        class: 'jg-node', 'data-title': title,
+        transform: 'translate(' + x + ' ' + (y - h / 2) + ')',
+      }, nodes);
       svgEl('rect', { width: w, height: h, rx: 8 }, g);
-      fit(svgEl('text', { class: 't', x: PAD_LEFT, y: 18 }, g), title, room, 1);
-      if (file) fit(svgEl('text', { class: 'f', x: PAD_LEFT, y: 33 }, g), file, room, 1);
+      svgEl('circle', { class: 'dot', cy: h / 2, r: 3.5 }, g);
+      svgEl('text', { class: 't', x: PAD_LEFT, y: 18 }, g).textContent = title;
+      svgEl('text', { class: 'f', x: PAD_LEFT, y: 33 }, g).textContent = file;
+      fitLabels(g, lod, column);
     });
   }
   // The pointer may cross from the node into its fan and back.

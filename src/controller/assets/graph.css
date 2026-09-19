@@ -67,7 +67,7 @@
 
 /* Text and dots undo the scene's extra horizontal scale (`--sx` = k / kx,
    graph.js), so glyphs never stretch when columns shrink less than rows. */
-#__jmnj_graph .jg-stage text,
+#__jmnj_graph svg text,
 #__jmnj_graph .jg-node .dot {
   transform-box: fill-box;
   transform-origin: left center;
@@ -86,8 +86,9 @@
 }
 
 /* The peek (graph.js `showPeek`): a folded node's children as a temporary
-   fan in a screen-space layer over the scene — full size at every zoom, over
-   a backdrop so nothing beneath shows through. */
+   fan in a layer over the scene — scene nodes under the scene's camera, so
+   the node rules above and below style them as they style the scene, over a
+   backdrop so nothing beneath shows through. */
 #__jmnj_graph .jg-peek-layer {
   position: absolute;
   inset: 0;
@@ -103,26 +104,11 @@
   pointer-events: auto;
   animation: jg-fade 120ms ease;
 }
-#__jmnj_graph .jg-ghost .trunk {
-  fill: none;
-  stroke: var(--border-strong);
-  stroke-width: 1.25;
-}
 #__jmnj_graph .jg-ghost .backdrop {
   fill: var(--bg);
   stroke: var(--border);
   stroke-width: 1;
-}
-#__jmnj_graph .jg-ghost-node rect {
-  fill: color-mix(in srgb, var(--fg) 6%, var(--bg));
-}
-#__jmnj_graph .jg-ghost-node .t {
-  fill: var(--fg);
-  font-size: 14px;
-}
-#__jmnj_graph .jg-ghost-node .f {
-  fill: var(--fg-muted);
-  font-size: 12px;
+  vector-effect: non-scaling-stroke;
 }
 @keyframes jg-fade {
   from {

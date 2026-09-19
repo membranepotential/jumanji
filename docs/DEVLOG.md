@@ -13,6 +13,15 @@ fold shrank the graph) may stay but not go lower, so nothing jumps. New e2e
 `the_graph_zooms_between_the_whole_graph_and_twice_its_size`, red before
 (42 → 6.2 px); GetState gains `graph_sel_height`, the vertical scale.
 
+The hover peek now looks like the nodes around it by construction: `showPeek`
+builds scene markup (`.jg-nodes .jg-node` with pill, dot, title and file name)
+under the scene's own camera transform, and the label fitting is one function
+(`fitLabels`) for scene and peek. So every level-of-detail rule — sizes, the
+file name only near, no pills far — applies to it unchanged. The one
+difference: its rows keep a 22 px floor, since the scene culls colliding far
+labels and a fan cannot. This revisits R17 (a scaled fan was unreadable),
+which the scene's minimum sizes and culling rules now cover.
+
 ## 2026-09-19 — the graph's pre-release review
 
 A pre-release review of the document graph ([D14](graph/design.md)) found
