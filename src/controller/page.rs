@@ -212,12 +212,15 @@ pub struct ViewportState {
     /// `InspiredGithub`'s light colour) once dark mode is on.
     pub fn_color: String,
     /// The document graph's selected item on screen, in CSS px: its pill's
-    /// centre (`-1` when no graph is open) and width (0). The observable for
-    /// "a zoom about the pointer keeps what is under it in place" (DESIGN D14),
-    /// and — through the width — for "the graph's scale changed".
+    /// centre (`-1` when no graph is open), width and height (0). The
+    /// observable for "a zoom about the pointer keeps what is under it in
+    /// place" (DESIGN D14), and — through the size — for "the graph's scale
+    /// changed". The height is the vertical scale exactly; the width stops
+    /// shrinking at the horizontal scale's floor.
     pub graph_sel_x: f64,
     pub graph_sel_y: f64,
     pub graph_sel_width: f64,
+    pub graph_sel_height: f64,
 }
 
 /// The snapshot as it comes back over [`Viewport::eval_json`]: the short keys
@@ -253,6 +256,7 @@ struct Snapshot {
     sx: f64,
     sy: f64,
     sw: f64,
+    sh: f64,
 }
 
 impl From<Snapshot> for ViewportState {
@@ -281,6 +285,7 @@ impl From<Snapshot> for ViewportState {
             graph_sel_x: s.sx,
             graph_sel_y: s.sy,
             graph_sel_width: s.sw,
+            graph_sel_height: s.sh,
         }
     }
 }
@@ -316,6 +321,7 @@ impl ViewportState {
             graph_sel_x: -1.0,
             graph_sel_y: -1.0,
             graph_sel_width: 0.0,
+            graph_sel_height: 0.0,
         }
     }
 }
@@ -718,7 +724,8 @@ pub trait Page: Viewport + Clone + 'static {
                       fc: fn ? getComputedStyle(fn).color : '', \
                       sx: gr ? gr.left + gr.width / 2 : -1, \
                       sy: gr ? gr.top + gr.height / 2 : -1, \
-                      sw: gr ? gr.width : 0";
+                      sw: gr ? gr.width : 0, \
+                      sh: gr ? gr.height : 0";
         let script = format!(
             "{HEAD}, ff: typeof {FIRST_FRAME_GLOBAL} === 'number' \
              ? {FIRST_FRAME_GLOBAL} : -1, \

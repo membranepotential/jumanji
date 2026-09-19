@@ -47,6 +47,13 @@
   // KX_MIN, so a far label has room for more of its title. Text is
   // counter-scaled horizontally (`--sx` in graph.css), so glyphs never stretch.
   const KX_MIN = 0.55;
+  // The zoom range. In, twice the drawn size is plenty. Out, the scale at
+  // which the whole graph's height fits the window is all there is to see —
+  // at most 1:1, and never below K_FLOOR, where a huge graph's rows would be
+  // a few px apart and its far labels would all cull one another.
+  const K_MAX = 2, K_FLOOR = 0.15;
+  // Room kept around what the camera frames.
+  const MARGIN = 48;
   // Clicking a bundle zooms in to this scale: mid, where titles show.
   const BUNDLE_ZOOM = 0.55;
   // How long the pointer rests on a folded node before its peek appears, so a
@@ -320,11 +327,18 @@
     select(i, i !== anchor);
   }
 
+  function kMin() {
+    const h = svg.querySelector('.jg-nodes').getBBox().height;
+    const fit = h > 0 ? (innerHeight - 2 * MARGIN) / h : 1;
+    return Math.min(1, Math.max(K_FLOOR, fit));
+  }
+
   // Zoom about a stage point: the world point under it stays put, on each
-  // axis at that axis's own scale.
+  // axis at that axis's own scale. Clamped to [kMin, K_MAX]; a scale already
+  // below kMin (the graph shrank by a fold) may stay, but not go lower.
   function zoom(factor, cx, cy) {
     const beforeX = kx(), beforeY = k;
-    k = Math.min(3, Math.max(0.08, k * factor));
+    k = Math.min(K_MAX, Math.max(Math.min(kMin(), k), k * factor));
     tx = cx - (cx - tx) * (kx() / beforeX);
     ty = cy - (cy - ty) * (k / beforeY);
     apply();
@@ -568,13 +582,12 @@
       const b = layoutBox(child);
       right = Math.max(right, b.x + b.w);
     }
-    const margin = 48;
-    const room = innerWidth - 2 * margin;
+    const room = innerWidth - 2 * MARGIN;
     if (routeRight - left > room) {
       centre(cur);
       return;
     }
-    tx = right - left <= room ? (innerWidth - (right - left)) / 2 - left : margin - left;
+    tx = right - left <= room ? (innerWidth - (right - left)) / 2 - left : MARGIN - left;
     ty = innerHeight / 2 - (c.y + c.h / 2);
     apply();
   }

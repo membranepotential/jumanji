@@ -189,6 +189,7 @@ struct State {
     graph_sel_x: f64,
     graph_sel_y: f64,
     graph_sel_width: f64,
+    graph_sel_height: f64,
 }
 
 impl State {
@@ -234,6 +235,7 @@ impl State {
             graph_sel_x: field(json, "graph_sel_x")?.parse().ok()?,
             graph_sel_y: field(json, "graph_sel_y")?.parse().ok()?,
             graph_sel_width: field(json, "graph_sel_width")?.parse().ok()?,
+            graph_sel_height: field(json, "graph_sel_height")?.parse().ok()?,
         })
     }
 }
@@ -3553,6 +3555,70 @@ fn graph_child_and_open_navigate_to_the_linked_document() {
 }
 
 #[test]
+fn the_graph_zooms_between_the_whole_graph_and_twice_its_size() {
+    // The graph zoomed from 8 % to 300 %: out until a graph was a speck, in
+    // until one pill filled the window. Now out stops where the whole graph's
+    // height fits (never past 1:1), in at twice the drawn size. The selected
+    // pill's height is the vertical scale.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("graph-zoom-range");
+    let links: String = (1..=2).map(|i| format!("[n{i}](n{i}.md) ")).collect();
+    std::fs::write(vault.join("Root.md"), format!("# Root\n\n{links}\n")).expect("write");
+    for i in 1..=2 {
+        std::fs::write(vault.join(format!("n{i}.md")), format!("# Node {i}\n")).expect("write");
+    }
+    // A tall one: sixty links fan out far past the window's height.
+    let many: String = (1..=60).map(|i| format!("[m{i}](m{i}.md) ")).collect();
+    std::fs::write(vault.join("Tall.md"), format!("# Tall\n\n{many}\n")).expect("write");
+    for i in 1..=60 {
+        std::fs::write(vault.join(format!("m{i}.md")), format!("# M {i}\n")).expect("write");
+    }
+    let settled = |h: &Harness| {
+        let mut before = h.get_state();
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            let now = h.get_state();
+            if (now.graph_sel_height - before.graph_sel_height).abs() < 0.01 {
+                return now;
+            }
+            before = now;
+        }
+    };
+
+    let h = Harness::launch_file_in_dir(vault.join("Root.md"), Some(vault.clone()));
+    h.key(&["t"]);
+    h.wait_for_state("the graph opens", SETTLE, |s| s.graph_sel_height > 0.0);
+    let one = settled(&h).graph_sel_height;
+    h.execute_action("zoom out", 20);
+    let out = settled(&h).graph_sel_height;
+    assert!(
+        (out - one).abs() < 0.5,
+        "a graph that fits at 1:1 zooms out no further ({one} -> {out})"
+    );
+    h.execute_action("zoom in", 40);
+    let most = settled(&h).graph_sel_height;
+    assert!(
+        (most / one - 2.0).abs() < 0.02,
+        "zoom in stops at 2x ({one} -> {most})"
+    );
+    drop(h);
+
+    let h = Harness::launch_file_in_dir(vault.join("Tall.md"), Some(vault.clone()));
+    h.key(&["t"]);
+    h.wait_for_state("the graph opens", SETTLE, |s| s.graph_sel_height > 0.0);
+    let one = settled(&h).graph_sel_height;
+    h.execute_action("zoom out", 60);
+    let least = settled(&h).graph_sel_height / one;
+    assert!(
+        least < 0.9,
+        "a graph taller than the window zooms out ({least})"
+    );
+    assert!(least >= 0.15 - 0.005, "but not below the floor ({least})");
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
 fn ctrl_wheel_zooms_the_graph_about_the_pointer() {
     // Regression: Ctrl+wheel over the graph moved the scene instead of zooming
     // about the cursor. The controller converted the shell's pointer (toolkit
@@ -3597,9 +3663,10 @@ fn ctrl_wheel_zooms_the_graph_about_the_pointer() {
         (before.graph_sel_x * px_per_css).round() as i32,
         (before.graph_sel_y * px_per_css).round() as i32,
     );
-    h.ctrl_wheel(false, 3, 20);
-    let after = h.wait_for_state("the graph zoomed out", SETTLE, |s| {
-        s.graph_sel_width < before.graph_sel_width * 0.9
+    // In, not out: this graph fits the window at 1:1, the least zoom there is.
+    h.ctrl_wheel(true, 3, 20);
+    let after = h.wait_for_state("the graph zoomed in", SETTLE, |s| {
+        s.graph_sel_width > before.graph_sel_width * 1.1
     });
     let moved =
         (after.graph_sel_x - before.graph_sel_x).hypot(after.graph_sel_y - before.graph_sel_y);

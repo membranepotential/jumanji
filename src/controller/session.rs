@@ -2889,7 +2889,7 @@ fn state_json(
          \"reveal_failsafe\":{reveal_failsafe},\"restoring\":{restoring},\
          \"fn_color\":{fn_color},\
          \"graph_sel_x\":{graph_sel_x},\"graph_sel_y\":{graph_sel_y},\
-         \"graph_sel_width\":{graph_sel_width},\
+         \"graph_sel_width\":{graph_sel_width},\"graph_sel_height\":{graph_sel_height},\
          \"dark\":{dark},\"wide\":{wide},\"diagram_fit\":{diagram_fit},\
          \"diagram_hover\":{diagram_hover},\
          \"zoom\":{zoom},\"text_zoom\":{text_zoom},\"mode\":{mode},\
@@ -2922,6 +2922,7 @@ fn state_json(
         graph_sel_x = vs.graph_sel_x,
         graph_sel_y = vs.graph_sel_y,
         graph_sel_width = vs.graph_sel_width,
+        graph_sel_height = vs.graph_sel_height,
         mode = json_string(mode),
         graph_view = json_string(graph.view),
         graph_selected = json_string(&graph.selected),

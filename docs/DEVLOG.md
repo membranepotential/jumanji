@@ -2,7 +2,18 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-19 (latest) — the graph's pre-release review
+## 2026-09-19 (latest) — the graph's zoom has ends
+
+The graph zoomed from 8 % to 300 %: out until a graph was a speck, in until
+one pill filled the window. `graph.js` `zoom()` now clamps to
+[`kMin`, `K_MAX` = 2]: `kMin` is the scale at which the whole graph's height
+fits the window, at most 1:1 and at least `K_FLOOR` = 0.15, so zooming out
+stops where there is nothing more to see. A scale already below `kMin` (a
+fold shrank the graph) may stay but not go lower, so nothing jumps. New e2e
+`the_graph_zooms_between_the_whole_graph_and_twice_its_size`, red before
+(42 → 6.2 px); GetState gains `graph_sel_height`, the vertical scale.
+
+## 2026-09-19 — the graph's pre-release review
 
 A pre-release review of the document graph ([D14](graph/design.md)) found
 fourteen defects: hangs, races with other interactions, and edges that did not

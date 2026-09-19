@@ -83,7 +83,7 @@ One row per intent. Each works the same in both views and on every node.
 | Peek | — | hover a folded node | Its children appear as a temporary fan in a floating layer, drawn at full size whatever the zoom, next to the node; nothing else moves. Leaving removes it. |
 | Open a node | `Enter` | double-click | Shows it in the reader; the graph closes. The current node: back to reading. |
 | Switch view | `v` | — | links ⇄ tree; the status line names the view; the selection stays on its document — if the new view has it folded away, the path to it unfolds. |
-| Zoom | `+` / `-` about the selection, `=` 1:1 on the current node | `Ctrl`+wheel about the cursor | The anchor is where your attention is: the selection for keys, the cursor for the mouse. |
+| Zoom | `+` / `-` about the selection, `=` 1:1 on the current node | `Ctrl`+wheel about the cursor | The anchor is where your attention is: the selection for keys, the cursor for the mouse. Out, zoom stops where the whole graph's height fits the window (never past 1:1, never below 15 %); in, at twice the drawn size. Past either end there is nothing more to see. |
 | Pan | — | wheel, `Shift`+wheel, drag | Keys never pan; moving the selection reveals what it reaches. |
 | Zoom into a bundle | — | click a bundle | Zooms in until its nodes are readable, centred on it. |
 | Commands | `:` | — | `:set graph-view`, and every graph action by name (`:graph child`…). |
