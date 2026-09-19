@@ -93,7 +93,7 @@
 # opened with Tab) and [keys.graph] (the document graph, opened with `t`).
 # Zathura key notation: bare chars are literal (`gg`, `J`); angle brackets
 # denote specials and modifiers (<C-r>, <Tab>, <CR>, <BS>, <Esc>, <Space>,
-# <S-Tab>). A count prefix (`5j`) works with every binding.
+# <Up>, <Down>, <Left>, <Right>, <S-Tab>). A count prefix (`5j`) works with every binding.
 #
 # Every binding below is the built-in default. Uncomment a line and edit it to
 # override that key; keys you leave out keep their defaults. `mark set` and
@@ -150,9 +150,14 @@
 # "k" = "graph previous"
 # "h" = "graph parent"               # move to the parent; never folds
 # "l" = "graph child"                # move to a child, unfolding a folded node
+# "<Down>" = "graph next"
+# "<Up>" = "graph previous"
+# "<Left>" = "graph parent"
+# "<Right>" = "graph child"
 # "<Space>" = "graph fold"           # fold / unfold the selected node
 # "<CR>" = "graph open"
 # "v" = "graph view"
+# "<Tab>" = "toggle toc"             # the table of contents; closes the graph
 # ":" = "command line"
 # "+" = "zoom in"
 # "-" = "zoom out"

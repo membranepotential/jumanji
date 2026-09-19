@@ -658,6 +658,10 @@ fn parse_key_name(name: &str) -> Result<Key, String> {
         "cr" | "enter" | "return" => Key::Enter,
         "space" => Key::Space,
         "bs" | "backspace" => Key::Backspace,
+        "up" => Key::Up,
+        "down" => Key::Down,
+        "left" => Key::Left,
+        "right" => Key::Right,
         _ => return Err(format!("unknown key name '{name}'")),
     })
 }
@@ -950,6 +954,13 @@ mod tests {
         assert_eq!(
             parse_key_sequence("<Tab>").unwrap(),
             KeySequence::single(KeyPress::new(Key::Tab, false, false))
+        );
+        assert_eq!(
+            parse_key_sequence("<Down><up>").unwrap(),
+            KeySequence(vec![
+                KeyPress::new(Key::Down, false, false),
+                KeyPress::new(Key::Up, false, false),
+            ])
         );
         assert_eq!(
             parse_key_sequence("<S-j>").unwrap(),

@@ -20,6 +20,10 @@ pub enum Key {
     Enter,
     Space,
     Backspace,
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 /// A key plus active modifiers. `Shift` is only meaningful for named keys;
@@ -272,7 +276,7 @@ impl Default for Keymap {
 
         // The document graph (DESIGN D14). `g` would be the mnemonic, but it
         // prefixes `gg`; `t` is free and the graph is drawn as a tree. Inside,
-        // `hjkl` move (`l` into a folded node unfolds it), `Space` folds, `v`
+        // `hjkl` or the arrows move (`l` into a folded node unfolds it), `Space` folds, `v`
         // switches the view, and the zoom keys zoom the graph
         // (docs/graph/interaction.md, "Gestures").
         km.bind(n, c('t'), ToggleGraph);
@@ -282,6 +286,14 @@ impl Default for Keymap {
         km.bind(g, c('k'), GraphPrevious);
         km.bind(g, c('h'), GraphParent);
         km.bind(g, c('l'), GraphChild);
+        // The arrows move as `hjkl` do.
+        let arrow = |key| KeySequence::single(KeyPress::new(key, false, false));
+        km.bind(g, arrow(Key::Down), GraphNext);
+        km.bind(g, arrow(Key::Up), GraphPrevious);
+        km.bind(g, arrow(Key::Left), GraphParent);
+        km.bind(g, arrow(Key::Right), GraphChild);
+        // `Tab` opens the table of contents, as everywhere; it closes the graph.
+        km.bind(g, arrow(Key::Tab), ToggleToc);
         km.bind(
             g,
             KeySequence::single(KeyPress::new(Key::Space, false, false)),
@@ -361,6 +373,10 @@ impl Matcher {
                 Key::Enter => s.push_str("<CR>"),
                 Key::Space => s.push_str("<Space>"),
                 Key::Backspace => s.push_str("<BS>"),
+                Key::Up => s.push_str("<Up>"),
+                Key::Down => s.push_str("<Down>"),
+                Key::Left => s.push_str("<Left>"),
+                Key::Right => s.push_str("<Right>"),
             }
         }
         s

@@ -288,6 +288,10 @@ fn to_keypress(keyval: GdkKey, mods: ModifierType) -> Option<KeyPress> {
         GdkKey::Return | GdkKey::KP_Enter => Key::Enter,
         GdkKey::BackSpace => Key::Backspace,
         GdkKey::space => Key::Space,
+        GdkKey::Up | GdkKey::KP_Up => Key::Up,
+        GdkKey::Down | GdkKey::KP_Down => Key::Down,
+        GdkKey::Left | GdkKey::KP_Left => Key::Left,
+        GdkKey::Right | GdkKey::KP_Right => Key::Right,
         other => {
             let c = other.to_unicode()?;
             if c.is_control() {

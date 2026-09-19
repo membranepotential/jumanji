@@ -94,4 +94,4 @@ Adapted from zathura; "page" becomes "section" (heading-delimited).
 | `m<x>`, `'<x>` | set / jump to quickmark | M2 |
 | `Ctrl-o`/`Ctrl-i`, `Backspace` | jumplist back/forward (spans documents) | M2 |
 | `:` | command line (open, set, exec; tab completion) | M2 |
-| `t` | document graph (`hjkl` move/expand, `v` view, `Enter` open; [D14](../graph/design.md#d14-the-document-graph--a-route-spine-with-its-links-fanned-out-2026-09-18)) | post-1.0 |
+| `t` | document graph (`hjkl` or arrows move/expand, `v` view, `Enter` open; [D14](../graph/design.md#d14-the-document-graph--a-route-spine-with-its-links-fanned-out-2026-09-18)) | post-1.0 |

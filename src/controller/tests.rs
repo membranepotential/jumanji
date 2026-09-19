@@ -933,6 +933,34 @@ fn a_command_run_before_the_walk_lands_drops_it() {
 }
 
 #[test]
+fn the_arrows_move_in_the_graph_as_hjkl_do() {
+    let r = with_graph();
+    r.press_key(Key::Right);
+    let (_, child, _) = graph_state(&r);
+    assert!(
+        child.ends_with("other.md"),
+        "right enters the child: {child}"
+    );
+    r.press_key(Key::Left);
+    let (_, parent, _) = graph_state(&r);
+    assert!(parent.ends_with("doc.md"), "left returns: {parent}");
+    // Outside the graph an arrow is the page's own: it scrolls natively.
+    r.press('t');
+    assert_eq!(
+        r.controller
+            .on_key(Some(KeyPress::new(Key::Down, false, false))),
+        KeyOutcome::PassThrough
+    );
+}
+
+#[test]
+fn tab_over_the_graph_opens_the_table_of_contents() {
+    let r = with_graph();
+    r.press_key(Key::Tab);
+    assert_eq!(mode(&r), "toc");
+}
+
+#[test]
 fn a_key_without_text_does_not_reach_the_page_behind_the_graph() {
     // An arrow or PageDown reaches the controller as `None`.
     let r = with_graph();

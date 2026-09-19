@@ -41,7 +41,7 @@ Follow a link or two, then press `t`.
 | You want to | Press | Or with the mouse |
 |---|---|---|
 | Open / close the graph | `t` (close also `Esc`) | — |
-| Move the selection | `j` `k` in the column, `h` parent, `l` child | click a node, or a breadcrumb segment |
+| Move the selection | `j` `k` in the column, `h` parent, `l` child (or the arrows) | click a node, or a breadcrumb segment |
 | Fold / unfold a node | `Space` | click its handle (`+n` / `−`) |
 | Peek at a folded node's links | — | hover it |
 | Open the selected document | `Enter` | double-click |

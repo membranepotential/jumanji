@@ -54,7 +54,7 @@ for one markdown document; a link is a link in its text.
 | State | Values | Changed by |
 |---|---|---|
 | Fold, per node | **folded** (children hidden, handle shows `+n`) · **unfolded** (children shown, handle shows `−`) · no handle (no links) | the handle, `Space`, entering a folded node with `l` |
-| Selection | one node | click, `hjkl`, breadcrumb |
+| Selection | one node | click, `hjkl` or the arrows, breadcrumb |
 | Hover | at most one node | the pointer |
 | View | links · tree | `v`, `:set graph-view` |
 | Camera | pan, zoom | wheel, drag, `Ctrl`+wheel, `+` `-` `=`, window resize |
@@ -77,7 +77,7 @@ One row per intent. Each works the same in both views and on every node.
 |---|---|---|---|
 | Open / close the graph | `t` | — | Opens on the current node; `t` again closes. |
 | Leave | `Esc`, `t` | — | Close the graph, back to the page. With the `:` prompt open, `Esc` closes the prompt first and leaves the graph up. `q` quits jumanji, as everywhere. |
-| Select | `j` / `k` next / previous in the column, `h` parent, `l` child | click a pill; click a breadcrumb segment | Moves the selection; the camera follows only if the selection left the screen. |
+| Select | `j` / `k` next / previous in the column, `h` parent, `l` child; the arrows likewise | click a pill; click a breadcrumb segment | Moves the selection; the camera follows only if the selection left the screen. |
 | Enter a folded node | `l` | — | Unfolds it and selects its first child. |
 | Fold / unfold | `Space` | click the handle | Toggles the selected (or clicked) node. `+n` becomes `−` and back. |
 | Peek | — | hover a folded node | Its children appear as a temporary fan in a floating layer next to the node, drawn as the nodes around it are at this zoom level (far out, bare labels at a readable spacing); nothing else moves. Leaving removes it. |

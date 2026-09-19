@@ -22,6 +22,10 @@ difference: its rows keep a 22 px floor, since the scene culls colliding far
 labels and a fan cannot. This revisits R17 (a scaled fan was unreadable),
 which the scene's minimum sizes and culling rules now cover.
 
+The graph also moves with the arrow keys (`Key::{Up, Down, Left, Right}`,
+`<Up>` … in key notation), and `Tab` over the graph opens the table of
+contents, as the design record already promised.
+
 ## 2026-09-19 — the graph's pre-release review
 
 A pre-release review of the document graph ([D14](graph/design.md)) found
