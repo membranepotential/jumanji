@@ -43,6 +43,11 @@ pub enum ZoomAnchor {
     Pointer,
 }
 
+/// The largest step one graph zoom takes, either way. The overlay keeps its
+/// scale within 0.08 – 3 (`graph.js`), so no step past ×37.5 can change
+/// anything; this only keeps the number finite.
+pub const GRAPH_ZOOM_FACTOR: f64 = 100.0;
+
 /// Which point a graph zoom keeps fixed on screen (DESIGN D14).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GraphZoomAt {
@@ -464,9 +469,9 @@ pub trait Page: Viewport + Clone + 'static {
     }
 
     /// Draw the document graph (DESIGN D14) over the page, item `selected`
-    /// selected and centred.
-    fn show_graph(&self, svg: &str, selected: usize) {
-        self.eval(&graph_show_js(svg, selected));
+    /// selected and centred. The overlay stamps its posts with `generation`.
+    fn show_graph(&self, svg: &str, selected: usize, generation: u64) {
+        self.eval(&graph_show_js(svg, selected, generation));
     }
 
     /// Replace the open graph's scene after a re-layout: item `anchor` (the
@@ -482,7 +487,12 @@ pub trait Page: Viewport + Clone + 'static {
     }
 
     /// Scale the graph by `factor`, keeping the point `at` names fixed.
+    ///
+    /// `factor` is clamped to [`GRAPH_ZOOM_FACTOR`]'s range first: a huge
+    /// count makes it overflow to `inf` (or `0`), which formats into the
+    /// script as something JavaScript cannot parse.
     fn graph_zoom(&self, factor: f64, at: GraphZoomAt) {
+        let factor = factor.clamp(1.0 / GRAPH_ZOOM_FACTOR, GRAPH_ZOOM_FACTOR);
         let at = match at {
             GraphZoomAt::Pointer => "'pointer'",
             GraphZoomAt::Selection => "'selection'",

@@ -100,6 +100,15 @@ impl ItemKey {
     fn node(&self) -> Option<usize> {
         self.0.last().copied()
     }
+
+    /// Whether the item's own node is also one of its ancestors': the item
+    /// closes a cycle (a self-link is the shortest).
+    fn closes_cycle(&self) -> bool {
+        match self.0.split_last() {
+            Some((node, ancestors)) => ancestors.contains(node),
+            None => false,
+        }
+    }
 }
 
 impl fmt::Display for ItemKey {
@@ -340,6 +349,36 @@ impl Scene {
     }
 }
 
+/// The key of `node`'s place in the spanning tree, with the folds that hide it
+/// opened in `folds`. The place is an item in both views: the tree view draws
+/// the node there, and the links view shows every tree edge as a link. A view
+/// switch uses it to keep a selection the new view had folded away.
+pub fn reveal(graph: &Graph, node: usize, folds: &mut Folds) -> ItemKey {
+    let route = graph.route();
+    // Up the tree to the nearest route node: the root is one, so this ends.
+    let mut chain = Vec::new();
+    let mut at = node;
+    let step = loop {
+        if let Some(step) = route.iter().position(|&r| r == at) {
+            break step;
+        }
+        chain.push(at);
+        at = graph
+            .node(at)
+            .parent
+            .expect("only the root has no parent, and it is on the route")
+            .index;
+    };
+    // A route item shows the next route step whatever its fold; its other
+    // children, and everything below it, need their parents unfolded.
+    let mut key = ItemKey(route[..=step].to_vec());
+    for &n in chain.iter().rev() {
+        folds.insert(key.clone(), Fold::Unfolded);
+        key = key.child(n);
+    }
+    key
+}
+
 // ---------------------------------------------------------------------------
 // The displayed tree
 // ---------------------------------------------------------------------------
@@ -486,10 +525,18 @@ impl Builder<'_> {
         blocks
     }
 
-    /// A node off the route, with its children when it is unfolded.
+    /// A node off the route, with its children when it is unfolded. An
+    /// occurrence that closes a cycle is a leaf: its children are already on
+    /// screen above it, and unfolding it could repeat the cycle forever. So a
+    /// branch never holds a node twice, and its depth is bounded by the node
+    /// count.
     fn node(&mut self, parent: usize, key: ItemKey, node: usize) -> usize {
         let at = self.push(key.clone(), node, Some(parent), EdgeKind::Link);
-        let kids = self.child_nodes(node, None);
+        let kids = if key.closes_cycle() {
+            Vec::new()
+        } else {
+            self.child_nodes(node, None)
+        };
         if self.fold(at, &kids, self.view.default_fold()) {
             for k in kids {
                 self.node(at, key.child(k), k);
@@ -904,10 +951,26 @@ mod tests {
                 links.item(i).key
             );
         }
-        // A tree node the links view keeps folded away falls back to the
-        // folded node that hides it: x3 is under x1.
+        // A tree node the links view keeps folded away is revealed: x1, which
+        // hides x3, unfolds, and x3 is the same item in both views.
         let x3 = one(&tree, &g, "x3");
-        assert_eq!(links.find(&tree.item(x3).key), one(&links, &g, "x1"));
+        let mut folds = Folds::new();
+        let key = reveal(&g, tree.item(x3).node, &mut folds);
+        assert_eq!(key, tree.item(x3).key);
+        let revealed = Scene::new(&g, View::Links, &folds);
+        assert_eq!(
+            titles(&revealed, &g, &[revealed.find(&key)]),
+            ["x3"],
+            "revealed, not replaced by the node that hid it"
+        );
+        assert_eq!(revealed.exact(&key), Some(revealed.find(&key)));
+        // A route node needs nothing unfolded.
+        let mut untouched = Folds::new();
+        assert_eq!(
+            reveal(&g, g.current(), &mut untouched),
+            links.item(links.current()).key
+        );
+        assert!(untouched.is_empty());
         for i in links.spine() {
             assert_eq!(tree.find(&links.item(i).key), i);
         }
@@ -929,6 +992,45 @@ mod tests {
         assert_eq!(s.step(at("d"), Step::Parent), s.current());
         assert_eq!(s.step(0, Step::Parent), 0);
         assert_eq!(s.step(s.current(), Step::Child), at("d"));
+    }
+
+    #[test]
+    fn an_occurrence_that_closes_a_cycle_is_a_leaf() {
+        // a ⇄ b, and c links itself: unfolding everything, again and again,
+        // ends — no branch holds a node twice.
+        let read = table(&[("a", &["b", "c"]), ("b", &["a"]), ("c", &["c", "b"])]);
+        let g = build(&[p("a")], NODE_BUDGET, read).unwrap();
+        let mut folds = Folds::new();
+        let mut scene = Scene::new(&g, View::Links, &folds);
+        for _ in 0..g.nodes().len() + 2 {
+            for it in scene.items() {
+                folds.insert(it.key.clone(), Fold::Unfolded);
+            }
+            scene = Scene::new(&g, View::Links, &folds);
+        }
+        for it in scene.items() {
+            let path: Vec<usize> = it
+                .key
+                .to_string()
+                .split('.')
+                .map(|n| n.parse().unwrap())
+                .collect();
+            assert!(path.len() <= g.nodes().len() + 1, "{} is too deep", it.key);
+            if it.key.closes_cycle() {
+                assert_eq!(it.handle, Handle::None, "{} closes a cycle", it.key);
+            }
+        }
+        // c → c and c → b → a: the self-link and the way back are leaves.
+        let c = at(&scene, &g, "c")[0];
+        let kids = titles(&scene, &g, scene.children(c));
+        assert_eq!(kids, ["c", "b"]);
+        let self_link = scene.children(c)[0];
+        assert_eq!(scene.item(self_link).handle, Handle::None);
+        assert_eq!(
+            scene.step(self_link, Step::Child),
+            self_link,
+            "l cannot advance"
+        );
     }
 
     #[test]

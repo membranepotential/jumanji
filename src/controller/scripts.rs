@@ -58,14 +58,18 @@ pub mod message {
     /// gesture. See `Controller::on_wheel_zoom`.
     pub const DIAGRAM_HOVER: &str = "diagramhover";
     /// A click on a document-graph item (DESIGN D14), or on a route node in
-    /// the panel's breadcrumb — the payload is the item's key (`0.4.b`, see
+    /// the panel's breadcrumb — the payload is the graph's generation and the
+    /// item's key, space-separated (`3 0.4.17`; the key is
     /// `core::graph::ItemKey`). A key, not an index: indices change with every
-    /// re-layout, and a click can land after one it never saw.
+    /// re-layout, and a click can land after one it never saw. The generation
+    /// names the walk the overlay was drawn for: keys repeat across walks, and
+    /// a post from a closed overlay must not reach a newer graph.
     pub const GRAPH_SELECT: &str = "graphselect";
-    /// A double-click on a document-graph item — the payload is its key.
+    /// A double-click on a document-graph item — the payload is as for
+    /// [`GRAPH_SELECT`].
     pub const GRAPH_OPEN: &str = "graphopen";
     /// A click on a node's fold handle (`+n` / `−`): select it and flip its
-    /// fold — the payload is its key.
+    /// fold — the payload is as for [`GRAPH_SELECT`].
     pub const GRAPH_FOLD: &str = "graphfold";
 }
 
@@ -813,13 +817,16 @@ const GRAPH_JS: &str = include_str!("assets/graph.js");
 const GRAPH_CSS: &str = include_str!("assets/graph.css");
 
 /// Draw the document graph over the page: `svg` from `core::graph`, with item
-/// `selected` selected and centred.
-pub fn graph_show_js(svg: &str, selected: usize) -> String {
+/// `selected` selected and centred. Its posts carry `generation` before the
+/// item key (`"<generation> <key>"`), so the controller can tell them from an
+/// earlier overlay's.
+pub fn graph_show_js(svg: &str, selected: usize, generation: u64) -> String {
+    let payload = format!("'{generation} ' + key");
     let post = format!(
         "{{select: key => {{ {} }}, open: key => {{ {} }}, fold: key => {{ {} }}}}",
-        post_call(message::GRAPH_SELECT, "key"),
-        post_call(message::GRAPH_OPEN, "key"),
-        post_call(message::GRAPH_FOLD, "key"),
+        post_call(message::GRAPH_SELECT, &payload),
+        post_call(message::GRAPH_OPEN, &payload),
+        post_call(message::GRAPH_FOLD, &payload),
     );
     format!(
         "({GRAPH_JS})({svg}, {css}, {selected}, {post});",

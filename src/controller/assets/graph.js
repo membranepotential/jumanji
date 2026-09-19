@@ -5,8 +5,9 @@
 // clicks. The controller owns the selection, the folds and the layout: a click
 // on a pill calls `post.select(key)`, a click on a fold handle
 // `post.fold(key)`, a double-click `post.open(key)` (all built in `scripts.rs`
-// over the shell's post seam; an item's key survives re-layouts, its index
-// does not), and the controller answers through `window.__jmnj_graph.select(i)`,
+// over the shell's post seam, which stamp each post with the walk's
+// generation; an item's key survives re-layouts, its index does not), and the
+// controller answers through `window.__jmnj_graph.select(i)`,
 // or `update(svg, i, anchor)` after a re-layout.
 //
 // Called as `(GRAPH_JS)(svgMarkup, css, selected, post)`.

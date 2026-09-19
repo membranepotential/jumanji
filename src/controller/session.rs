@@ -66,24 +66,55 @@ enum Input {
     },
 }
 
+/// Where the document's load stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Load {
+    /// The document's first load has not finished: nothing is driveable yet.
+    Pending,
+    /// The document is on screen and a load replacing it (a live reload, a
+    /// re-render) is in flight: the page is about to go, and anything drawn
+    /// into it with it.
+    Replacing,
+    /// On screen, with nothing in flight.
+    Done,
+}
+
 /// The document graph's lifecycle (DESIGN D14). The walk runs on a worker, so
 /// there is a state between asking and seeing. A landing is drawn only if it
 /// finds the state still [`Building`](Self::Building) *with its own
-/// generation*: `Esc`, a document load, or a later `t` that started a newer
-/// walk all make it stale.
+/// generation*: `Esc`, a document load, link hints or the input bar started
+/// meanwhile, or a later `t` that started a newer walk all make it stale.
 enum GraphState {
     Closed,
     Building(u64),
     /// On screen. `Mode::Graph` is set exactly while the graph is open.
-    Open(OpenGraph),
+    Open(Box<OpenGraph>),
+}
+
+/// What the worker's walk hands back ([`build_graph`]).
+struct BuiltGraph {
+    /// Node paths are canonical: a document reached by two spellings is one
+    /// node.
+    graph: Graph,
+    /// What paths display relative to: the vault root.
+    base: PathBuf,
+    /// Per node, the path the reader opens it by — the trail's spelling, else
+    /// the first link's that reached it. Not the canonical path: a symlink's
+    /// relative links resolve against the link's directory, and the reading
+    /// position (history) is saved under the reader's spelling.
+    open_paths: Vec<PathBuf>,
 }
 
 /// The graph on screen: the walk, and the scene derived from it for the
 /// session's [`View`](graph::View) and the reader's folds.
 struct OpenGraph {
     graph: Graph,
-    /// What paths display relative to: the vault root.
     base: PathBuf,
+    open_paths: Vec<PathBuf>,
+    /// The walk this graph came from. The overlay stamps its posts with it,
+    /// so a post from an overlay since closed never reaches a newer graph,
+    /// whose item keys may mean other items.
+    generation: u64,
     folds: Folds,
     scene: Scene,
     /// An item index into `scene`.
@@ -91,25 +122,49 @@ struct OpenGraph {
 }
 
 impl OpenGraph {
-    fn new(graph: Graph, base: PathBuf, view: View) -> Self {
+    fn new(built: BuiltGraph, generation: u64, view: View) -> Self {
         let folds = Folds::new();
-        let scene = Scene::new(&graph, view, &folds);
+        let scene = Scene::new(&built.graph, view, &folds);
         let selected = scene.current();
         Self {
-            graph,
-            base,
+            graph: built.graph,
+            base: built.base,
+            open_paths: built.open_paths,
+            generation,
             folds,
             scene,
             selected,
         }
     }
 
-    /// Lay the scene out again (a fold or the view changed), keeping the
-    /// selection on the same item — or its nearest stand-in.
-    fn relayout(&mut self, view: View) {
+    /// Lay the scene out again after a fold, keeping the selection on the
+    /// same item — or, when the fold hid it, the node that hides it.
+    fn relayout(&mut self) {
         let key = self.scene.item(self.selected).key.clone();
-        self.scene = Scene::new(&self.graph, view, &self.folds);
+        self.scene = Scene::new(&self.graph, self.scene.view(), &self.folds);
         self.selected = self.scene.find(&key);
+    }
+
+    /// Lay the scene out for `view`. The selection stays on its document
+    /// (docs/graph/interaction.md, "Switch view"): the same item if the new
+    /// view shows it, else another item of the same node, else the node's
+    /// place in the tree, unfolded to be seen.
+    fn switch(&mut self, view: View) {
+        let item = self.scene.item(self.selected);
+        let (key, node) = (item.key.clone(), item.node);
+        self.scene = Scene::new(&self.graph, view, &self.folds);
+        let shown = self
+            .scene
+            .exact(&key)
+            .or_else(|| self.scene.items().iter().position(|it| it.node == node));
+        self.selected = match shown {
+            Some(at) => at,
+            None => {
+                let key = graph::reveal(&self.graph, node, &mut self.folds);
+                self.scene = Scene::new(&self.graph, view, &self.folds);
+                self.scene.find(&key)
+            }
+        };
     }
 
     /// Select item `index` and flip its fold; whether it had one to flip.
@@ -119,7 +174,7 @@ impl OpenGraph {
             return false;
         };
         self.folds.insert(key, fold);
-        self.relayout(self.scene.view());
+        self.relayout();
         true
     }
 
@@ -276,10 +331,13 @@ struct Session<T: Toolkit> {
     /// routing input, so a stale value costs at worst one tick going to the
     /// wrong target, never correctness.
     hovered_diagram: Option<usize>,
-    /// Whether the initial load has finished. Key/automation actions are no-ops
-    /// before this; the D-Bus `loaded` flag lets clients (tests, editor
-    /// integrations) wait for a driveable window.
-    loaded: bool,
+    /// Whether the document's first load has finished, and whether a load
+    /// replacing it is in flight. Automation is a no-op until the first load
+    /// finishes; the D-Bus `loaded` flag (anything but
+    /// [`Load::Pending`]) lets clients (tests, editor integrations) wait for
+    /// a driveable window. The graph waits for [`Load::Done`]: an overlay
+    /// drawn during a reload would go with the page it was drawn into.
+    load: Load,
     /// Last observed scroll offset, refreshed on every status update. Read
     /// synchronously on window-close to flush history without an async query.
     last_scroll: f64,
@@ -478,7 +536,7 @@ impl<T: Toolkit + 'static> Controller<T> {
             wide: options.wide,
             diagram_fit: options.diagram_fit,
             hovered_diagram: None,
-            loaded: false,
+            load: Load::Pending,
             last_scroll: 0.0,
             input: Input::None,
             graph: GraphState::Closed,
@@ -601,6 +659,7 @@ impl<T: Toolkit + 'static> Controller<T> {
             // Graph posts name an item by key, not index: a click can arrive
             // after a re-layout it did not see, and a key that no longer
             // names an item is dropped rather than applied to another one.
+            // A post from an earlier graph's overlay is dropped likewise.
             message::GRAPH_SELECT => {
                 if let Some(index) = self.graph_item(payload) {
                     self.graph_select(index);
@@ -779,6 +838,9 @@ impl<T: Toolkit + 'static> Controller<T> {
                 let font_size_px = (s.text_zoom != 1.0).then(|| s.font_base_px * s.text_zoom);
                 let at = s.pending_position.clone();
                 s.view.load_document(&doc, &path, &at, dark, font_size_px);
+                if s.load == Load::Done {
+                    s.load = Load::Replacing;
+                }
             }
             Err(msg) => {
                 // No load will finish, so nothing would ever consume the armed
@@ -819,7 +881,7 @@ impl<T: Toolkit + 'static> Controller<T> {
             // native zoom level is a view property that survives a document
             // reload (verified by the live-reload e2e).
             s.pending_position = InitialPosition::Top;
-            s.loaded = true;
+            s.load = Load::Done;
         }
         self.refresh_status();
     }
@@ -865,9 +927,14 @@ impl<T: Toolkit + 'static> Controller<T> {
             return KeyOutcome::PassThrough;
         }
 
-        // 4) Normal / TOC dispatch through the matcher.
+        // 4) Normal / TOC / graph dispatch through the matcher. A key with no
+        //    text (an arrow, PageDown) binds nothing; over the graph it must
+        //    not scroll the document behind it either.
         let Some(kp) = key else {
-            return KeyOutcome::PassThrough;
+            return match self.0.borrow().mode {
+                Mode::Graph => KeyOutcome::Consumed,
+                Mode::Normal | Mode::Toc => KeyOutcome::PassThrough,
+            };
         };
         let result = {
             let s = &mut *self.0.borrow_mut();
@@ -1009,6 +1076,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 {
                     let s = self.0.borrow();
                     s.chrome.close_input();
+                    s.show_resting_status();
                     s.view.focus();
                 }
                 self.0.borrow_mut().completion = None;
@@ -1024,6 +1092,9 @@ impl<T: Toolkit + 'static> Controller<T> {
                 {
                     let s = self.0.borrow();
                     s.chrome.close_input();
+                    // Completion echoes into the status line; the command may
+                    // set its own message below.
+                    s.show_resting_status();
                     s.view.focus();
                 }
                 self.0.borrow_mut().completion = None;
@@ -1136,7 +1207,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.text_zoom,
                 s.section,
                 s.toc.len(),
-                s.loaded,
+                s.load != Load::Pending,
                 s.mode_str().to_string(),
                 s.vault.index().file_count(),
                 s.graph_state(),
@@ -1174,9 +1245,16 @@ impl<T: Toolkit + 'static> Controller<T> {
     /// Forward editor sync (DESIGN D7): scroll to the element nearest at-or-before
     /// source `line`, recording the departure position on the jumplist first (like
     /// every other jump). A no-op until the document has loaded.
+    ///
+    /// The editor's request is explicit navigation, so a graph over the page
+    /// closes first, as it does for a document load.
     pub fn goto_source_line(&self, line: u32) {
-        if !self.0.borrow().loaded {
-            return;
+        {
+            let mut s = self.0.borrow_mut();
+            if s.load == Load::Pending {
+                return;
+            }
+            s.close_graph();
         }
         self.jump_to(move |s| s.view.goto_source_line(line));
     }
@@ -1297,7 +1375,8 @@ impl<T: Toolkit + 'static> Controller<T> {
             // In graph mode the zoom keys zoom what is on screen: the graph,
             // about the viewport centre, never the page behind it (D14).
             Action::ZoomIn | Action::ZoomOut if s.mode == Mode::Graph => {
-                let step = (1.0 + s.zoom_step).powi(count_i as i32);
+                let steps = i32::try_from(count).unwrap_or(i32::MAX);
+                let step = (1.0 + s.zoom_step).powi(steps);
                 let factor = if action == Action::ZoomIn {
                     step
                 } else {
@@ -1340,7 +1419,10 @@ impl<T: Toolkit + 'static> Controller<T> {
                 // fighting over the combined reflow).
                 s.view.reset_zoom(base);
             }
-            Action::SearchStart => s.chrome.open_input(Prompt::Search),
+            Action::SearchStart => {
+                s.drop_graph_walk();
+                s.chrome.open_input(Prompt::Search);
+            }
             Action::SearchNext => s.view.find_next(),
             Action::SearchPrevious => s.view.find_previous(),
             Action::Recolor => {
@@ -1391,7 +1473,10 @@ impl<T: Toolkit + 'static> Controller<T> {
                 drop(s);
                 self.toggle_toc();
             }
-            Action::CommandLine => s.chrome.open_input(Prompt::Command),
+            Action::CommandLine => {
+                s.drop_graph_walk();
+                s.chrome.open_input(Prompt::Command);
+            }
             Action::FollowLink => {
                 drop(s);
                 self.start_hints(HintKind::Follow);
@@ -1506,6 +1591,14 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.graph_view = s.graph_view.toggled();
                 s.relayout_graph();
             }
+            // Esc closes the innermost layer: a prompt opened over the graph
+            // closes alone, and the next Esc closes the graph.
+            Action::Abort if s.mode != Mode::Normal && s.chrome.prompt().is_some() => {
+                s.chrome.close_input();
+                s.view.focus();
+                s.completion = None;
+                s.show_resting_status();
+            }
             Action::Abort => {
                 // Read the mode *before* resetting it: leaving the TOC page is
                 // decided by the mode the abort interrupted, not the one it is
@@ -1593,7 +1686,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.mode = Mode::Toc;
                 s.matcher.set_mode(Mode::Toc);
                 s.chrome.show_toc(&toc, section, dark);
-                s.chrome.set_message("Index");
+                s.show_resting_status();
             }
         }
         self.refresh_status();
@@ -1642,9 +1735,9 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.chrome.set_message("no document graph for standard input");
                 return;
             }
-            // Until the load finishes, an overlay would be drawn into the
-            // page being replaced.
-            if !s.loaded {
+            // Until a load finishes, an overlay would be drawn into the page
+            // it replaces — or be replaced with it.
+            if s.load != Load::Done {
                 return;
             }
             let trail: Vec<PathBuf> = s
@@ -1679,48 +1772,64 @@ impl<T: Toolkit + 'static> Controller<T> {
 
     /// The walk landed. Dropped unless this walk is still the one wanted (see
     /// [`GraphState`]), and — since the graph takes over the keys — unless the
-    /// reader is still in Normal mode: a TOC or input bar opened meanwhile wins.
-    fn on_graph_built(&self, generation: u64, built: Option<(Graph, PathBuf)>) {
+    /// reader is still in Normal mode with no other interaction taking the
+    /// keys: a TOC, input bar or link hints opened meanwhile win.
+    ///
+    /// A `Ctrl`+wheel page zoom still waiting for its coalescing window goes
+    /// out first: the graph covers the page, so applied later it would scale
+    /// the page — and the overlay in it — under the graph.
+    fn on_graph_built(&self, generation: u64, built: Option<BuiltGraph>) {
+        self.flush_wheel_zoom();
         self.show_built_graph(generation, built);
         self.refresh_status();
     }
 
-    fn show_built_graph(&self, generation: u64, built: Option<(Graph, PathBuf)>) {
+    fn show_built_graph(&self, generation: u64, built: Option<BuiltGraph>) {
         let s = &mut *self.0.borrow_mut();
         if !matches!(s.graph, GraphState::Building(g) if g == generation) {
             return;
         }
-        if s.mode != Mode::Normal || s.chrome.prompt().is_some() {
+        if s.mode != Mode::Normal || s.chrome.prompt().is_some() || !matches!(s.input, Input::None)
+        {
             s.graph = GraphState::Closed;
             return;
         }
-        let Some((graph, base)) = built else {
+        let Some(built) = built else {
             s.graph = GraphState::Closed;
             s.chrome.set_message("cannot read the document graph");
             return;
         };
-        let open = OpenGraph::new(graph, base, s.graph_view);
-        s.view.show_graph(&open.svg(), open.selected);
+        let open = OpenGraph::new(built, generation, s.graph_view);
+        s.view.show_graph(&open.svg(), open.selected, generation);
         s.mode = Mode::Graph;
         s.matcher.set_mode(Mode::Graph);
-        s.graph = GraphState::Open(open);
+        s.graph = GraphState::Open(Box::new(open));
         s.show_graph_view();
     }
 
-    /// Move the selection `count` steps up or down its column.
+    /// Move the selection `count` steps: up or down its column, or to the
+    /// parent. Stops where a step goes nowhere, so a count of any size costs
+    /// at most one step per item.
     fn graph_step(&self, step: Step, count: u32) {
         let s = &mut *self.0.borrow_mut();
         let GraphState::Open(open) = &mut s.graph else {
             return;
         };
-        let scene = &open.scene;
-        open.selected = (0..count.max(1)).fold(open.selected, |at, _| scene.step(at, step));
+        for _ in 0..count.max(1) {
+            let next = open.scene.step(open.selected, step);
+            if next == open.selected {
+                break;
+            }
+            open.selected = next;
+        }
         s.view.graph_select(open.selected);
     }
 
     /// `l`, `count` times: select the child — the route step first — and on a
     /// folded node unfold it first (docs/graph/interaction.md, "Enter a
-    /// folded node"). The node entered keeps its place on screen.
+    /// folded node"). The node entered keeps its place on screen. Stops at a
+    /// node with no children: a branch holds no node twice (`core::graph`),
+    /// so any count ends within the node count.
     fn graph_enter(&self, count: u32) {
         let s = &mut *self.0.borrow_mut();
         let GraphState::Open(open) = &mut s.graph else {
@@ -1733,7 +1842,11 @@ impl<T: Toolkit + 'static> Controller<T> {
                 open.toggle(at);
                 anchor = Some(open.scene.item(open.selected).key.clone());
             }
-            open.selected = open.scene.step(open.selected, Step::Child);
+            let next = open.scene.step(open.selected, Step::Child);
+            if next == open.selected {
+                break;
+            }
+            open.selected = next;
         }
         match anchor {
             Some(key) => {
@@ -1761,12 +1874,16 @@ impl<T: Toolkit + 'static> Controller<T> {
         }
     }
 
-    /// The open graph's item whose key the page posted, if it is on screen.
-    fn graph_item(&self, key: &str) -> Option<usize> {
+    /// The open graph's item a post names (`"<generation> <key>"`, see
+    /// [`message::GRAPH_SELECT`]), if the post came from this graph's overlay
+    /// and the item is on screen.
+    fn graph_item(&self, payload: &str) -> Option<usize> {
+        let (generation, key) = payload.split_once(' ')?;
+        let generation = generation.parse::<u64>().ok()?;
         let key = key.parse::<ItemKey>().ok()?;
         match &self.0.borrow().graph {
-            GraphState::Open(open) => open.scene.exact(&key),
-            GraphState::Closed | GraphState::Building(_) => None,
+            GraphState::Open(open) if open.generation == generation => open.scene.exact(&key),
+            GraphState::Open(_) | GraphState::Closed | GraphState::Building(_) => None,
         }
     }
 
@@ -1797,7 +1914,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 return;
             }
             let node = open.scene.item(at).node;
-            (node != open.graph.current()).then(|| open.graph.node(node).path.clone())
+            (node != open.graph.current()).then(|| open.open_paths[node].clone())
         };
         self.0.borrow_mut().close_graph();
         if let Some(path) = path {
@@ -1815,6 +1932,7 @@ impl<T: Toolkit + 'static> Controller<T> {
         if s.mode != Mode::Normal {
             return;
         }
+        s.drop_graph_walk();
         s.input = Input::Hint {
             kind,
             typed: String::new(),
@@ -1969,7 +2087,7 @@ impl<T: Toolkit + 'static> Controller<T> {
         }
 
         // Local markdown file → open it in this window.
-        if let Some(path) = file_uri_to_path(&base) {
+        if let Some(path) = obsidian::file_uri_to_path(&base) {
             let is_md = path
                 .extension()
                 .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
@@ -2083,7 +2201,7 @@ impl<T: Toolkit + 'static> Controller<T> {
             // jumplist persists (it spans documents — see the fn doc).
             s.marks = Marks::new();
             s.section = 0;
-            s.loaded = false;
+            s.load = Load::Pending;
             // Zoom carries over untouched (see the fn doc). Geometric zoom needs no
             // call at all — the native zoom level is a view property that survives a
             // document load — and `s.text_zoom` is left as-is so
@@ -2324,6 +2442,15 @@ impl<T: Toolkit> Session<T> {
         }
     }
 
+    /// Drop a graph walk still in flight, leaving an open graph alone: an
+    /// interaction that takes the keys (link hints, the input bar) started
+    /// after `t`, and the graph landing must not cover it.
+    fn drop_graph_walk(&mut self) {
+        if matches!(self.graph, GraphState::Building(_)) {
+            self.close_graph();
+        }
+    }
+
     /// Close the document graph, or drop a walk still in flight, and return to
     /// Normal mode. A no-op when the graph is closed.
     fn close_graph(&mut self) {
@@ -2343,7 +2470,7 @@ impl<T: Toolkit> Session<T> {
     /// kept on the selected item. A no-op when the graph is not open.
     fn relayout_graph(&mut self) {
         if let GraphState::Open(open) = &mut self.graph {
-            open.relayout(self.graph_view);
+            open.switch(self.graph_view);
             self.view
                 .graph_update(&open.svg(), open.selected, open.selected);
             self.show_graph_view();
@@ -2354,6 +2481,17 @@ impl<T: Toolkit> Session<T> {
     fn show_graph_view(&self) {
         self.chrome
             .set_message(&format!("Graph: {}", self.graph_view.name()));
+    }
+
+    /// Put the status line back to what the mode shows at rest — the graph's
+    /// view, the TOC's title, else the trail — after something transient (the
+    /// input bar's completion echo) wrote over it.
+    fn show_resting_status(&self) {
+        match self.mode {
+            Mode::Graph => self.show_graph_view(),
+            Mode::Toc => self.chrome.set_message("Index"),
+            Mode::Normal => self.show_trail(),
+        }
     }
 
     /// Return to the content page and Normal mode.
@@ -2418,24 +2556,62 @@ impl<T: Toolkit> Session<T> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// The worker half of the document graph: walk from the trail's root, with
-/// the base paths display against. Paths are canonicalised here so a document
-/// reached by two spellings (`./a.md`, `sub/../a.md`, a symlink) is one node.
-fn build_graph(trail: &[PathBuf], index: &VaultIndex, base: &Path) -> Option<(Graph, PathBuf)> {
+/// The worker half of the document graph: walk from the trail's root.
+///
+/// A node is a document, however it was spelled: node paths are canonical,
+/// so `./a.md`, `sub/../a.md` and a symlink to it are one node. A document is
+/// read — and later opened — by the spelling the reader uses for it: the
+/// trail's latest (the page on screen), else the first link's that reached
+/// it (`graph::scan` spells links as the reader resolves them). So a
+/// symlink's relative links resolve
+/// against the symlink's directory, as they do on the page, and opening a
+/// node finds the reading position saved under the reader's spelling.
+///
+/// A trail document that is gone (deleted or renamed while being read) keeps
+/// its place on the route under its own spelling, as a node without links.
+fn build_graph(trail: &[PathBuf], index: &VaultIndex, base: &Path) -> Option<BuiltGraph> {
+    let mut spellings: std::collections::HashMap<PathBuf, PathBuf> = Default::default();
     let trail: Vec<PathBuf> = trail
         .iter()
-        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .map(|spelling| {
+            let node = std::fs::canonicalize(spelling).unwrap_or_else(|_| spelling.clone());
+            // The latest spelling wins: the trail ends at the page on screen.
+            spellings.insert(node.clone(), spelling.clone());
+            node
+        })
         .collect();
-    let graph = graph::build(&trail, graph::NODE_BUDGET, |path| {
-        read_document(path, index)
+    let graph = graph::build(&trail, graph::NODE_BUDGET, |node| {
+        let mut scan = read_document(&spellings[node], index);
+        let mut seen = std::collections::HashSet::new();
+        scan.links = scan
+            .links
+            .into_iter()
+            .filter_map(|spelling| {
+                let link = std::fs::canonicalize(&spelling)
+                    .ok()
+                    .filter(|link| link.is_file() && seen.insert(link.clone()))?;
+                spellings.entry(link.clone()).or_insert(spelling);
+                Some(link)
+            })
+            .collect();
+        scan
     })?;
+    let open_paths = graph
+        .nodes()
+        .iter()
+        .map(|node| spellings[&node.path].clone())
+        .collect();
     let base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
-    Some((graph, base))
+    Some(BuiltGraph {
+        graph,
+        base,
+        open_paths,
+    })
 }
 
 /// One document for the graph walk: its head (at most [`graph::READ_CAP`]
-/// bytes) scanned, its links canonicalised, missing targets dropped. An
-/// unreadable document is a node without links, not an error.
+/// bytes) scanned, its links as the reader spells them. An unreadable
+/// document is a node without links, not an error.
 fn read_document(path: &Path, index: &VaultIndex) -> graph::Scan {
     use std::io::Read;
     let mut bytes = Vec::new();
@@ -2444,15 +2620,7 @@ fn read_document(path: &Path, index: &VaultIndex) -> graph::Scan {
     if read.is_err() {
         return graph::Scan::default();
     }
-    let mut scan = graph::scan(&String::from_utf8_lossy(&bytes), path, index);
-    let mut seen = std::collections::HashSet::new();
-    scan.links = scan
-        .links
-        .into_iter()
-        .filter_map(|link| std::fs::canonicalize(link).ok())
-        .filter(|link| link.is_file() && seen.insert(link.clone()))
-        .collect();
-    scan
+    graph::scan(&String::from_utf8_lossy(&bytes), path, index)
 }
 
 fn hint_prompt(kind: HintKind) -> &'static str {
@@ -2474,26 +2642,6 @@ fn parse_hints(msg: &str) -> Vec<HintLink> {
         .collect()
 }
 
-/// Convert a `file://` URI to a filesystem path; `None` for other schemes.
-///
-/// Decoded here rather than through a toolkit URI type (gio's `File::for_uri`,
-/// `NSURL`) because this layer has no toolkit: a `file://` URI is a percent-
-/// encoded path and nothing else, and [`obsidian::percent_decode`] is the same
-/// decoder the link fragments already go through.
-fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    // `file://host/p` carries an authority before the path; `file:///p` an
-    // empty one. Drop it either way, as gio's `File::for_uri(..).path()` did —
-    // a file URI names a local path, and the host (normally `localhost` or
-    // nothing) adds no information the reader could act on.
-    let path = match rest.find('/') {
-        Some(0) => rest,
-        Some(slash) => &rest[slash..],
-        None => return None,
-    };
-    Some(PathBuf::from(obsidian::percent_decode(path)))
-}
-
 /// Whether `base` (a fragment-less URI) names the document already open.
 ///
 /// Compared as **paths**, never as URI strings: an engine and
@@ -2505,7 +2653,7 @@ fn same_document(current: &Path, base: &str) -> bool {
     if base.is_empty() {
         return true;
     }
-    match file_uri_to_path(base) {
+    match obsidian::file_uri_to_path(base) {
         Some(path) => canonical(&path) == canonical(current),
         None => false,
     }
@@ -2831,49 +2979,6 @@ fn zoom_indicator(geometric: f64, text: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn file_uris_decode_to_paths() {
-        assert_eq!(
-            file_uri_to_path("file:///home/u/notes/a.md"),
-            Some(PathBuf::from("/home/u/notes/a.md"))
-        );
-        // Percent-encoding is undone: a space, and the `^` a block id carries.
-        assert_eq!(
-            file_uri_to_path("file:///home/u/my%20notes/b%5Ec.md"),
-            Some(PathBuf::from("/home/u/my notes/b^c.md"))
-        );
-        // A stray `%` that starts no valid escape is left alone. (gio, which
-        // this replaced, rejected the whole URI instead and such a link fell
-        // through to the system handler; opening it in-window is the better
-        // reading of a link to a file that really is called `100%.md`.)
-        assert_eq!(
-            file_uri_to_path("file:///tmp/100%.md"),
-            Some(PathBuf::from("/tmp/100%.md"))
-        );
-    }
-
-    #[test]
-    fn a_file_uri_authority_is_dropped() {
-        // Both spellings name the same local file, as they did under gio.
-        assert_eq!(
-            file_uri_to_path("file://localhost/tmp/a.md"),
-            Some(PathBuf::from("/tmp/a.md"))
-        );
-        assert_eq!(
-            file_uri_to_path("file://otherhost/tmp/a.md"),
-            Some(PathBuf::from("/tmp/a.md"))
-        );
-        // An authority with no path names nothing.
-        assert_eq!(file_uri_to_path("file://localhost"), None);
-    }
-
-    #[test]
-    fn non_file_uris_have_no_path() {
-        assert_eq!(file_uri_to_path("https://example.com/a.md"), None);
-        assert_eq!(file_uri_to_path("mailto:a@b.c"), None);
-        assert_eq!(file_uri_to_path("/home/u/a.md"), None);
-    }
 
     #[test]
     fn zoom_indicator_is_empty_at_one_hundred_percent() {

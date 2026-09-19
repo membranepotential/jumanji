@@ -296,6 +296,12 @@ impl Reader {
         json.expect("the state snapshot was delivered")
     }
 
+    /// Post `key` under `name` from the overlay of the session's first graph
+    /// walk — generation 1 — as the overlay's own click handlers do.
+    fn graph_post(&self, name: &str, key: &str) {
+        self.message(name, &format!("1 {key}"));
+    }
+
     /// Post the overlay's label→href list, as the in-page hint script does.
     fn post_hints(&self, links: &[(&str, String)]) {
         let payload = links
@@ -566,7 +572,7 @@ fn a_double_click_opens_the_node_it_names() {
     let r = with_graph();
     r.view.clear();
     // Posts name items by key: doc.md (node 0) → other.md (node 1).
-    r.message(message::GRAPH_OPEN, "0.1");
+    r.graph_post(message::GRAPH_OPEN, "0.1");
     assert_eq!(r.view.loads().len(), 1);
 }
 
@@ -574,9 +580,9 @@ fn a_double_click_opens_the_node_it_names() {
 fn a_click_on_a_node_out_of_range_is_ignored() {
     let r = with_graph();
     r.view.clear();
-    r.message(message::GRAPH_SELECT, "0.7");
-    r.message(message::GRAPH_OPEN, "0.7");
-    r.message(message::GRAPH_OPEN, "not a key");
+    r.graph_post(message::GRAPH_SELECT, "0.7");
+    r.graph_post(message::GRAPH_OPEN, "0.7");
+    r.graph_post(message::GRAPH_OPEN, "not a key");
     assert!(r.view.calls().is_empty());
 }
 
@@ -769,16 +775,16 @@ fn l_unfolds_a_folded_node_and_enters_it() {
 #[test]
 fn a_click_on_a_handle_toggles_that_node() {
     let r = with_siblings();
-    r.message(message::GRAPH_FOLD, "0.1");
+    r.graph_post(message::GRAPH_FOLD, "0.1");
     let (_, selected, items) = graph_state(&r);
     assert!(selected.ends_with("x.md"), "the clicked node is selected");
     assert_eq!(items, 5, "and unfolded");
-    r.message(message::GRAPH_FOLD, "0.1");
+    r.graph_post(message::GRAPH_FOLD, "0.1");
     assert_eq!(graph_state(&r).2, 4, "and folded again");
-    r.message(message::GRAPH_FOLD, "0.9");
+    r.graph_post(message::GRAPH_FOLD, "0.9");
     assert_eq!(graph_state(&r).2, 4, "an unknown key is ignored");
     // A node without links has no handle; its "click" does nothing.
-    r.message(message::GRAPH_FOLD, "0.3");
+    r.graph_post(message::GRAPH_FOLD, "0.3");
     assert_eq!(graph_state(&r).2, 4);
 }
 
@@ -797,17 +803,17 @@ fn enter_opens_a_sibling() {
 #[test]
 fn a_click_on_an_item_a_re_layout_removed_is_dropped() {
     let r = with_siblings();
-    r.message(message::GRAPH_FOLD, "0.1");
+    r.graph_post(message::GRAPH_FOLD, "0.1");
     // z.md (node 4, under x) is on screen; the page is told so.
-    r.message(message::GRAPH_SELECT, "0.1.4");
+    r.graph_post(message::GRAPH_SELECT, "0.1.4");
     assert!(graph_state(&r).1.ends_with("z.md"));
-    r.message(message::GRAPH_FOLD, "0.1");
+    r.graph_post(message::GRAPH_FOLD, "0.1");
     r.press('j');
     assert!(graph_state(&r).1.ends_with("other.md"));
     // A click on z.md posted before the fold landed arrives after it: it
     // names nothing now, and must select neither whatever took its index nor
     // a stand-in for it.
-    r.message(message::GRAPH_SELECT, "0.1.4");
+    r.graph_post(message::GRAPH_SELECT, "0.1.4");
     assert!(
         graph_state(&r).1.ends_with("other.md"),
         "the selection stays"
@@ -862,6 +868,290 @@ fn ctrl_wheel_zooms_the_graph_about_the_pages_own_pointer() {
             "the keys zoom about the selection"
         );
     }
+}
+
+/// A reader on doc.md with the graph open, where doc.md and other.md link
+/// each other and other.md also links itself: every branch of the links view
+/// is a cycle.
+fn with_cycles() -> Reader {
+    let r = Reader::open_with(DOC, |vault| {
+        std::fs::write(
+            vault.join("other.md"),
+            "# Other\n\n[back](doc.md) [self](other.md)\n",
+        )
+        .expect("write other");
+    });
+    r.finish_load();
+    r.press('t');
+    r.land_work();
+    r
+}
+
+#[test]
+fn a_huge_count_stops_where_the_graph_ends() {
+    // `u32::MAX` steps once hung the UI: the moves ran on past the last item,
+    // and `l` unfolded the cycle doc → other → doc → … without end.
+    let r = with_cycles();
+    for action in [
+        Action::GraphNext,
+        Action::GraphPrevious,
+        Action::GraphParent,
+        Action::GraphChild,
+    ] {
+        r.execute(action.clone(), u32::MAX);
+        assert_eq!(mode(&r), "graph", "{action:?}");
+    }
+    // `l` went doc → other and stopped at an occurrence that closes a cycle.
+    let (_, selected, items) = graph_state(&r);
+    assert!(
+        selected.ends_with("doc.md") || selected.ends_with("other.md"),
+        "{selected}"
+    );
+    assert!(items <= 4, "the displayed tree stays finite: {items} items");
+}
+
+#[test]
+fn hints_started_before_the_walk_lands_keep_the_keys() {
+    let r = Reader::loaded_with_sibling(DOC);
+    r.press('t');
+    r.press('f');
+    r.land_work();
+    assert!(!r.view.evaled(GRAPH_OVERLAY_ID), "the graph never lands");
+    assert_eq!(mode(&r), "hint");
+    assert_eq!(r.chrome.message(), "follow link:");
+}
+
+#[test]
+fn a_command_run_before_the_walk_lands_drops_it() {
+    let r = Reader::loaded_with_sibling(DOC);
+    r.press('t');
+    r.press(':');
+    r.submit_input("set scroll-step 50");
+    r.land_work();
+    assert!(!r.view.evaled(GRAPH_OVERLAY_ID));
+    assert_eq!(mode(&r), "normal");
+}
+
+#[test]
+fn a_key_without_text_does_not_reach_the_page_behind_the_graph() {
+    // An arrow or PageDown reaches the controller as `None`.
+    let r = with_graph();
+    assert_eq!(r.controller.on_key(None), KeyOutcome::Consumed);
+    r.press('t');
+    assert_eq!(r.controller.on_key(None), KeyOutcome::PassThrough);
+}
+
+/// A vault where doc.md links alias.md, a symlink to real/note.md, whose
+/// relative link `near.md` means vault/near.md on the page (resolved from the
+/// link's directory) and vault/real/near.md from the target's.
+fn with_symlink() -> Reader {
+    let r = Reader::open_with("# Doc\n\n[alias](alias.md)\n", |vault| {
+        std::fs::create_dir_all(vault.join("real")).expect("create real");
+        std::fs::write(vault.join("real/note.md"), "# Note\n\n[n](near.md)\n").expect("write note");
+        std::fs::write(vault.join("real/near.md"), "# Far\n").expect("write far");
+        std::fs::write(vault.join("near.md"), "# Near\n").expect("write near");
+        std::os::unix::fs::symlink(vault.join("real/note.md"), vault.join("alias.md"))
+            .expect("symlink");
+    });
+    r.finish_load();
+    r.press('t');
+    r.land_work();
+    r
+}
+
+#[test]
+fn a_symlinked_documents_links_resolve_from_the_link() {
+    let r = with_symlink();
+    // doc → alias, then `l` unfolds alias onto its one link.
+    r.press('l');
+    r.press('l');
+    assert!(r.view.evaled(r#"data-title="Near""#));
+    assert!(!r.view.evaled(r#"data-title="Far""#));
+}
+
+#[test]
+fn the_current_documents_links_resolve_from_the_spelling_on_screen() {
+    // The trail reaches note.md twice: first as real/note.md, last as the
+    // alias. The current page is the alias, so its `near.md` is vault/near.md.
+    let r = with_symlink();
+    r.press('t');
+    let vault = r.vault().to_path_buf();
+    for path in ["real/note.md", "doc.md", "alias.md"] {
+        r.navigate(&file_uri(&vault.join(path)));
+        r.finish_load();
+    }
+    r.press('t');
+    r.land_work();
+    assert!(r.view.evaled(r#"data-title="Near""#));
+    assert!(!r.view.evaled(r#"data-title="Far""#));
+}
+
+#[test]
+fn a_node_opens_by_the_readers_spelling() {
+    // The reading position is saved under the spelling the reader opened the
+    // document by; opening the canonical path would miss it.
+    let r = with_symlink();
+    r.press('l');
+    r.view.clear();
+    r.press_key(Key::Enter);
+    let loads = r.view.loads();
+    assert_eq!(loads.len(), 1);
+    assert_eq!(loads[0].1, r.vault().join("alias.md"));
+}
+
+#[test]
+fn a_deleted_document_keeps_its_place_on_the_route() {
+    let r = Reader::loaded_with_sibling(DOC);
+    r.navigate(&file_uri(&r.sibling()));
+    r.finish_load();
+    std::fs::remove_file(r.sibling()).expect("delete other.md");
+    r.press('t');
+    r.land_work();
+    let (_, selected, items) = graph_state(&r);
+    assert!(selected.ends_with("other.md"), "still current: {selected}");
+    assert_eq!(items, 2, "doc.md and other.md");
+    assert!(
+        r.view
+            .evaled(r#"class="jg-node route current spine" data-i="1""#)
+    );
+}
+
+#[test]
+fn an_editor_jump_closes_the_graph_first() {
+    let r = with_graph();
+    r.view.clear();
+    r.goto_source_line(3);
+    assert!(r.view.evaled("close()"), "the overlay is gone");
+    assert_eq!(mode(&r), "normal");
+    assert!(r.view.evaled(&nearest_source_element_js("3")));
+}
+
+#[test]
+fn a_reload_in_flight_refuses_the_graph() {
+    let r = Reader::loaded_with_sibling(DOC);
+    r.execute(Action::Reload, 1);
+    r.press('t');
+    r.land_work();
+    assert!(
+        !r.view.evaled(GRAPH_OVERLAY_ID),
+        "not drawn into the page being replaced"
+    );
+    // Still driveable: the editor and the automation surface see a loaded
+    // document throughout.
+    let v: serde_json::Value = serde_json::from_str(&r.state()).expect("state is JSON");
+    assert_eq!(v["loaded"], serde_json::Value::Bool(true));
+    r.view.clear();
+    r.goto_source_line(3);
+    assert!(r.view.evaled(&nearest_source_element_js("3")));
+
+    r.finish_load();
+    r.press('t');
+    r.land_work();
+    assert!(r.view.evaled(GRAPH_OVERLAY_ID), "once the reload lands");
+}
+
+#[test]
+fn switching_views_reveals_the_selection_the_new_view_folds_away() {
+    let r = with_siblings();
+    r.press('v');
+    // In the tree everything is unfolded: z.md hangs under x.md.
+    r.graph_post(message::GRAPH_SELECT, "0.1.4");
+    assert!(graph_state(&r).1.ends_with("z.md"));
+    // The links view folds x.md by default; the selection stays on z.md.
+    r.press('v');
+    let (view, selected, items) = graph_state(&r);
+    assert_eq!(view, "links");
+    assert!(selected.ends_with("z.md"), "{selected}");
+    assert_eq!(items, 5, "x.md unfolded to show it");
+}
+
+#[test]
+fn the_status_line_returns_to_the_graph_view_after_a_command() {
+    let r = with_graph();
+    r.press(':');
+    r.chrome.set_input_query("se");
+    r.press_key(Key::Tab);
+    assert_ne!(r.chrome.message(), "Graph: links", "the completion echo");
+    r.submit_input("set scroll-step 50");
+    assert_eq!(r.chrome.message(), "Graph: links");
+    // A command that reports keeps its report.
+    r.press(':');
+    r.submit_input("set no-such-option 1");
+    assert_ne!(r.chrome.message(), "Graph: links");
+}
+
+#[test]
+fn escape_closes_the_prompt_over_the_graph_then_the_graph() {
+    let r = with_graph();
+    r.press(':');
+    r.chrome.set_input_query("se");
+    r.press_key(Key::Tab);
+    r.press_key(Key::Escape);
+    assert_eq!(r.chrome.prompt(), None);
+    assert_eq!(mode(&r), "graph", "the prompt, not the graph, closed");
+    assert_eq!(r.chrome.message(), "Graph: links");
+    r.press_key(Key::Escape);
+    assert_eq!(mode(&r), "normal");
+}
+
+#[test]
+fn the_status_line_returns_to_the_trail_after_a_command() {
+    let r = Reader::loaded(DOC);
+    r.press(':');
+    r.chrome.set_input_query("se");
+    r.press_key(Key::Tab);
+    assert_ne!(r.chrome.message(), "");
+    r.submit_input("set scroll-step 50");
+    assert_eq!(r.chrome.message(), "", "the trail replaces the echo");
+    assert_eq!(r.chrome.trail(), ["doc.md"]);
+}
+
+#[test]
+fn a_huge_zoom_count_zooms_the_graph_by_a_finite_factor() {
+    let r = with_graph();
+    for (action, count) in [(Action::ZoomIn, 10_000), (Action::ZoomOut, u32::MAX)] {
+        r.view.clear();
+        let zoom_in = action == Action::ZoomIn;
+        r.execute(action, count);
+        let js = eval_containing(&r.view, "zoom(");
+        let factor = number_after(&js, "zoom(").unwrap_or_else(|| panic!("no factor in {js:?}"));
+        assert!(factor.is_finite() && factor > 0.0, "{js}");
+        assert_eq!(factor > 1.0, zoom_in, "{js}");
+    }
+}
+
+#[test]
+fn a_pending_wheel_zoom_lands_before_the_graph_does() {
+    let r = Reader::loaded_with_sibling(DOC);
+    r.wheel_zoom(-1.0, false);
+    r.wheel_zoom(-1.0, false);
+    assert_eq!(r.view.zoom_levels().len(), 1, "the second tick waits");
+    r.press('t');
+    r.land_work();
+    assert_eq!(
+        r.view.zoom_levels().len(),
+        2,
+        "applied before the graph covers the page"
+    );
+    r.run_timers();
+    assert_eq!(r.view.zoom_levels().len(), 2, "and not again under it");
+    assert_eq!(mode(&r), "graph");
+}
+
+#[test]
+fn a_post_from_an_earlier_graph_is_dropped() {
+    let r = with_graph();
+    r.press('t');
+    r.press('t');
+    r.land_work();
+    r.view.clear();
+    // The first overlay's double-click, delivered late: its key names an item
+    // of the new graph too.
+    r.message(message::GRAPH_OPEN, "1 0.1");
+    assert!(r.view.loads().is_empty());
+    assert_eq!(mode(&r), "graph");
+    r.message(message::GRAPH_OPEN, "2 0.1");
+    assert_eq!(r.view.loads().len(), 1);
 }
 
 // ---------------------------------------------------------------------------

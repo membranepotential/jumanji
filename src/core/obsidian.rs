@@ -10,7 +10,7 @@
 //! `[[note#frag#frag|pipe]]`, where the pipe is an alias for a link and
 //! `W`/`WxH` dimensions for an embed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use comrak::Anchorizer;
 
@@ -218,6 +218,28 @@ pub fn file_uri(path: &Path) -> String {
     format!("file://{}", percent_encode(&path.to_string_lossy()))
 }
 
+/// Convert a `file://` URI to a filesystem path; `None` for other schemes.
+///
+/// Decoded here rather than through a toolkit URI type (gio's `File::for_uri`,
+/// `NSURL`) because the core has no toolkit: a `file://` URI is a percent-
+/// encoded path and nothing else, and [`percent_decode`] is the same decoder
+/// the link fragments already go through. One decoder for the reader's link
+/// routing and the document graph's link scan (D14), so both read a link the
+/// same way.
+pub fn file_uri_to_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    // `file://host/p` carries an authority before the path; `file:///p` an
+    // empty one. Drop it either way, as gio's `File::for_uri(..).path()` did —
+    // a file URI names a local path, and the host (normally `localhost` or
+    // nothing) adds no information the reader could act on.
+    let path = match rest.find('/') {
+        Some(0) => rest,
+        Some(slash) => &rest[slash..],
+        None => return None,
+    };
+    Some(PathBuf::from(percent_decode(path)))
+}
+
 /// Percent-encode everything outside the URI unreserved set, keeping `/`.
 /// Used for both the path and the fragment of an emitted `file://` link — a
 /// block id's `^` and a slug's non-ASCII letters both need it.
@@ -236,7 +258,6 @@ pub fn percent_encode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use super::*;
 
@@ -421,5 +442,50 @@ mod tests {
         // call is the correct behaviour, not a shortcut.
         assert_eq!(heading_slug("Notes"), "notes");
         assert_eq!(heading_slug("Notes"), "notes");
+    }
+
+    // --- file URIs ---------------------------------------------------------
+
+    #[test]
+    fn file_uris_decode_to_paths() {
+        assert_eq!(
+            file_uri_to_path("file:///home/u/notes/a.md"),
+            Some(PathBuf::from("/home/u/notes/a.md"))
+        );
+        // Percent-encoding is undone: a space, and the `^` a block id carries.
+        assert_eq!(
+            file_uri_to_path("file:///home/u/my%20notes/b%5Ec.md"),
+            Some(PathBuf::from("/home/u/my notes/b^c.md"))
+        );
+        // A stray `%` that starts no valid escape is left alone. (gio, which
+        // this replaced, rejected the whole URI instead and such a link fell
+        // through to the system handler; opening it in-window is the better
+        // reading of a link to a file that really is called `100%.md`.)
+        assert_eq!(
+            file_uri_to_path("file:///tmp/100%.md"),
+            Some(PathBuf::from("/tmp/100%.md"))
+        );
+    }
+
+    #[test]
+    fn a_file_uri_authority_is_dropped() {
+        // Both spellings name the same local file, as they did under gio.
+        assert_eq!(
+            file_uri_to_path("file://localhost/tmp/a.md"),
+            Some(PathBuf::from("/tmp/a.md"))
+        );
+        assert_eq!(
+            file_uri_to_path("file://otherhost/tmp/a.md"),
+            Some(PathBuf::from("/tmp/a.md"))
+        );
+        // An authority with no path names nothing.
+        assert_eq!(file_uri_to_path("file://localhost"), None);
+    }
+
+    #[test]
+    fn non_file_uris_have_no_path() {
+        assert_eq!(file_uri_to_path("https://example.com/a.md"), None);
+        assert_eq!(file_uri_to_path("mailto:a@b.c"), None);
+        assert_eq!(file_uri_to_path("/home/u/a.md"), None);
     }
 }

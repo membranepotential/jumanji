@@ -10,15 +10,17 @@ content pipeline, modal vim/zathura keys, Obsidian dialect. Linux-first.
 ## Now
 
 Shipped through **v1.9.1**; `main` is ahead (graph v2, docs split, pointer
-zoom) and pushed — not released. Next release: v1.10.0.
+zoom, review fixes) and pushed — not released. Next release: v1.10.0.
 
 - **macOS port (issue #1)** — [05-macos-port.md](docs/research/05-macos-port.md);
   tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
 - **perf guard** — `.github/workflows/{ci,bench}.yml` + `scripts/bench-compare.sh`;
   e2e green in CI, trail is a workflow-artifact chain. Next: confirm the trail.
-
 ## Done (recent)
 
+- **pre-release review fixes (2026-09-19, 31f895f, fc2677a)** — Astra review
+  of v1.9.1..HEAD: reading anchor holds a screen point (bursts, resize, wide
+  blocks, jumps); graph counts, races, edges, symlinks, Esc layering.
 - **pointer zoom (2026-09-19, 82594ca)** — document + diagram Ctrl+wheel
   anchor at the pointer the page tracks itself (the shell's px were off by
   WebKit's own scale); shell motion wiring removed; e2e red without it.
@@ -42,12 +44,7 @@ zoom) and pushed — not released. Next release: v1.10.0.
    `05-macos-port.md` §5.3 is the guide. Owner side: review PRs, keep CI green.
 2. Trim the e2e suite toward what needs a real engine (unit tests now cover
    the flows in ms).
-3. Coalesced Ctrl+wheel race: two anchor captures can run before the first
-   restore (one `__jmnj_anchor` slot), so a fast burst's second step is not
-   anchored. Queue the anchors, or flush only after the previous apply.
-4. Anchor restore keeps the element's CSS top, not its screen position, so on
-   zoom-in content under a low cursor still slides ([D5a](docs/reading/README.md)).
-5. Delete `.flash-investigation/` (gitignored).
+3. Delete `.flash-investigation/` (gitignored).
 
 ## Open questions
 

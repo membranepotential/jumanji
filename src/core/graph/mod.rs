@@ -17,17 +17,18 @@
 mod scene;
 mod svg;
 
-pub use scene::{Fold, Folds, Handle, Item, ItemKey, Scene, Step, View};
+pub use scene::{Fold, Folds, Handle, Item, ItemKey, Scene, Step, View, reveal};
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use comrak::nodes::NodeValue;
 use comrak::{Arena, parse_document};
 
 use super::frontmatter::{self, Value};
-use super::obsidian::{self, RefKind, percent_decode};
+use super::obsidian::{self, RefKind, WikiRef, percent_decode};
 use super::pipeline::comrak_options;
+use super::textscan;
 use super::vault::{Target, VaultIndex};
 
 /// How many nodes the walk places at most. Route nodes are always placed, even
@@ -45,49 +46,59 @@ pub struct Scan {
     /// file stem at placement.
     pub title: Option<String>,
     /// Outgoing links to markdown documents, in source order, without duplicates.
-    /// [`scan`] leaves them as written (joined, not canonical); the caller that
-    /// hands scans to [`build`] canonicalises them and drops missing files.
+    /// [`scan`] spells them as the reader does: joined onto the document's
+    /// directory with `.` and `..` resolved lexically, as a browser resolves a
+    /// relative URL — not canonical. The caller that hands scans to [`build`]
+    /// canonicalises them and drops missing files.
     pub links: Vec<PathBuf>,
 }
 
 /// Read one document's title and outgoing markdown links.
 ///
-/// Links follow the reader's own routing (`Controller::on_navigate`): a
-/// markdown link is a path relative to the document's directory, a wikilink
-/// resolves through the vault index, and only `.md` / `.markdown` targets count
-/// — a directory, an image or a web page is not a node.
+/// Links follow the reader's own rendering and routing (`Controller::on_navigate`):
+/// a `%%comment%%` is stripped first, as the reader strips it; a markdown link
+/// is a path relative to the document's directory (or a `file://` URI, decoded
+/// as the reader decodes one); a wikilink — and an embedded note, which the
+/// reader renders as a link-card — resolves through the vault index; and only
+/// `.md` / `.markdown` targets count — a directory, an image or a web page is
+/// not a node.
 pub fn scan(md: &str, source: &Path, index: &VaultIndex) -> Scan {
     let arena = Arena::new();
     let root = parse_document(&arena, md, &comrak_options());
+    textscan::strip_comments(&arena, root);
     let dir = source.parent().unwrap_or(Path::new(""));
+    let note = |reference: &WikiRef| match index.resolve(reference, source) {
+        Target::Note { path, .. } => Some(path),
+        _ => None,
+    };
 
     let mut front_title = None;
     let mut h1 = None;
     let mut links: Vec<PathBuf> = Vec::new();
     for node in root.descendants() {
-        let target = match &node.data.borrow().value {
+        let mut targets: Vec<PathBuf> = match &node.data.borrow().value {
             NodeValue::FrontMatter(block) => {
                 front_title = title_property(block);
-                None
+                Vec::new()
             }
             NodeValue::Heading(h) if h.level == 1 && h1.is_none() => {
                 h1 = Some(node.collect_text());
-                None
+                Vec::new()
             }
-            NodeValue::Link(link) => markdown_target(&link.url, dir),
+            NodeValue::Link(link) => markdown_target(&link.url, dir).into_iter().collect(),
             NodeValue::WikiLink(link) => {
-                let reference = obsidian::parse(&percent_decode(&link.url), RefKind::Link);
-                match index.resolve(&reference, source) {
-                    Target::Note { path, .. } => Some(path),
-                    _ => None,
-                }
+                note(&obsidian::parse(&percent_decode(&link.url), RefKind::Link))
+                    .into_iter()
+                    .collect()
             }
-            _ => None,
+            _ => Vec::new(),
         };
-        if let Some(path) = target.filter(|p| is_markdown(p))
-            && !links.contains(&path)
-        {
-            links.push(path);
+        // `![[…]]` stays literal text in the AST: the embeds a text run holds.
+        targets.extend(textscan::embeds_at(node).iter().filter_map(note));
+        for path in targets.iter().map(|t| lexical(t)) {
+            if is_markdown(&path) && !links.contains(&path) {
+                links.push(path);
+            }
         }
     }
     let title = front_title
@@ -115,11 +126,13 @@ fn markdown_target(url: &str, dir: &Path) -> Option<PathBuf> {
     if url.is_empty() {
         return None;
     }
-    let path = match url.strip_prefix("file://") {
-        Some(rest) => PathBuf::from(percent_decode(rest)),
-        None if has_scheme(url) => return None,
-        None => PathBuf::from(percent_decode(url)),
-    };
+    if let Some(path) = obsidian::file_uri_to_path(url) {
+        return Some(path);
+    }
+    if has_scheme(url) {
+        return None;
+    }
+    let path = PathBuf::from(percent_decode(url));
     Some(if path.is_absolute() {
         path
     } else {
@@ -137,6 +150,29 @@ fn has_scheme(url: &str) -> bool {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     })
+}
+
+/// `path` with `.` and `..` resolved lexically, without asking the
+/// filesystem: `/v/docs/../b.md` is `/v/b.md` even when `docs` is a symlink.
+/// That is how the page resolves a relative link, so it is the spelling the
+/// reader opens.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // Above the root is the root.
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                Some(Component::CurDir | Component::ParentDir) | None => out.push(part),
+            },
+            _ => out.push(part),
+        }
+    }
+    out
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -543,10 +579,10 @@ mod tests {
         assert_eq!(
             scanned.links,
             [
-                PathBuf::from("/v/docs/./sub/a.md"),
-                PathBuf::from("/v/docs/../b.markdown"),
+                PathBuf::from("/v/docs/sub/a.md"),
+                PathBuf::from("/v/b.markdown"),
             ],
-            "`sub/a.md` is `./sub/a.md` again"
+            "spelled as the page resolves them; `sub/a.md` is `./sub/a.md` again"
         );
     }
 
@@ -566,6 +602,49 @@ mod tests {
         );
         assert_eq!(scanned.links, [PathBuf::from("/v/notes/Other.md")]);
         assert_eq!(scanned.title, None);
+    }
+
+    fn vault_of(notes: &[&str]) -> VaultIndex {
+        VaultIndex::build(
+            PathBuf::from("/v"),
+            notes
+                .iter()
+                .map(|n| super::super::vault::Entry {
+                    rel_path: PathBuf::from(n),
+                    aliases: Vec::new(),
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn an_embedded_note_is_a_link_in_source_order() {
+        // The reader renders `![[Note]]` as a link-card; an embedded image is
+        // not a document.
+        let index = vault_of(&["A.md", "B.md", "C.md", "pic.png"]);
+        let md = "[[A]] then ![[B]] and ![[pic.png]]\n\n![[C#Part]] [[A]]\n";
+        let scanned = scan(md, Path::new("/v/doc.md"), &index);
+        assert_eq!(
+            scanned.links,
+            ["/v/A.md", "/v/B.md", "/v/C.md"].map(PathBuf::from)
+        );
+    }
+
+    #[test]
+    fn links_inside_comments_do_not_count() {
+        // What the reader strips (`textscan::strip_comments`): an inline
+        // comment within one text run, and the block form.
+        let index = vault_of(&["A.md", "B.md", "C.md"]);
+        let md = "Keep [[A]] %%not ![[B]]%%\n\n%%\n\n[[C]] [c](C.md)\n\n%%\n";
+        let scanned = scan(md, Path::new("/v/doc.md"), &index);
+        assert_eq!(scanned.links, [PathBuf::from("/v/A.md")]);
+    }
+
+    #[test]
+    fn a_file_uri_link_is_read_as_the_reader_reads_it() {
+        let md = "[a](file://localhost/w/a%20b.md) [b](file:///w/b.md) [c](file://localhost)\n";
+        let scanned = scan(md, Path::new("/v/doc.md"), &vault_of(&[]));
+        assert_eq!(scanned.links, ["/w/a b.md", "/w/b.md"].map(PathBuf::from));
     }
 
     #[test]

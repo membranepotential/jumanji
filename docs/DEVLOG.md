@@ -2,7 +2,48 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-19 (latest) — the reading anchor holds a point on screen
+## 2026-09-19 (latest) — the graph's pre-release review
+
+A pre-release review of the document graph ([D14](graph/design.md)) found
+fourteen defects: hangs, races with other interactions, and edges that did not
+match the rendered page. Each is fixed where it starts, with a controller or
+core test that fails without the fix (checked by reverting each fix alone).
+
+- **Large counts froze the UI.** `graph_step` ran all `count` steps even after
+  a step went nowhere; `l` unfolded a cycle (`a → b → a`, a self-link) without
+  end. Now a move stops at its fixed point, and in the scene an occurrence
+  whose node is already on its own branch is a leaf without a handle, so the
+  displayed tree is finite ([R21](graph/interaction.md#review-of-the-current-system)).
+- **Races.** Link hints and the input bar now drop a walk in flight, and a
+  landing requires that nothing else holds the keys. `t` waits for a reload in
+  flight too: `loaded` became `Load { Pending, Replacing, Done }`, so D-Bus
+  `loaded` and `GotoLine` still work during a live reload. A `Ctrl`+wheel page
+  zoom still coalescing is applied before the graph lands. Overlay posts carry
+  the walk's generation (`"<generation> <key>"`), so a late click from a
+  closed overlay cannot hit a newer graph.
+- **Edges now match the page.** `graph::scan` strips `%%comments%%` with the
+  pipeline's own pass, counts embedded notes (`![[Note]]`, new
+  `textscan::embeds_at`), decodes `file://` links with the reader's decoder
+  (moved to `core::obsidian::file_uri_to_path`), and spells links with `.`/`..`
+  resolved as the page resolves them. Nodes stay canonical for identity but
+  are read and opened by the reader's spelling, so a symlink's relative links
+  resolve from the link and opening a node finds its saved position (D12). A
+  deleted or renamed current file keeps its place on the route.
+- **Smaller.** Arrow keys and PageDown no longer scroll the page behind the
+  graph; an editor jump closes the graph first; `v` unfolds the path to a
+  selection the new view had folded away (R22); the status line returns to
+  `Graph: links|tree` (or the trail) when the prompt closes (R23); a huge zoom
+  count is clamped before it formats as `inf` into the script; `Esc` closes
+  the innermost layer, so with the `:` prompt over the graph it closes the
+  prompt and a second `Esc` the graph.
+- **Far zoom stays as it is**, by the owner's decision: it is an overview, and
+  label culling may hide a handle there and tree view draws no link outlines.
+  Recorded as a deliberate exception to P1 (R24).
+
+The zoom-anchor half of the review (the resize re-probe when the overlay
+hides among it) landed just before; see the next entry.
+
+## 2026-09-19 — the reading anchor holds a point on screen
 
 Ctrl+wheel held the element under the pointer at its old CSS top, in a single
 page slot. Five faults followed from that:

@@ -47,9 +47,18 @@ principles and the gesture table are in [`interaction.md`](interaction.md).
   route node the walk cannot reach at all hangs under its trail predecessor on
   a dashed edge.
 - **Bounded**: `NODE_BUDGET` nodes, `READ_CAP` bytes per document, on the `Host`
-  worker (like the vault scan, [D11](../obsidian/README.md#d11-obsidian-dialect--vault-resolution-post-10-implemented)). **Same link semantics as the reader**:
-  path links against the document's directory, wikilinks via the vault index,
-  only existing `.md`/`.markdown` targets. **Titles**: frontmatter `title`, else
+  worker (like the vault scan, [D11](../obsidian/README.md#d11-obsidian-dialect--vault-resolution-post-10-implemented)). **Same link semantics as the reader**,
+  through the reader's own code: `%%comments%%` stripped first
+  (`textscan::strip_comments`), path links against the document's directory
+  with `.`/`..` resolved as the page resolves a URL, `file://` links through
+  the reader's decoder, wikilinks and embedded notes (`![[Note]]`, which the
+  reader renders as a link-card) via the vault index; only existing
+  `.md`/`.markdown` targets. **Identity**: a node is a canonical path, so a
+  document reached by two spellings (a symlink) is one node; it is read and
+  opened by the reader's spelling (the trail's latest, else the first link's), so its
+  relative links resolve from the symlink's directory and opening it finds the
+  reading position saved under that spelling. A trail document that is gone
+  keeps its place on the route as a node without links. **Titles**: frontmatter `title`, else
   the first `# H1`, else the file stem.
 - Each node keeps `targets`: every placed node it links to, tree child or not.
 
@@ -77,8 +86,11 @@ with SpaceTree-style collapsed branches:
 - **Two views, `v` toggles** (option `graph-view`, default `links`). The view
   decides one thing — which links count as children — and the default folds:
   - **`links`** — every outgoing link, **duplicates allowed** (a link back to
-    the root is a node in the fan too, marked as on the route). Route nodes and
-    the current node start unfolded, every other node folded.
+    the root is a node in the fan too, marked as on the route). An occurrence
+    already on its own branch closes a cycle and is a leaf without a handle,
+    so the displayed tree is finite and a branch is never longer than the
+    node count. Route nodes and the current node start unfolded, every other
+    node folded.
   - **`tree`** — the spanning tree, every node once, everything unfolded.
     Selecting a node outlines its link targets and dims the rest off the route
     (Obsidian's hover highlight): tree view cannot show links as children, so
@@ -128,14 +140,20 @@ with SpaceTree-style collapsed branches:
   would overlap one already kept; far labels are also cut to one column's
   width. Only true leaves — nodes with no links of their own — are bundled; a
   node with a `+n` handle stays visible, because it is where the reader can go
-  next.
+  next. A culled label takes its handle with it until hover or selection:
+  far zoom is an overview with deliberately limited interaction
+  ([interaction.md](interaction.md#deliberate-exceptions)).
 - **Selection is an item, not a node**: with duplicates a node can be on screen
   twice. Items carry a stable key (the path of node indices from the root in
   the displayed tree); the page posts keys, never indices, so a click racing a
   re-layout cannot land on the wrong item, and a node that disappears under a
-  fold leaves the selection on the folded node. A re-layout — fold, unfold,
-  `v`, `:set graph-view` — keeps the selection and keeps the item acted on
-  still on screen (the camera compensates).
+  fold leaves the selection on the folded node. Keys repeat across walks, so
+  each post also carries the walk's generation, and a post from a closed
+  overlay is dropped. A re-layout — fold, unfold, `v`, `:set graph-view` —
+  keeps the selection and keeps the item acted on still on screen (the camera
+  compensates); a view switch that would fold the selected document away
+  unfolds the path to its place in the spanning tree instead, which is an
+  item in both views.
 
 **The overlay (interaction).**
 
@@ -171,9 +189,15 @@ with SpaceTree-style collapsed branches:
   breadcrumb (it would repeat the title). **Help line (bottom right)**:
   the keys. Background plain.
 - **Lifecycle**: a walk's landing is drawn only if it is still the newest one
-  asked for (a generation number), the document has finished loading, and the
-  reader is still in Normal mode. Opening a node goes through `open_file`, so
-  it lands on the jumplist and `Backspace` returns.
+  asked for (a generation number), the reader is still in Normal mode, and
+  nothing else has taken the keys — starting link hints or the input bar drops
+  a walk in flight. `t` waits for the document's load, and for a reload in
+  flight (an overlay drawn then would go with the page it was drawn into). A
+  `Ctrl`+wheel page zoom still waiting to coalesce is applied before the graph
+  lands, not under it. A document load and an editor jump (D-Bus `GotoLine`,
+  explicit navigation) close the graph. Opening a node goes through
+  `open_file`, so it lands on the jumplist and `Backspace` returns. Counts are
+  bounded by the scene: a move stops where it goes nowhere.
 
 **A core part, not an add-on.** The same surfaces as every other feature:
 `:graph` / `:toggle graph` and every graph action through `:` exec and D-Bus

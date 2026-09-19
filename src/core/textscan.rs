@@ -128,15 +128,7 @@ fn splice_runs<'a>(
     for container in root.descendants().collect::<Vec<_>>() {
         let last_child = container.last_child();
         for run in text_runs(container) {
-            let text: String = run
-                .iter()
-                .map(|node| match &node.data.borrow().value {
-                    NodeValue::Text(literal) => literal.to_string(),
-                    // A soft break renders as a newline, so the scanner sees
-                    // what the source looked like.
-                    _ => "\n".to_string(),
-                })
-                .collect();
+            let text = run_text(&run);
             let at_block_end = match (run.last(), last_child) {
                 (Some(last), Some(child)) => std::ptr::eq(*last, child),
                 _ => false,
@@ -165,17 +157,33 @@ fn splice_runs<'a>(
     }
 }
 
+/// The run's nodes joined into source-shaped text.
+fn run_text(run: &[&AstNode<'_>]) -> String {
+    run.iter()
+        .map(|node| match &node.data.borrow().value {
+            NodeValue::Text(literal) => literal.to_string(),
+            // A soft break renders as a newline, so the scanner sees what the
+            // source looked like.
+            _ => "\n".to_string(),
+        })
+        .collect()
+}
+
+/// Whether `node` can be part of a text run.
+fn in_run(node: &AstNode<'_>) -> bool {
+    matches!(
+        node.data.borrow().value,
+        NodeValue::Text(_) | NodeValue::SoftBreak
+    )
+}
+
 /// `container`'s children grouped into maximal runs of consecutive `Text` /
 /// `SoftBreak` siblings.
 fn text_runs<'a>(container: &'a AstNode<'a>) -> Vec<Vec<&'a AstNode<'a>>> {
     let mut runs = Vec::new();
     let mut current: Vec<&'a AstNode<'a>> = Vec::new();
     for child in container.children() {
-        let in_run = matches!(
-            child.data.borrow().value,
-            NodeValue::Text(_) | NodeValue::SoftBreak
-        );
-        if in_run {
+        if in_run(child) {
             current.push(child);
         } else if !current.is_empty() {
             runs.push(std::mem::take(&mut current));
@@ -271,6 +279,33 @@ pub fn transform_embeds<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>, vault: 
                 }),
         )
     });
+}
+
+/// The `![[…]]` references in the text run that starts at `node`, in source
+/// order — the ones [`transform_embeds`] resolves there. Empty unless `node`
+/// is the first node of a run, so a walk over every node of a document sees
+/// each embed once, in document order among its other inline nodes.
+///
+/// For readers of the AST that need the references rather than their
+/// rendering: the document graph counts an embedded note as a link, since the
+/// reader renders it as one (D14).
+pub fn embeds_at<'a>(node: &'a AstNode<'a>) -> Vec<WikiRef> {
+    if !in_run(node) || node.previous_sibling().is_some_and(|prev| in_run(prev)) {
+        return Vec::new();
+    }
+    let mut run = vec![node];
+    while let Some(next) = run[run.len() - 1].next_sibling().filter(|n| in_run(n)) {
+        run.push(next);
+    }
+    let at_block_end = run[run.len() - 1].next_sibling().is_none();
+    let text = run_text(&run);
+    spans(&text, at_block_end)
+        .into_iter()
+        .filter_map(|(_, construct)| match construct {
+            Construct::Embed(reference) => Some(reference),
+            _ => None,
+        })
+        .collect()
 }
 
 /// An image embed becomes an `<img>`; **everything else becomes a link-card**.
