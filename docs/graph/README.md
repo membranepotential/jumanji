@@ -49,6 +49,27 @@ Follow a link or two, then press `t`.
 | Zoom | `+` `-`, `=` for 1:1 | `Ctrl`+wheel (at the cursor) |
 | Pan | — | wheel, `Shift`+wheel, drag |
 
+## Links view or tree view
+
+Both views draw the same documents from the same root, with the route on one
+line. They differ in one thing: which links count as a node's children.
+
+| | Links view (default) | Tree view |
+|---|---|---|
+| A node's children | every document it links to | the documents the walk first reached through it |
+| A document appears | once per link to it, so possibly several times | exactly once |
+| Links that are not children | none; every link is a child | outlined when you select the node |
+| Starts | the route unfolded, everything else folded | everything unfolded |
+| Answers | *Where can I go from here?* | *How is the whole tree organised, and where is X in it?* |
+
+Use the **links view** to decide what to read next: unfold the current document
+or a sibling and see exactly where its links lead, repeats included. Use the
+**tree view** to see the whole structure at once, find a document, or check
+what links to a part of the tree: every document has one place, and the
+selection's links light up wherever they point. `v` switches. The line above
+the help line in the graph names the view on screen and says what it shows. The
+status line shows it too (`Graph: links`).
+
 Hovering a folded node peeks at its links without moving anything:
 
 ![Hover peek: The content model's links in a floating layer](screenshots/peek.png)

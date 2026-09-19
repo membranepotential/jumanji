@@ -2,7 +2,7 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-19 (latest) — every mermaid diagram is checked
+## 2026-09-19 (latest) — every mermaid diagram is checked; the view explains itself
 
 The diagram in docs/graph/README.md failed to render: a node named `graph`,
 which is a keyword in merman and mermaid.js alike. It is `model` now. A new
@@ -11,6 +11,11 @@ mermaid fence in the repo's markdown with merman and names file, line and
 error; the demo's deliberately broken fence is marked
 `<!-- mermaid: expected to fail -->` and must fail. All twelve fences were also
 checked with mermaid-cli (the mermaid.js parser GitHub uses).
+
+The graph now says which view is on screen and what it shows: a line above
+the help line, bottom right ("**Links view** Each document branches into every
+document it links to…"), updated by `v` and `:set graph-view`. docs/graph/
+README.md gains "Links view or tree view": what differs, and when to use which.
 
 ## 2026-09-19 — the graph's zoom has ends
 

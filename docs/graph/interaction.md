@@ -103,6 +103,7 @@ One row per cue; one meaning per cue.
 | Handle `+n` / `−`, muted, inside the pill's right edge (beside the label when zoomed out) | Folded, with `n` children in this view / unfolded. No handle: nothing to unfold here (a leaf, or an occurrence that closes a cycle). Visible and clickable at near and mid zoom; far out it goes with its label where labels collide, until hover or selection shows it (see [Deliberate exceptions](#deliberate-exceptions)). Muted, because accent belongs to the route. |
 | **Dashed** line | A step no link explains (a jump). Nothing else is dashed. |
 | Bar reading "N nodes" (zoomed out) | N nodes with nothing to unfold in this view, bundled; click to zoom in. |
+| **View line** above the help line (bottom right) | The view on screen, in bold, and one sentence on what it shows. It changes with `v` and `:set graph-view`. |
 | Accent **outline** + dimmed rest (tree view, near and mid zoom) | The selected node's link targets. Tree view shows every node once, so it cannot show links as children; it highlights them instead. Not drawn far out (see [Deliberate exceptions](#deliberate-exceptions)). |
 | Panel, bottom left | The selection's full title and path; the route as a breadcrumb (hidden when the route is one node). |
 | Status line | `Graph: links` / `Graph: tree` — also again once the `:` prompt closes. |

@@ -322,21 +322,36 @@
 #__jmnj_graph .jg-crumb.sel {
   color: var(--accent);
 }
-#__jmnj_graph .jg-keys {
+/* Bottom right: the view on screen with its one-sentence explainer, over
+   the help line. */
+#__jmnj_graph .jg-help {
   position: absolute;
   right: 20px;
   bottom: 18px;
-  padding: 4px 8px;
-  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  max-width: min(460px, calc(100vw - 40px));
   color: var(--fg-muted);
   font-size: 12px;
+  text-align: right;
+}
+#__jmnj_graph .jg-view,
+#__jmnj_graph .jg-keys {
+  padding: 4px 8px;
+  background: var(--bg);
+}
+#__jmnj_graph .jg-view b {
+  color: var(--fg);
+  font-weight: 600;
 }
 #__jmnj_graph .jg-keys kbd {
   color: var(--fg);
   font: inherit;
 }
 @media (max-width: 760px) {
-  #__jmnj_graph .jg-keys {
+  #__jmnj_graph .jg-help {
     display: none;
   }
   #__jmnj_graph .jg-info {

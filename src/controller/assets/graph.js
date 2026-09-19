@@ -22,12 +22,20 @@
     '<div class="jg-info"><div class="jg-info-title"></div>' +
     '<div class="jg-info-path"></div><div class="jg-info-cut"></div>' +
     '<div class="jg-info-route"></div></div>' +
+    '<div class="jg-help"><div class="jg-view"><b></b> <span></span></div>' +
     '<div class="jg-keys"><kbd>Enter</kbd> open &nbsp; <kbd>hjkl</kbd> move &nbsp; ' +
     '<kbd>Space</kbd> fold &nbsp; <kbd>v</kbd> view &nbsp; ' +
-    '<kbd>Ctrl</kbd>+wheel zoom &nbsp; <kbd>Esc</kbd> close</div>';
+    '<kbd>Ctrl</kbd>+wheel zoom &nbsp; <kbd>Esc</kbd> close</div></div>';
   document.documentElement.appendChild(root);
 
   const stage = root.querySelector('.jg-stage');
+  // Above the help line: the view on screen, and what it shows, in one
+  // sentence (docs/graph/README.md, "Links view or tree view").
+  const VIEWS = {
+    links: ['Links view', 'Each document branches into every document it links to, so one linked from several places appears in each.'],
+    tree: ['Tree view', 'Each document appears once, where the walk from the root first reached it; the selection’s links are outlined.'],
+  };
+  const viewLine = root.querySelector('.jg-view');
   const SVG_NS = 'http://www.w3.org/2000/svg';
   // The peek's layer: screen space, over the scene and outside its camera, so
   // a peek is the same size at every zoom level.
@@ -205,6 +213,9 @@
     const route = (svg.dataset.route || '').split(' ').filter(Boolean);
     // A one-node route would only repeat the title.
     info.route.hidden = route.length < 2;
+    const [name, says] = VIEWS[svg.dataset.view] || ['', ''];
+    viewLine.querySelector('b').textContent = name;
+    viewLine.querySelector('span').textContent = says;
     route.forEach((i, n) => {
       if (n > 0) {
         const sep = document.createElement('span');
