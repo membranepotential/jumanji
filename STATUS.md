@@ -9,16 +9,18 @@ content pipeline, modal vim/zathura keys, Obsidian dialect. Linux-first.
 
 ## Now
 
-Shipped through **v1.9.1**; `main` is ahead (graph v2, docs split, pointer
-zoom, review fixes) and pushed — not released. Next release: v1.10.0.
+Shipped through **v1.10.0** (the document graph, pointer-anchored zoom).
 
 - **macOS port (issue #1)** — [05-macos-port.md](docs/research/05-macos-port.md);
   tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
 - **perf guard** — `.github/workflows/{ci,bench}.yml` + `scripts/bench-compare.sh`;
   e2e green in CI, trail is a workflow-artifact chain. Next: confirm the trail.
+
 ## Done (recent)
 
-- **pre-release review fixes (2026-09-19, 31f895f, fc2677a)** — Astra review
+- **v1.10.0 (2026-09-19)** — the document graph; after it: zoom clamp, peek
+  drawn as scene nodes, arrow keys + Tab, view line, mermaid docs test.
+- **pre-release review fixes (2026-09-19, 31f895f, 327269f)** — Astra review
   of v1.9.1..HEAD: reading anchor holds a screen point (bursts, resize, wide
   blocks, jumps); graph counts, races, edges, symlinks, Esc layering.
 - **pointer zoom (2026-09-19, 82594ca)** — document + diagram Ctrl+wheel
