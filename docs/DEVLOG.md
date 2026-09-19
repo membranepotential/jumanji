@@ -2,7 +2,31 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-19 (latest) — the document zooms about the real cursor
+## 2026-09-19 (latest) — the reading anchor holds a point on screen
+
+Ctrl+wheel held the element under the pointer at its old CSS top, in a single
+page slot. Five faults followed from that:
+
+- A burst's overlapping captures shared the slot.
+- The line under a low pointer slid on zoom-in.
+- Wide blocks and zoomed diagrams were never corrected sideways.
+- A window resize moved the believed pointer, kept as a fraction of the
+  viewport.
+- The resize anchor went stale behind the graph overlay and across a quickmark
+  jump to another zoom level (the zoom's `resize` undid the jump: 600 → 2099).
+
+One document-start script (`reading_anchor_js`) now holds a point of content
+(the character, else a point at the same fraction of the element) at a
+device-px screen offset. WebKitGTK's `devicePixelRatio` includes page zoom
+(measured 2 → 2.6), so the offset survives both zoom and resize. Each capture
+gets its own token, and a burst reuses one pointer anchor. Scroll containers
+are corrected before the window. The window is placed absolutely, because
+`scrollBy` through the whole-px `scrollY` lost about a CSS px per step.
+`restore_scroll` and `hide_graph` re-take the anchor. Six new e2e tests, all
+red before. Next: a user scroll inside an inner scroller is not seen by the
+burst reuse or the resize anchor (rare).
+
+## 2026-09-19 — the document zooms about the real cursor
 
 `Ctrl`+wheel on the document anchored at the wrong place wherever WebKitGTK
 lays the page out at a screen scale of its own. The controller took the

@@ -13,31 +13,33 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::controller::scripts::{
-    APPLY_GLOBAL, FIRST_FRAME_GLOBAL, OPEN_ATTRIBUTE, POINTER_GLOBAL, RESTORE_ANCHOR_JS,
-    RESTORING_CLASS, REVEAL_GLOBAL, capture_anchor_js, diagram_fit_class_js, diagram_zoom_js,
+    APPLY_GLOBAL, FIRST_FRAME_GLOBAL, OPEN_ATTRIBUTE, POINTER_GLOBAL, RESTORING_CLASS,
+    REVEAL_GLOBAL, anchored_js, capture_anchor_js, diagram_fit_class_js, diagram_zoom_js,
     diagram_zoom_reset_js, graph_call_js, graph_show_js, graph_update_js, hints_build_js,
-    js_string, nearest_source_element_js, wide_class_js,
+    js_string, nearest_source_element_js, rebase_anchor_js, restore_anchor_js, wide_class_js,
 };
 use crate::controller::toolkit::Viewport;
 use crate::core::RenderedDocument;
 use crate::core::pipeline::{HTML_CLASS_OPEN, HTML_OPEN};
 
-/// Where a reflow-preserving zoom keeps the reading position pinned.
+/// Where a reflow-preserving change keeps the reading position pinned.
 ///
-/// Both geometric and text zoom now reflow the page, so an anchor is captured
-/// before the change and scrolled back into view after — this picks the anchor
-/// element. One mechanism ([`capture_anchor_js`] + [`RESTORE_ANCHOR_JS`]),
-/// parameterised by the probe point.
+/// Both zoom axes and the block toggles reflow the page, so an anchor — a
+/// point of content, the character there when there is text — is captured
+/// before the change and put back at the same place on screen after. One
+/// mechanism ([`capture_anchor_js`] + [`restore_anchor_js`]), parameterised by
+/// the probe point.
 #[derive(Clone, Copy)]
 pub enum ZoomAnchor {
-    /// Keep the element at the top of the viewport fixed (keyboard / D-Bus
-    /// zoom, and text zoom). Only anchors when scrolled, so an exact top stays
-    /// exactly at the top.
+    /// Keep the line at the top of the viewport at the same height (keyboard /
+    /// D-Bus zoom, text zoom, the block toggles). Only anchors when scrolled,
+    /// so an exact top stays exactly at the top.
     Top,
-    /// Keep the element under the pointer fixed — `Ctrl`+wheel zoom ("zoom
-    /// towards the cursor"). The pointer as the page itself last saw it, for
-    /// the reason [`GraphZoomAt::Pointer`] gives: no position from outside the
-    /// page is in CSS px.
+    /// Keep the content under the pointer under it, on both axes — `Ctrl`+wheel
+    /// zoom ("zoom towards the cursor"), including inside a horizontal
+    /// scroller. The pointer as the page itself last saw it, for the reason
+    /// [`GraphZoomAt::Pointer`] gives: no position from outside the page is in
+    /// CSS px.
     Pointer,
 }
 
@@ -136,9 +138,13 @@ pub struct ViewportState {
     pub probe_text: String,
     /// See [`probe_text`](Self::probe_text).
     pub probe_top: f64,
-    /// The same pair for the element under the pointer, as the page itself
-    /// tracks it: the observable for "`Ctrl`+wheel keeps what is under the
-    /// cursor in place" (DESIGN D5a). Empty / 0 over nothing.
+    /// What is under the pointer, as the page itself tracks it: the word
+    /// there (whitespace-delimited) and the viewport-relative `top` of the
+    /// character, or — over no text — the element's first 48 characters and
+    /// its `top`. The observable for "`Ctrl`+wheel keeps what is under the
+    /// cursor in place" (DESIGN D5a): a word, not its paragraph, because the
+    /// paragraph's top holding still says nothing about the line under a
+    /// pointer low in it. Empty / 0 over nothing.
     pub pointer_text: String,
     /// See [`pointer_text`](Self::pointer_text).
     pub pointer_top: f64,
@@ -489,9 +495,15 @@ pub trait Page: Viewport + Clone + 'static {
         self.eval(&graph_call_js("reset()"));
     }
 
-    /// Remove the graph overlay.
+    /// Remove the graph overlay, and re-take the resize anchor from the page
+    /// it uncovers: the page may have moved behind the overlay (an editor
+    /// jump), and the anchor could not be probed through it.
     fn hide_graph(&self) {
-        self.eval(&graph_call_js("close()"));
+        self.eval(&format!(
+            "{}{}",
+            graph_call_js("close()"),
+            rebase_anchor_js()
+        ));
     }
 
     /// Remove the hint overlay.
@@ -516,18 +528,17 @@ pub trait Page: Viewport + Clone + 'static {
     /// the reading position drifts unless pinned.
     ///
     /// Setting the zoom level is a native call and cannot be issued from JS, so
-    /// the sequence is race-free by construction: capture the anchor (async JS),
-    /// and only in its completion callback set the native zoom and restore the
-    /// position (a second JS eval). The two evals share `window.__jmnj_anchor`
-    /// and can never interleave for one call, since the second is scheduled from
-    /// the first's callback.
+    /// this is a transaction across two evals: capture the anchor (async JS,
+    /// replying with its token), and only in the completion callback set the
+    /// native zoom and restore *that token's* anchor. Transactions can overlap
+    /// — a coalesced `Ctrl`+wheel burst issues the next capture before the
+    /// previous restore has run — and each still restores its own anchor.
     fn zoom_to(&self, level: f64, anchor: ZoomAnchor) {
         let level = level.max(0.2);
         let view = self.clone();
-        let capture = capture_anchor_js(&anchor);
-        self.eval_json(&capture, move |_| {
+        self.eval_json(&capture_anchor_js(&anchor), move |token| {
             view.set_zoom_level(level);
-            view.eval(RESTORE_ANCHOR_JS);
+            view.eval(&restore_anchor_js(anchor_token(token)));
         });
     }
 
@@ -542,14 +553,13 @@ pub trait Page: Viewport + Clone + 'static {
     /// be a lie.
     fn reset_zoom(&self, font_base_px: f64) {
         let view = self.clone();
-        let capture = capture_anchor_js(&ZoomAnchor::Top);
         let clear_diagrams = diagram_zoom_reset_js();
-        self.eval_json(&capture, move |_| {
+        self.eval_json(&capture_anchor_js(&ZoomAnchor::Top), move |token| {
             view.set_zoom_level(1.0);
             view.eval(&format!(
                 "document.documentElement.style.setProperty('--font-size', '{font_base_px}px');\
-                 {clear_diagrams}\
-                 {RESTORE_ANCHOR_JS}"
+                 {clear_diagrams}{}",
+                restore_anchor_js(anchor_token(token))
             ));
         });
     }
@@ -567,11 +577,9 @@ pub trait Page: Viewport + Clone + 'static {
     /// capture → apply → restore fit in one eval — the same anchoring mechanism
     /// the geometric zoom uses, just applied inline.
     fn set_text_zoom_px(&self, px: f64) {
-        let capture = capture_anchor_js(&ZoomAnchor::Top);
-        self.eval(&format!(
-            "{capture}\
-             document.documentElement.style.setProperty('--font-size', '{px}px');\
-             {RESTORE_ANCHOR_JS}"
+        self.eval(&anchored_js(
+            &ZoomAnchor::Top,
+            &format!("document.documentElement.style.setProperty('--font-size', '{px}px');"),
         ));
     }
 
@@ -596,11 +604,7 @@ pub trait Page: Viewport + Clone + 'static {
     /// capture → apply → restore as [`Page::set_text_zoom_px`]; pure JS, so it
     /// is one eval.
     fn set_wide(&self, wide: bool) {
-        let capture = capture_anchor_js(&ZoomAnchor::Top);
-        self.eval(&format!(
-            "{capture}{}{RESTORE_ANCHOR_JS}",
-            wide_class_js(wide)
-        ));
+        self.eval(&anchored_js(&ZoomAnchor::Top, &wide_class_js(wide)));
     }
 
     /// Apply the diagram fit-to-width state: flip the fit class on `<html>`
@@ -612,11 +616,7 @@ pub trait Page: Viewport + Clone + 'static {
     /// can shed hundreds of pixels, pulling everything below it up past the
     /// reader's eye. Capture → apply → restore, one eval.
     fn set_diagram_fit(&self, fit: bool) {
-        let capture = capture_anchor_js(&ZoomAnchor::Top);
-        self.eval(&format!(
-            "{capture}{}{RESTORE_ANCHOR_JS}",
-            diagram_fit_class_js(fit)
-        ));
+        self.eval(&anchored_js(&ZoomAnchor::Top, &diagram_fit_class_js(fit)));
     }
 
     /// Scale the `index`-th diagram by `factor` (multiplicative, clamped in the
@@ -634,11 +634,7 @@ pub trait Page: Viewport + Clone + 'static {
     /// Still deliberately *not* coalesced — a style write on one element is
     /// nothing like the full-page reflow a geometric zoom step costs.
     fn zoom_diagram(&self, index: usize, factor: f64, anchor: ZoomAnchor) {
-        let capture = capture_anchor_js(&anchor);
-        self.eval(&format!(
-            "{capture}{}{RESTORE_ANCHOR_JS}",
-            diagram_zoom_js(index, factor)
-        ));
+        self.eval(&anchored_js(&anchor, &diagram_zoom_js(index, factor)));
     }
 
     /// Query the current scroll offset (px), delivering it to `callback` on the
@@ -721,8 +717,22 @@ pub trait Page: Viewport + Clone + 'static {
              rs: d.classList.contains('{RESTORING_CLASS}'), \
              ...(() => {{ const q = {POINTER_GLOBAL} ? {POINTER_GLOBAL}() : null; \
                const n = q ? document.elementFromPoint(q.x, q.y) : null; \
-               return {{ qt: n ? label(n) : '', \
-                         qy: n ? n.getBoundingClientRect().top : 0 }}; }})() }}; }})()"
+               if (!n) return {{ qt: '', qy: 0 }}; \
+               const at = document.caretRangeFromPoint \
+                 ? document.caretRangeFromPoint(q.x, q.y) : null; \
+               const tn = at && at.startContainer; \
+               if (tn && tn.nodeType === 3 && n.contains(tn) && tn.length > 0) {{ \
+                 const s = tn.data, ws = /\\s/; \
+                 let o = Math.min(at.startOffset, s.length - 1); \
+                 if (ws.test(s[o]) && o > 0) o -= 1; \
+                 let i = o, j = o; \
+                 while (i > 0 && !ws.test(s[i - 1])) i -= 1; \
+                 while (j < s.length && !ws.test(s[j])) j += 1; \
+                 const r = document.createRange(); r.setStart(tn, o); r.setEnd(tn, o + 1); \
+                 const rs = r.getClientRects(); \
+                 if (i < j) return {{ qt: s.slice(i, j), \
+                   qy: rs.length ? rs[0].top : n.getBoundingClientRect().top }}; }} \
+               return {{ qt: label(n), qy: n.getBoundingClientRect().top }}; }})() }}; }})()"
         );
         self.eval_json(&script, move |json| {
             let state = json
@@ -736,12 +746,24 @@ pub trait Page: Viewport + Clone + 'static {
     /// quickmark jump, or a jumplist hop that stays inside this document. An
     /// offset that has to survive a load is [`InitialPosition::Offset`] instead,
     /// which lands before the first frame rather than after it.
+    ///
+    /// Re-takes the resize anchor at the new offset in the same eval. A
+    /// quickmark set at another zoom level changes the native zoom just before
+    /// this, and the `resize` that zoom fires runs before the jump's `scroll`
+    /// event in the next rendering update — so without the re-take the resize
+    /// anchor still holds the pre-jump place and scrolls the page back to it.
     fn restore_scroll(&self, y: f64) {
-        self.eval(&format!("window.scrollTo(0, {y});"));
+        self.eval(&format!("window.scrollTo(0, {y});{}", rebase_anchor_js()));
     }
 }
 
 impl<V: Viewport + Clone + 'static> Page for V {}
+
+/// The anchor token a capture replied with — `None` when it captured nothing
+/// (`null`) or the reply was lost, which the restore treats alike.
+fn anchor_token(reply: Option<String>) -> Option<u64> {
+    reply.and_then(|json| serde_json::from_str::<Option<u64>>(&json).ok().flatten())
+}
 
 /// Encode a string as the body of a double-quoted HTML attribute value.
 ///

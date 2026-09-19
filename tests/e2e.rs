@@ -1378,7 +1378,7 @@ fn a_holds_the_reading_position() {
 /// document under the reader. A resize re-lays the page out — here the
 /// broken-out table above the reader re-wraps at the new window width — and
 /// nothing re-anchored the position, because the controller never sees a
-/// "before". Goes red without `resize_anchor_js`.
+/// "before". Goes red without `reading_anchor_js`.
 #[test]
 fn resizing_the_window_holds_the_reading_position() {
     let Some(_g) = setup_guard() else { return };
@@ -1645,78 +1645,296 @@ fn ctrl_wheel_burst_coalesces_without_losing_steps() {
     );
 }
 
-#[test]
-fn ctrl_wheel_zooms_the_document_about_the_pointer() {
-    // Regression: Ctrl+wheel anchored the zoom at the shell's pointer divided
-    // by the page zoom — toolkit logical px taken for CSS px. WebKitGTK can lay
-    // the page out at its own screen scale on top of the page zoom (2 logical
-    // px per CSS px at zoom 1 under Xvfb), so the anchor landed at twice the
-    // cursor's distance from the corner and something else was held in place.
-    // The page now tracks the pointer itself. Asserted where it matters: what
-    // is under the pointer stays where it was.
-    let Some(_g) = setup_guard() else { return };
-    let vault = temp_vault("doc-zoom");
-    let body: String = (1..=40)
-        .map(|i| {
-            let words = "words to make the paragraph several lines tall ".repeat(6);
-            format!("Paragraph {i}: {words}\n\n")
-        })
+/// A document that is one long paragraph of hard-broken lines, every word on a
+/// line the same token (`L017 L017 …`) and every line's token unique. The word
+/// under the pointer therefore names the *line* under it, even after a zoom
+/// re-wraps a line into two rows — and since it is one paragraph, the
+/// paragraph's top holding still says nothing about which line is under a
+/// pointer low in it.
+fn lines_paragraph(vault: &Path) -> PathBuf {
+    let body: String = (1..=160)
+        .map(|i| format!("{}\\\n", format!("L{i:03} ").repeat(6).trim_end()))
         .collect();
-    let doc = vault.join("long.md");
-    std::fs::write(&doc, format!("# Long\n\n{body}")).expect("write");
-    let h = Harness::launch_file(doc);
-    h.wait_for_state("loaded", SETTLE, |s| s.loaded && s.viewport_width > 0.0);
+    let doc = vault.join("lines.md");
+    std::fs::write(&doc, format!("# Lines\n\n{body}L999\n")).expect("write");
+    doc
+}
 
-    // Park the pointer a little way down the viewport, in X pixels, and scroll
-    // until a paragraph's top sits a comfortable distance above it — so the
-    // paragraph still spans the pointer after zooming in (the pointer's CSS y
-    // shrinks with the zoom while the anchor holds the paragraph's).
-    let s = h.get_state();
-    let px_per_css = h.window_width() / s.viewport_width;
-    let css_y = 120.0;
-    h.mouse_move(
-        (s.viewport_width / 2.0 * px_per_css).round() as i32,
-        (css_y * px_per_css).round() as i32,
-    );
-    h.execute_action("scroll down", 20);
-    let mut before = None;
-    for _ in 0..60 {
-        let s = h.get_state();
-        let above = css_y - s.pointer_top;
-        if s.pointer_text.starts_with("Paragraph") && (40.0..=70.0).contains(&above) {
-            before = Some(s);
-            break;
-        }
-        h.execute_action("scroll down", 1);
-        std::thread::sleep(Duration::from_millis(60));
+impl Harness {
+    /// Size the X window, keeping its top-left where it is.
+    fn window_size(&self, width: u32, height: u32) {
+        self.xdotool([
+            "windowsize".to_string(),
+            "--sync".to_string(),
+            self.window_id.clone(),
+            width.to_string(),
+            height.to_string(),
+        ]);
     }
-    let before = before.expect("never parked the pointer inside a paragraph");
 
-    // Ticks 2 ms apart fall into one coalesce window: two applies, the second
-    // well after the first has settled.
-    h.ctrl_wheel(true, 3, 2);
-    let mut after = h.wait_for_state("the page zoomed in", SETTLE, |s| s.zoom > 1.25);
-    // The trailing flush of the burst lands after the leading one; settle.
-    loop {
+    /// Put the pointer at window-relative `(x, y)` with real motion, so the
+    /// page's view of the pointer is the truth whatever it believed before: a
+    /// move to where the pointer already is generates no event.
+    fn pointer_to(&self, x: i32, y: i32) {
+        self.mouse_move(x + 2, y);
+        self.mouse_move(x, y);
         std::thread::sleep(Duration::from_millis(150));
-        let now = h.get_state();
-        let still = (now.pointer_top - after.pointer_top).abs() < 0.5 && now.zoom == after.zoom;
-        after = now;
-        if still {
-            break;
+    }
+
+    /// Wait until the zoom has reached `zoom` and the content under the
+    /// pointer has stopped moving; the state it settled in.
+    fn settled_zoom(&self, zoom: f64) -> State {
+        let mut after =
+            self.wait_for_state("the zoom landed", SETTLE, |s| (s.zoom - zoom).abs() < 1e-6);
+        let deadline = Instant::now() + SETTLE;
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            let now = self.get_state();
+            let still = (now.pointer_top - after.pointer_top).abs() < 0.5 && now.zoom == after.zoom;
+            assert!(
+                still || Instant::now() < deadline,
+                "the zoom never settled: pointer_top {} then {}",
+                after.pointer_top,
+                now.pointer_top
+            );
+            after = now;
+            if still {
+                return after;
+            }
         }
     }
+}
+
+/// Assert the word under the pointer is the one that was there before a zoom,
+/// at the same place on screen. `pointer_top` is CSS px, and a CSS px is
+/// `zoom` times as many screen px, so the old top is rescaled into the new
+/// layout's CSS px before comparing.
+fn assert_word_held(what: &str, before: &State, after: &State) {
+    assert!(
+        before.pointer_text.starts_with('L'),
+        "{what}: the pointer is not over the lines to begin with ({:?})",
+        before.pointer_text
+    );
     assert_eq!(
         before.pointer_text, after.pointer_text,
-        "a different paragraph is under the pointer ({px_per_css} X px per CSS px)"
+        "{what}: a different word is under the pointer (zoom {} -> {})",
+        before.zoom, after.zoom
     );
-    let drift = (after.pointer_top - before.pointer_top).abs();
+    let expected = before.pointer_top * before.zoom / after.zoom;
+    let drift = (after.pointer_top - expected).abs();
     assert!(
-        drift <= 6.0,
-        "the paragraph under the pointer moved {drift:.1} CSS px ({:.0} -> {:.0}; \
-         {px_per_css} X px per CSS px)",
-        before.pointer_top,
+        drift <= 2.0,
+        "{what}: the word under the pointer moved {drift:.1} CSS px on screen \
+         ({:.1} expected, {:.1} now)",
+        expected,
         after.pointer_top
+    );
+}
+
+/// Launch on [`lines_paragraph`] at a known window size, scrolled into the
+/// paragraph, with the pointer parked low in the viewport over the lines.
+/// Returns the harness, the pointer's X position, and the state there.
+fn low_pointer_over_lines(vault: &Path, width: u32, height: u32) -> (Harness, (i32, i32), State) {
+    let h = Harness::launch_file(lines_paragraph(vault));
+    h.wait_for_state("loaded", SETTLE, |s| s.loaded && s.viewport_width > 0.0);
+    h.window_size(width, height);
+    h.execute_action("scroll down", 12);
+    std::thread::sleep(Duration::from_millis(300));
+    let at = ((width / 2) as i32, (height * 3 / 4) as i32);
+    h.pointer_to(at.0, at.1);
+    let before = h.get_state();
+    (h, at, before)
+}
+
+#[test]
+fn ctrl_wheel_keeps_the_word_under_a_low_pointer_in_place() {
+    // Regression, twice over. First, Ctrl+wheel anchored the zoom at the
+    // shell's pointer divided by the page zoom — toolkit logical px taken for
+    // CSS px, while WebKitGTK lays the page out at its own screen scale on top
+    // (2 logical px per CSS px at zoom 1 under Xvfb). Then the anchor held the
+    // *element* under the pointer at its old CSS top: a paragraph's top stays,
+    // but on zoom-in the line under a pointer low in it slides away. The word
+    // under the pointer must stay under it.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("zoom-word");
+    let (h, at, before) = low_pointer_over_lines(&vault, 1040, 800);
+
+    // Ticks 2 ms apart fall into one coalesce window: two applies.
+    h.ctrl_wheel(true, 3, 2);
+    h.settled_zoom(1.3);
+    h.pointer_to(at.0, at.1);
+    assert_word_held("Ctrl+wheel zoom-in", &before, &h.get_state());
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn a_fast_ctrl_wheel_burst_stays_anchored_at_the_pointer() {
+    // Regression: the anchor lived in one page slot. Three ticks 21 ms apart
+    // end in a trailing flush (40 ms) and the next tick's leading flush back to
+    // back, so the last capture runs before the previous restore: one restore
+    // used the other's anchor, the last found none, and the last step zoomed
+    // about the top-left instead of the pointer. The race is timing-dependent,
+    // so the pattern runs several times, in and out.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("zoom-burst");
+    let (h, at, mut before) = low_pointer_over_lines(&vault, 1040, 800);
+
+    for round in 0..4 {
+        let zoom_in = round % 2 == 0;
+        h.ctrl_wheel(zoom_in, 3, 21);
+        h.settled_zoom(if zoom_in { 1.3 } else { 1.0 });
+        h.pointer_to(at.0, at.1);
+        let after = h.get_state();
+        assert_word_held(&format!("Ctrl+wheel burst {round}"), &before, &after);
+        before = after;
+    }
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn ctrl_wheel_after_a_resize_zooms_about_the_unmoved_pointer() {
+    // Regression: the page kept the pointer as a fraction of the viewport, so
+    // it survived a native zoom — but a window resize with no pointer motion
+    // (an i3 re-tile) moved the believed pointer, and the next Ctrl+wheel
+    // zoomed about a point the cursor was never at. No pointer event reaches
+    // the page in between: GTK takes the wheel first (D4).
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("zoom-resize");
+    let (h, at, before) = low_pointer_over_lines(&vault, 1040, 600);
+
+    // Hold Ctrl first: WebKit refreshes the page's pointer with a synthetic
+    // move when a modifier goes down, which would hide the stale value. Then
+    // grow the window downward; its top-left and the pointer stay put, and so
+    // does the text under the pointer (the resize anchor holds the top).
+    h.xdotool(["keydown", "ctrl"]);
+    std::thread::sleep(Duration::from_millis(150));
+    h.window_size(1040, 1000);
+    std::thread::sleep(Duration::from_millis(400));
+    // One tick: every capture of a longer burst after the first would see a
+    // pointer the first step's own synthetic move has already refreshed.
+    h.xdotool(["click", "4"]);
+    h.xdotool(["keyup", "ctrl"]);
+    h.settled_zoom(1.1);
+    h.pointer_to(at.0, at.1);
+    assert_word_held("Ctrl+wheel after a resize", &before, &h.get_state());
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn ctrl_wheel_over_a_wide_code_block_keeps_the_word_under_the_pointer() {
+    // Regression: the restore only ever scrolled the window vertically. Over a
+    // code block wider than the column (its own horizontal scroller, D5a.1),
+    // zooming moves the text under the pointer sideways too, and only the
+    // block's scroller can bring it back. Every word in the block is unique.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("zoom-wide");
+    let code: String = (1..=30)
+        .map(|row| {
+            let words: Vec<String> = (1..=60).map(|col| format!("L{row:02}c{col:03}")).collect();
+            format!("{}\n", words.join(" "))
+        })
+        .collect();
+    let doc = vault.join("wide.md");
+    std::fs::write(
+        &doc,
+        format!("# Wide\n\n```text\n{code}```\n\n{}", filler()),
+    )
+    .expect("write");
+    let h = Harness::launch_file(doc);
+    h.wait_for_state("loaded", SETTLE, |s| s.loaded && s.viewport_width > 0.0);
+    h.window_size(1040, 800);
+    std::thread::sleep(Duration::from_millis(300));
+    let at = (520, 400);
+    h.pointer_to(at.0, at.1);
+    let before = h.get_state();
+
+    h.ctrl_wheel(true, 3, 2);
+    h.settled_zoom(1.3);
+    h.pointer_to(at.0, at.1);
+    assert_word_held("Ctrl+wheel over a wide code block", &before, &h.get_state());
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn a_quickmark_jump_across_zoom_levels_stays_where_it_landed() {
+    // Regression: a mark remembers its zoom, so the jump sets the native zoom
+    // and then scrolls. The zoom fires a `resize`, which runs before the jump's
+    // `scroll` in the next rendering update — and the resize anchor, still
+    // holding the pre-jump place, scrolled the page right back to it.
+    let Some((_g, h)) = setup() else { return };
+    h.execute_action("scroll down", 10);
+    h.wait_for_state("scrolled to the mark", SETTLE, |s| s.scroll_y > 0.0);
+    std::thread::sleep(Duration::from_millis(300));
+    let marked = h.get_state().scroll_y;
+    h.execute_action("mark set a", 1);
+
+    h.execute_action("scroll down", 25);
+    h.execute_action("zoom in", 3);
+    h.wait_for_state("zoomed in elsewhere", SETTLE, |s| s.zoom > 1.25);
+    std::thread::sleep(Duration::from_millis(300));
+
+    h.execute_action("mark jump a", 1);
+    h.wait_for_state("back at the mark's zoom", SETTLE, |s| s.zoom < 1.05);
+    std::thread::sleep(Duration::from_millis(500));
+    let s = h.get_state();
+    assert!(
+        (s.scroll_y - marked).abs() < 5.0,
+        "the jump landed at {marked} but the page is at {} now",
+        s.scroll_y
+    );
+}
+
+#[test]
+fn closing_the_graph_over_a_moved_page_holds_the_new_place_on_resize() {
+    // Regression: the resize anchor cannot probe through the graph overlay, so
+    // it kept the place from before the graph opened. An editor jump behind the
+    // overlay moved the page; after closing it, the next resize snapped the
+    // page back to where it was before the jump.
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("graph-resize");
+    // One source line per paragraph: paragraph i sits on line 2i + 1.
+    let body: String = (1..=300)
+        .map(|i| format!("Paragraph {i} of the long read.\n\n"))
+        .collect();
+    let doc = vault.join("long.md");
+    std::fs::write(&doc, body).expect("write");
+    let h = Harness::launch_file_in_dir(doc, Some(vault.clone()));
+    h.wait_for_state("loaded", SETTLE, |s| s.loaded && s.viewport_width > 0.0);
+    h.window_size(1040, 800);
+    h.execute_action("scroll down", 6);
+    let start = h
+        .wait_for_state("scrolled", SETTLE, |s| s.scroll_y > 0.0)
+        .scroll_y;
+    std::thread::sleep(Duration::from_millis(200));
+
+    h.key(&["t"]);
+    h.wait_for_state("the graph opens", SETTLE, |s| s.mode == "graph");
+    h.goto_line(301);
+    std::thread::sleep(Duration::from_millis(300));
+    let jumped = h
+        .wait_for_state("the page moved behind the graph", SETTLE, |s| {
+            s.scroll_y > start + 1000.0
+        })
+        .scroll_y;
+    h.key(&["Escape"]);
+    h.wait_for_state("the graph closes", SETTLE, |s| s.mode == "normal");
+    std::thread::sleep(Duration::from_millis(200));
+
+    h.window_size(1040, 700);
+    std::thread::sleep(Duration::from_millis(400));
+    let s = h.get_state();
+    assert!(
+        (s.scroll_y - jumped).abs() < 100.0,
+        "the resize snapped the page back to before the jump ({jumped} -> {})",
+        s.scroll_y
     );
 
     drop(h);

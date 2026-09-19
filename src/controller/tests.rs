@@ -1146,11 +1146,11 @@ fn assert_anchored(what: &str, script: &str) {
          position first (DESIGN D5a.0): {script}"
     );
     assert!(
-        script.contains("scrollBy"),
+        script.contains(".restore("),
         "{what}: captures an anchor but never restores it: {script}"
     );
     let capture = script.find("__jmnj_anchor").expect("capture present");
-    let restore = script.rfind("scrollBy").expect("restore present");
+    let restore = script.rfind(".restore(").expect("restore present");
     assert!(
         capture < restore,
         "{what}: the anchor must be captured before the change, not after: {script}"

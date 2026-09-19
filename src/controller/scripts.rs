@@ -76,129 +76,253 @@ fn post_call(name: &str, payload_expr: &str) -> String {
     format!("window.{POST_FN}('{name}', {payload_expr});")
 }
 
-/// JS that captures the anchor element into `window.__jmnj_anchor` (element +
-/// its current viewport-top offset) for the given probe point. Paired with
-/// [`RESTORE_ANCHOR_JS`], which runs after the zoom change reflows the page.
+/// The page global the reading-anchor script ([`reading_anchor_js`]) exposes:
+/// `captureTop()`, `captureAt(point)`, `restore(token)` and `rebase()`.
+const ANCHOR_GLOBAL: &str = "window.__jmnj_anchor";
+
+/// A JS *expression* that captures the reading anchor for `anchor` and yields
+/// its token (a number), or `null` when there is nothing to hold — an
+/// unscrolled page for [`ZoomAnchor::Top`], so the exact top stays the top.
+///
+/// Paired with [`restore_anchor_js`], which runs after the change that moves
+/// the page. Each capture is kept under its own token, so two anchored
+/// changes in flight at once (a fast `Ctrl`+wheel burst: the second capture
+/// runs before the first restore) each restore their own anchor instead of
+/// sharing one slot.
 pub fn capture_anchor_js(anchor: &ZoomAnchor) -> String {
-    // (x expression, y-probe list, guard) — Top probes a few px down the column
-    // centre and only when scrolled; Pointer probes exactly where the page last
-    // saw the pointer, in CSS px of the layout the capture runs against.
-    let (cx, ys, guard_open, guard_close) = match anchor {
-        ZoomAnchor::Top => (
-            "(() => { const m = document.querySelector('main') || document.body; \
-              const r = m.getBoundingClientRect(); return r.left + r.width / 2; })()"
-                .to_string(),
-            "[8, 40, 80, 140]".to_string(),
-            "if (window.scrollY > 0) {",
-            "}",
-        ),
-        ZoomAnchor::Pointer => (
-            format!("{POINTER_GLOBAL}().x"),
-            format!("[Math.max(1, Math.min(innerHeight - 1, {POINTER_GLOBAL}().y))]"),
-            "",
-            "",
-        ),
+    let call = match anchor {
+        ZoomAnchor::Top => "captureTop()".to_string(),
+        ZoomAnchor::Pointer => format!("captureAt({POINTER_GLOBAL}())"),
     };
+    format!("({ANCHOR_GLOBAL} ? {ANCHOR_GLOBAL}.{call} : null)")
+}
+
+/// JS that scrolls the anchor captured under `token` (from
+/// [`capture_anchor_js`]) back to where it was on screen, then re-takes the
+/// resize anchor from the page as it is now. `None` — nothing was captured,
+/// or the capture's reply was lost — only re-takes.
+pub fn restore_anchor_js(token: Option<u64>) -> String {
+    restore_call(&token.map_or_else(|| "null".to_string(), |t| t.to_string()))
+}
+
+fn restore_call(token_expr: &str) -> String {
+    format!("if ({ANCHOR_GLOBAL}) {ANCHOR_GLOBAL}.restore({token_expr});")
+}
+
+/// Capture → `change` → restore in one eval, for a change that is pure JS (a
+/// class flip, a custom property) and so needs no native call in between.
+pub fn anchored_js(anchor: &ZoomAnchor, change: &str) -> String {
     format!(
-        "(() => {{ window.__jmnj_anchor = null; {guard_open} \
-           const cx = Math.max(1, Math.min(innerWidth - 1, {cx})); \
-           for (const py of {ys}) {{ \
-             const c = document.elementFromPoint(cx, py); \
-             if (c && c !== document.body && c !== document.documentElement \
-                 && c.tagName !== 'MAIN') {{ \
-               window.__jmnj_anchor = {{ el: c, top: c.getBoundingClientRect().top }}; \
-               break; }} }} {guard_close} }})();"
+        "(() => {{ const t = {}; {change} {} }})();",
+        capture_anchor_js(anchor),
+        restore_call("t")
     )
 }
 
-/// JS that restores the reading position: scroll so the captured anchor returns
-/// to the same viewport y it had before the reflow. No-op if nothing was
-/// captured (e.g. an unscrolled Top anchor).
-pub const RESTORE_ANCHOR_JS: &str = "(() => { const a = window.__jmnj_anchor; \
-    if (a && a.el) { const nt = a.el.getBoundingClientRect().top; \
-      window.scrollBy({ top: nt - a.top, left: 0, behavior: 'instant' }); } \
-    window.__jmnj_anchor = null; \
-    if (window.__jmnj_rebase) window.__jmnj_rebase(); })();";
+/// JS that re-takes the resize anchor from the page as it is now. Run after
+/// every programmatic move the resize anchor cannot see coming: a quickmark
+/// jump (whose zoom change fires a `resize` *before* the jump's `scroll`
+/// event, which would otherwise restore the pre-jump place), and the graph
+/// overlay closing over a page that scrolled behind it.
+pub fn rebase_anchor_js() -> String {
+    format!("if ({ANCHOR_GLOBAL}) {ANCHOR_GLOBAL}.rebase();")
+}
 
-/// The page global [`resize_anchor_js`] exposes to re-take its reading anchor
-/// from the page as it is now. Called after every controller-driven anchored
-/// change ([`RESTORE_ANCHOR_JS`]) and by the no-flash gate's reveal, the two
-/// moments the position changes with no scroll event the tracker could trust.
-const REBASE_GLOBAL: &str = "window.__jmnj_rebase";
-
-/// Hold the reading position across a viewport resize (DESIGN D5a.0): a window
-/// going fullscreen, an i3 re-tile, the zoom level changing the CSS viewport.
+/// The reading anchor (DESIGN D5a.0): the one place that decides *what* the
+/// reader's place is and how to put it back. Installed at document start;
+/// exposed as [`ANCHOR_GLOBAL`].
 ///
-/// A resize is the one height change with no "before" the controller sees —
-/// the shell learns of it after the engine has already re-laid the page out —
-/// so the anchor cannot be captured on demand the way [`capture_anchor_js`]
-/// is. Instead this script keeps one *continuously*: every scroll re-takes it,
-/// and a `resize` scrolls it back to where it was. Resize steps run before
+/// **What is held** is a point of content, not an element: the character
+/// under the probe when there is text there, else the point at the same
+/// fraction of the element's box (a diagram node, an image). A reflow re-wraps
+/// prose, so pinning a paragraph's *top* moves the line the reader was on —
+/// most visibly when zooming about a pointer low in a long paragraph.
+///
+/// **Where it goes back to** is the same place *on screen*, kept in device px
+/// (CSS px × `devicePixelRatio`) measured from the viewport's top-left. In
+/// WebKitGTK `devicePixelRatio` is the screen scale times the page zoom (2 × z
+/// under Xvfb), so a device-px offset survives the native zoom changing the
+/// CSS viewport under it, where a CSS offset would not.
+///
+/// **Which knobs move it back**: a [`ZoomAnchor::Top`]-style anchor holds only
+/// its height, through the window — its x is just the column's centre, a probe
+/// with no meaning to the reader. A pointer anchor holds both axes, and moves
+/// the scroll containers that hold the point first (innermost out: a wide code
+/// block, a zoomed diagram — DESIGN D5a.1 / D5a.2), the window last, so what
+/// is under the cursor stays under it inside a horizontal scroller too. The
+/// window only ever moves vertically (the page has no horizontal scroll), and
+/// is placed absolutely from the root box's fractional top: `scrollBy` adds to
+/// the whole-px `scrollY` WebKit reports, losing up to a CSS px per call —
+/// and a horizontal `scrollBy` nudged the page up by one.
+///
+/// **Captures are tokens**: `captureTop()` / `captureAt(p)` keep the anchor
+/// under a fresh number and return it; `restore(t)` puts that one back and
+/// drops it. Two zoom transactions in flight never share a slot, and a capture
+/// taken before an earlier zoom landed is still right, because both what it
+/// holds and where it goes back to are independent of the layout in between.
+///
+/// **A burst keeps one pointer anchor.** Every step of a `Ctrl`+wheel burst
+/// zooms about the same content point, so `captureAt` hands out the previous
+/// pointer anchor again while nothing but the zoom has changed: the pointer
+/// and the viewport are where they were in device px (within 2 CSS px — a
+/// synthetic move after each step re-reads the pointer in whole CSS px), and
+/// nothing else has scrolled, captured or rebased since. Re-probing each step
+/// instead would take the restore's leftover as the next step's truth: WebKit
+/// places the window only to about a CSS px, and a burst summed those errors
+/// into a visible creep.
+///
+/// **The resize anchor** is the same probe at the top of the column, kept
+/// *continuously*: a resize (a window going fullscreen, an i3 re-tile, the
+/// native zoom changing the CSS viewport) has no "before" the controller sees —
+/// the shell learns of it after the engine has re-laid the page out. Every
+/// scroll re-takes it, and a `resize` puts it back. Resize steps run before
 /// scroll steps in a rendering update, so the handler always sees the anchor
-/// from before the reflow.
+/// from before the reflow. Scrolls the script causes itself (the restore, and
+/// the engine clamping a document that got shorter) must not re-take it, or a
+/// trip to fullscreen and back at the end of a document would come back
+/// somewhere else: `settled` holds the offset the last restore left, and a
+/// scroll that lands exactly there is ours. Every resize of a burst restores
+/// from the same anchor. `rebase()` re-takes it on demand — after every
+/// anchored change, the no-flash gate's reveal, and a programmatic jump
+/// ([`rebase_anchor_js`]).
 ///
-/// The anchor is the character under the probe, not the element: a resize
-/// re-wraps prose, and pinning a long paragraph's *top* would move the line the
-/// reader was on. The element (same probe points and exclusions as
-/// [`capture_anchor_js`]) is the fallback where no text is under the probe —
-/// a diagram, an image.
-///
-/// Scrolls the tracker causes itself (the restore, and the engine clamping a
-/// document that got shorter) must not re-take the anchor, or a trip to
-/// fullscreen and back at the end of a document would come back somewhere
-/// else. `settled` holds the offset the last restore left; a scroll that lands
-/// exactly there is ours. Every resize of a burst (fullscreen can deliver
-/// several) restores from the same anchor.
-///
-/// An unscrolled page takes no anchor, so the top stays exactly the top. While
-/// the no-flash gate hides the body, or the graph overlay covers it, the probe
-/// would hit nothing useful, so the anchor is left as it was.
-fn resize_anchor_js() -> String {
+/// An unscrolled page takes no resize anchor, so the top stays exactly the
+/// top. While the probe is blind — the no-flash gate hides the body, or the
+/// graph overlay covers it — a scroll *drops* the anchor rather than keeping
+/// one from before the scroll, so a resize cannot snap the page back to where
+/// it was before a jump made behind the overlay; closing the overlay re-takes
+/// it.
+fn reading_anchor_js() -> String {
     format!(
-        "(function () {{\n\
-        let anchor = null, settled = null;\n\
-        const probe = () => {{\n\
-          const d = document.documentElement, b = document.body;\n\
-          if (!b || d.classList.contains('{restoring}') \
-              || document.getElementById('__jmnj_graph')) return;\n\
-          anchor = null;\n\
-          if (window.scrollY <= 0) return;\n\
-          const m = document.querySelector('main') || b;\n\
-          const r = m.getBoundingClientRect();\n\
-          const cx = Math.max(1, Math.min(innerWidth - 1, r.left + r.width / 2));\n\
-          for (const py of [8, 40, 80, 140]) {{\n\
-            const c = document.elementFromPoint(cx, py);\n\
-            if (!c || c === b || c === d || c.tagName === 'MAIN') continue;\n\
-            const at = document.caretRangeFromPoint ? document.caretRangeFromPoint(cx, py) : null;\n\
-            const n = at && at.startContainer;\n\
-            if (n && n.nodeType === 3 && c.contains(n) && n.length > 0) {{\n\
-              const range = document.createRange();\n\
-              const o = Math.min(at.startOffset, n.length - 1);\n\
-              const top = () => {{ range.setStart(n, o); range.setEnd(n, o + 1); \
-                const rs = range.getClientRects(); \
-                return rs.length ? rs[0].top : c.getBoundingClientRect().top; }};\n\
-              anchor = {{ top: top, at: top() }};\n\
-            }} else {{\n\
-              anchor = {{ top: () => c.getBoundingClientRect().top, \
-                          at: c.getBoundingClientRect().top }};\n\
-            }}\n\
-            return;\n\
-          }}\n\
-        }};\n\
-        {rebase} = () => {{ probe(); settled = window.scrollY; }};\n\
-        window.addEventListener('scroll', function () {{\n\
-          if (settled !== null && Math.abs(window.scrollY - settled) < 1) return;\n\
-          settled = null;\n\
-          probe();\n\
-        }}, {{ passive: true }});\n\
-        window.addEventListener('resize', function () {{\n\
-          if (!anchor) return;\n\
-          window.scrollBy({{ top: anchor.top() - anchor.at, left: 0, behavior: 'instant' }});\n\
-          settled = window.scrollY;\n\
-        }});\n\
-      }})();",
+        r#"(function () {{
+  const d = document.documentElement;
+  const pointAt = (x, y) => {{
+    const b = document.body;
+    const c = document.elementFromPoint(x, y);
+    if (!c || c === b || c === d || c.tagName === 'MAIN') return null;
+    const at = document.caretRangeFromPoint ? document.caretRangeFromPoint(x, y) : null;
+    const n = at && at.startContainer;
+    if (n && n.nodeType === 3 && c.contains(n) && n.length > 0) {{
+      const o = Math.min(at.startOffset, n.length - 1);
+      const range = document.createRange();
+      return {{ el: c, at: () => {{
+        range.setStart(n, o); range.setEnd(n, o + 1);
+        const rs = range.getClientRects();
+        if (rs.length) return {{ x: rs[0].left, y: rs[0].top }};
+        const r = c.getBoundingClientRect();
+        return {{ x: r.left, y: r.top }};
+      }} }};
+    }}
+    const r = c.getBoundingClientRect();
+    const fx = r.width > 0 ? (x - r.left) / r.width : 0;
+    const fy = r.height > 0 ? (y - r.top) / r.height : 0;
+    return {{ el: c, at: () => {{
+      const q = c.getBoundingClientRect();
+      return {{ x: q.left + fx * q.width, y: q.top + fy * q.height }};
+    }} }};
+  }};
+  const take = (x, ys, both) => {{
+    const cx = Math.max(1, Math.min(innerWidth - 1, x));
+    const k = window.devicePixelRatio || 1;
+    for (const y of ys) {{
+      const p = pointAt(cx, Math.max(1, Math.min(innerHeight - 1, y)));
+      if (!p) continue;
+      const q = p.at();
+      return {{ el: p.el, at: p.at, x: q.x * k, y: q.y * k, both: both }};
+    }}
+    return null;
+  }};
+  const top = () => {{
+    if (window.scrollY <= 0) return null;
+    const m = document.querySelector('main') || document.body;
+    const r = m.getBoundingClientRect();
+    return take(r.left + r.width / 2, [8, 40, 80, 140], false);
+  }};
+  const scrollers = (el, axis) => {{
+    const out = [];
+    for (let e = el.parentElement; e && e !== document.body && e !== d; e = e.parentElement) {{
+      const cs = getComputedStyle(e);
+      const o = axis === 'x' ? cs.overflowX : cs.overflowY;
+      const room = axis === 'x' ? e.scrollWidth > e.clientWidth : e.scrollHeight > e.clientHeight;
+      if ((o === 'auto' || o === 'scroll') && room) out.push(e);
+    }}
+    return out;
+  }};
+  const hold = (a) => {{
+    if (!a.el.isConnected) return;
+    const off = (axis) => a.at()[axis] - a[axis] / (window.devicePixelRatio || 1);
+    if (a.both) for (const axis of ['x', 'y']) {{
+      const key = axis === 'x' ? 'scrollLeft' : 'scrollTop';
+      for (const s of scrollers(a.el, axis)) {{
+        const o = off(axis);
+        if (Math.abs(o) < 0.5) break;
+        s[key] = Math.round(s[key] + o);
+      }}
+    }}
+    const o = off('y');
+    if (Math.abs(o) >= 0.5)
+      window.scrollTo({{ top: -d.getBoundingClientRect().top + o, behavior: 'instant' }});
+  }};
+  let anchor = null, settled = null;
+  const probe = () => {{
+    const blind = !document.body || d.classList.contains('{restoring}')
+      || document.getElementById('__jmnj_graph');
+    anchor = blind ? null : top();
+  }};
+  const rebase = () => {{ probe(); settled = window.scrollY; }};
+  const held = new Map();
+  // Page-unique tokens: a restore still in flight from the previous document
+  // must not consume one of this document's captures.
+  let next = Date.now() * 1000;
+  const keep = (a) => {{ if (!a) return null; next += 1; held.set(next, a); return next; }};
+  let burst = null;
+  const still = (p) => {{
+    const k = window.devicePixelRatio || 1;
+    return {{ x: p.x * k, y: p.y * k, w: innerWidth * k, h: innerHeight * k }};
+  }};
+  // Every offset that moves the anchor on screen: the window's, and the
+  // scrollers' around it. A burst is only reused while none of them moved —
+  // a Shift+wheel pan of a wide block leaves the pointer where it was.
+  const offsets = (a) => [window.scrollX, window.scrollY]
+    .concat(scrollers(a.el, 'x').map((s) => s.scrollLeft))
+    .concat(scrollers(a.el, 'y').map((s) => s.scrollTop)).join(' ');
+  const captureAt = (p) => {{
+    const now = still(p), tol = 2 * (window.devicePixelRatio || 1);
+    const same = burst && burst.a.el.isConnected && burst.offsets === offsets(burst.a)
+      && ['x', 'y', 'w', 'h'].every((k) => Math.abs(burst.at[k] - now[k]) < tol);
+    if (!same) {{
+      const a = take(p.x, [p.y], true);
+      burst = a ? {{ a: a, at: now, offsets: offsets(a) }} : null;
+    }}
+    return keep(burst ? burst.a : null);
+  }};
+  const restore = (t) => {{
+    const a = held.get(t);
+    held.delete(t);
+    if (a) hold(a);
+    if (burst && burst.a === a) burst.offsets = offsets(a);
+    rebase();
+  }};
+  {global} = {{
+    captureTop: () => {{ burst = null; return keep(top()); }},
+    captureAt: captureAt,
+    restore: restore,
+    rebase: () => {{ burst = null; rebase(); }},
+  }};
+  window.addEventListener('scroll', function () {{
+    if (settled !== null && Math.abs(window.scrollY - settled) < 1) return;
+    settled = null;
+    burst = null;
+    probe();
+  }}, {{ passive: true }});
+  window.addEventListener('resize', function () {{
+    if (!anchor) return;
+    hold(anchor);
+    settled = window.scrollY;
+  }});
+}})();"#,
         restoring = RESTORING_CLASS,
-        rebase = REBASE_GLOBAL,
+        global = ANCHOR_GLOBAL,
     )
 }
 
@@ -312,12 +436,18 @@ pub const POINTER_GLOBAL: &str = "window.__jmnj_pointer";
 /// lay the page out at a screen scale of its own on top of the page zoom (2
 /// logical px per CSS px at zoom 1 under Xvfb), so a conversion from outside
 /// lands the anchor elsewhere. `clientX` / `clientY` are CSS px by definition.
-/// It is kept as a *fraction* of the viewport, not as CSS px: a native zoom
-/// change rescales the CSS viewport under a pointer that has not moved, and
-/// the viewport still covers the same screen, so the fraction stays true where
-/// a stored `clientY` would go stale until the next pointer event. It seeds
-/// from every pointer event, not only motion — a `Ctrl`+wheel may come before
-/// the pointer moves — and starts at the centre.
+/// It is kept in *device px* (`clientX × devicePixelRatio`) from the
+/// viewport's top-left, and converted back with the ratio in effect when it is
+/// read. No pointer event reaches the page during a `Ctrl`+wheel burst (GTK
+/// takes the wheel first, DESIGN D4), so the stored value must survive two
+/// changes the pointer did not make: a native zoom rescales the CSS viewport
+/// under a still pointer, and a window resize (an i3 re-tile) changes the
+/// viewport's size under it. WebKitGTK's `devicePixelRatio` is the screen
+/// scale times the page zoom, so device px are unchanged by the first and —
+/// the top-left staying put — by the second; a stored `clientY` goes stale on
+/// a zoom, and a fraction of the viewport on a resize. It seeds from every
+/// pointer event, not only motion — a `Ctrl`+wheel may come before the
+/// pointer moves — and is the viewport's centre until then.
 ///
 /// **Which diagram** is a flag posted via [`message::DIAGRAM_HOVER`]: a
 /// capture-phase `mouseover` / `mouseout` pair posts the index of the
@@ -333,11 +463,14 @@ pub const POINTER_GLOBAL: &str = "window.__jmnj_pointer";
 fn pointer_js() -> String {
     format!(
         "(function () {{
-        let fx = 0.5, fy = 0.5;
-        const track = (e) => {{ fx = e.clientX / innerWidth; fy = e.clientY / innerHeight; }};
+        let dx = null, dy = null;
+        const ratio = () => window.devicePixelRatio || 1;
+        const track = (e) => {{ dx = e.clientX * ratio(); dy = e.clientY * ratio(); }};
         for (const type of ['pointermove', 'pointerover', 'pointerdown', 'wheel'])
           document.addEventListener(type, track, {{ capture: true, passive: true }});
-        {POINTER_GLOBAL} = () => ({{ x: fx * innerWidth, y: fy * innerHeight }});
+        {POINTER_GLOBAL} = () => dx === null
+          ? {{ x: innerWidth / 2, y: innerHeight / 2 }}
+          : {{ x: dx / ratio(), y: dy / ratio() }};
         let last = null;
         const report = (v) => {{ if (v === last) return; last = v; {post} }};
         const boxOf = (node) => (node && node.closest ? node.closest('.mermaid') : null);
@@ -449,7 +582,7 @@ pub fn scroll_restore_js() -> String {
              revealed = true; \
              {reveal_global} = {{ y: window.scrollY, failsafe: failsafe }}; \
              root.classList.remove('{cls}'); \
-             if ({rebase}) {rebase}(); }};\n\
+             {rebase} }};\n\
            // The failsafe, and the reason the gate is safe to have at all: it\n\
            // is not conditional on anything above working.\n\
            setTimeout(() => reveal(true), 400);\n\
@@ -522,7 +655,7 @@ pub fn scroll_restore_js() -> String {
         apply_global = APPLY_GLOBAL,
         first = FIRST_FRAME_GLOBAL,
         reveal_global = REVEAL_GLOBAL,
-        rebase = REBASE_GLOBAL,
+        rebase = rebase_anchor_js(),
         stable_frames = STABLE_FRAMES,
     )
 }
@@ -665,7 +798,7 @@ pub fn document_start() -> Vec<String> {
         editor_sync_js(),
         pointer_js(),
         scroll_notify_js(),
-        resize_anchor_js(),
+        reading_anchor_js(),
         scroll_restore_js(),
     ]
 }

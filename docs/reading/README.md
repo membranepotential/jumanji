@@ -45,16 +45,43 @@ Zoom has two independent axes, both count-multiplied and reset together by `=`:
     leaves diagrams untouched by construction. If the width can't be parsed the
     pipeline omits `--dw` and the svg falls back to `auto`.
   - **The reading position is anchored, not accidental.** One anchor
-    mechanism (capture `elementFromPoint` + viewport offset before the change,
-    scroll it back after) is shared by both axes, parameterised by probe
-    point: `Ctrl`+wheel anchors **at the cursor** (the pointer as the page
-    itself tracks it, probed in the layout the page is still in — before the
-    native zoom changes; probing after it misplaces the anchor, worst near the
-    viewport bottom), keyboard/D-Bus zoom and text zoom anchor at the top of
-    the viewport. Sequencing is race-free: capture-JS → (completion callback)
-    native `set_zoom_level` → restore-JS. `Shell.zoom` is the source of truth (the native level lands
-    async); the native level survives a document reload (a WebView property), so
-    no re-apply is needed on load.
+    mechanism (capture a point of content before the change, put it back at
+    the same place on screen after) is shared by both axes, parameterised by
+    probe point: `Ctrl`+wheel anchors **at the cursor** (the pointer as the
+    page itself tracks it, probed in the layout the page is still in — before
+    the native zoom changes; probing after it misplaces the anchor, worst near
+    the viewport bottom), keyboard/D-Bus zoom and text zoom anchor at the top
+    of the viewport. The native zoom is a transaction across two evals:
+    capture-JS (replies with a token) → (completion callback) native
+    `set_zoom_level` → restore-JS for *that token*. `Shell.zoom` is the source
+    of truth (the native level lands async); the native level survives a
+    document reload (a WebView property), so no re-apply is needed on load.
+  - **What the anchor holds, and where it puts it back (2026-09-19).** The
+    first version held the *element* under the probe at its old *CSS* top.
+    Both halves were wrong for zoom. A paragraph's top holding still says
+    nothing about the line under a pointer low in it, which slid on every
+    zoom-in; and a CSS offset is not a screen offset once the zoom changes.
+    The anchor is now a point of content — the character under the probe when
+    there is text, else the point at the same fraction of the element's box —
+    and its place is kept in device px (CSS px × `devicePixelRatio`, which in
+    WebKitGTK is the screen scale × the page zoom, measured: 2 → 2.6 at
+    zoom 1.3 under Xvfb), so it comes back to the same place on screen at any
+    zoom. A cursor anchor holds both axes and moves the scroll containers that
+    hold the point first (a wide code block, a zoomed diagram — D5a.1/D5a.2),
+    the window last; a top anchor holds only its height, since its x is just
+    the column centre. The window is placed absolutely from the root box's
+    fractional top: `scrollBy` adds to the whole-px `scrollY` WebKit reports,
+    and lost up to a CSS px per step.
+  - **Overlapping transactions (2026-09-19).** The capture used to live in one
+    page slot. A coalesced burst can issue the next capture before the
+    previous restore has run (a trailing flush and the next tick's leading
+    flush land back to back), so one restore used the other's anchor and the
+    last found none. Each capture is now kept under its own token. On top of
+    that a burst keeps **one** cursor anchor: while the pointer and the
+    viewport are where they were (device px, within 2 CSS px) and nothing else
+    has scrolled or anchored since, `captureAt` hands out the previous anchor
+    again, so every step zooms about the same content point and the restore's
+    sub-pixel leftovers do not add up over a burst.
   - **The page tracks the pointer itself (2026-09-19).** The cursor anchor
     used to be the shell's pointer (a GTK motion controller, logical px)
     divided by the page zoom. That holds only if a logical px is a CSS px at
@@ -67,11 +94,17 @@ Zoom has two independent axes, both count-multiplied and reset together by `=`:
     (`pointer_js` in [`scripts.rs`](../../src/controller/scripts.rs)) records
     the pointer from every pointer event, `clientX`/`clientY` being CSS px by
     definition, and the capture reads it — no coordinate crosses the
-    shell/page boundary. It keeps the pointer as a fraction of the viewport,
-    because a native zoom rescales the CSS viewport under a pointer that has
-    not moved, and the second apply of a coalesced burst must still find it.
-    `GetState`'s `pointer_text`/`pointer_top` report what is under that
-    pointer, for the e2e.
+    shell/page boundary. It keeps the pointer in device px
+    (`clientX × devicePixelRatio`) from the viewport's top-left: no pointer
+    event reaches the page during a burst (GTK takes the wheel, D4), and the
+    stored value must survive both a native zoom (the CSS viewport rescales
+    under a still pointer) and a window resize (an i3 re-tile resizes it). The
+    first version kept a fraction of the viewport, which survived the zoom but
+    moved the believed pointer on a resize. Pressing `Ctrl` happens to refresh
+    it (WebKit sends a synthetic move on a modifier change), so the stale case
+    needs `Ctrl` held across the resize. `GetState`'s
+    `pointer_text`/`pointer_top` report the word under that pointer and its
+    character's top, for the e2e.
   - **Wheel zoom is coalesced, leading-edge** (~40 ms trailing window): the
     first tick of a burst applies immediately (a single tick feels instant), and
     any ticks arriving within the window after it are batched into one further
@@ -86,9 +119,9 @@ Zoom has two independent axes, both count-multiplied and reset together by `=`:
 - **Text** = the `--font-size` CSS variable on `<html>` — reflows prose without
   touching layout geometry or diagram sizing; clamped to 8 px … 3× base. Bound
   to `Ctrl`+`Shift`+wheel (config `text zoom in` / `text zoom out`); no default
-  key. Because reflow moves content, the element at the top of the viewport is
-  captured before the change and scrolled back into view after — text zoom
-  keeps the reading position anchored.
+  key. Because reflow moves content, the character at the top of the viewport
+  is captured before the change and put back at the same height after — text
+  zoom keeps the reading position anchored.
 
 **Both axes are session-scoped, not per-document.** Zoom is a live *view*
 setting: once set it carries unchanged across every document switch — following
@@ -153,7 +186,8 @@ after that block shifts, `scrollY` does not, and the reader's place slides out
 from under them. Both shipped doing exactly that.
 
 So: **any change that can alter a block's height is wrapped in the [D5a](#d5a-two-axis-zoom) anchor**
-(`capture_anchor_js` → apply → `RESTORE_ANCHOR_JS`), keyboard changes at the
+(`capture_anchor_js` → apply → `restore_anchor_js`, one eval via `anchored_js`
+when the change is pure JS), keyboard changes at the
 viewport top and pointer-driven ones at the cursor. That now covers both zoom
 axes, `ToggleWide`, `ToggleDiagramFit` and per-diagram `Ctrl`+wheel. Only
 genuinely height-neutral changes are exempt, and there is exactly one: recolor.
@@ -171,8 +205,9 @@ is not a regression, and the tests stay clear of it by sitting mid-document.
 **Resizes too (2026-09-18).** A window resize (fullscreen, an i3 re-tile, a
 panel opening) re-lays the page out with no "before" the controller ever sees,
 so capture-on-demand cannot serve it. A document-start script
-(`resize_anchor_js`) keeps the anchor continuously instead: every scroll
-re-takes it, and `resize` scrolls it back. It anchors the *character* under the
+(`reading_anchor_js`, which also owns the capture/restore above) keeps the
+anchor continuously instead: every scroll re-takes it, and `resize` scrolls it
+back. It anchors the *character* under the
 probe, not the element, because a resize re-wraps prose and a long paragraph's
 top is not where the reader's line is. Scrolls it caused itself do not re-take
 it (so fullscreen and back at the end of a document returns to the same place),
@@ -180,6 +215,19 @@ and every controller-driven anchored change and the no-flash reveal re-base it,
 so a zoom step — which changes the CSS viewport and fires `resize` too — does
 not have two anchors fighting. Guarded by
 `resizing_the_window_holds_the_reading_position`, verified red without it.
+
+**Programmatic jumps re-base it too (2026-09-19).** A quickmark set at another
+zoom level sets the native zoom and then scrolls; the zoom fires a `resize`,
+and resize steps run before scroll steps, so the handler restored the
+*pre-jump* anchor and undid the jump (measured: landed at 600, ended at 2099).
+`restore_scroll` now re-bases in the same eval. The graph overlay is the other
+blind spot: the probe cannot see through it, so a scroll behind it (an editor
+jump) now *drops* the anchor instead of keeping the stale one, and
+`hide_graph` re-bases on the page it uncovers — before, the next resize after
+closing snapped the page back to before the jump. Guarded by
+`a_quickmark_jump_across_zoom_levels_stays_where_it_landed` and
+`closing_the_graph_over_a_moved_page_holds_the_new_place_on_resize`, both red
+before.
 
 ## D5a.1: Wide blocks — pictures get the window, prose keeps the measure (2026-09-13)
 
