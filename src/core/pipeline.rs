@@ -515,7 +515,9 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::core::config::{DIAGRAM_ZOOM_CLASS, DIAGRAM_ZOOM_VAR, WideBlock};
+    use crate::core::config::{
+        DIAGRAM_ZOOM_CLASS, DIAGRAM_ZOOM_VAR, SEARCH_ACTIVE_HIGHLIGHT, SEARCH_HIGHLIGHT, WideBlock,
+    };
 
     /// A vault rooted at a directory that does not exist: the scan finds
     /// nothing, so every `[[…]]` is unresolved — which is exactly what a
@@ -717,6 +719,19 @@ mod tests {
             format!("var({DIAGRAM_ZOOM_VAR}"),
         ] {
             assert!(BASE_CSS.contains(&hook), "no stylesheet rule for {hook}");
+        }
+    }
+
+    #[test]
+    fn the_stylesheet_styles_both_search_highlights() {
+        // The search script registers these names; a name no rule styles
+        // would paint nothing.
+        for (name, var) in [
+            (SEARCH_HIGHLIGHT, "--highlight"),
+            (SEARCH_ACTIVE_HIGHLIGHT, "--highlight-active"),
+        ] {
+            let rule = format!("::highlight({name}) {{\n  background: var({var});");
+            assert!(BASE_CSS.contains(&rule), "no stylesheet rule {rule}");
         }
     }
 

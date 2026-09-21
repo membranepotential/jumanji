@@ -125,6 +125,18 @@ body {
   background: var(--highlight);
 }
 
+/* `/` search matches, painted by the controller's search script through the
+ * CSS Custom Highlight API (names: SEARCH_HIGHLIGHT and
+ * SEARCH_ACTIVE_HIGHLIGHT in core/config.rs). The current match is only in
+ * the active highlight, so its colour is exact, not a blend. */
+::highlight(jmnj-find) {
+  background: var(--highlight);
+}
+
+::highlight(jmnj-find-active) {
+  background: var(--highlight-active);
+}
+
 main.markdown-body {
   /* Fit the viewport: never wider than the window, so the page itself never
    * scrolls horizontally at any geometric-zoom level (device viewport shrinks

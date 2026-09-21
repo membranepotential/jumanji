@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::fake::{FakeChrome, FakeHost, FakeToolkit, FakeViewport, TimerEvent, ViewCall};
 use super::scripts::{
     DIAGRAM_ZOOM_MAX, DIAGRAM_ZOOM_MIN, POINTER_GLOBAL, js_string, message,
-    nearest_source_element_js,
+    nearest_source_element_js, search_clear_js, search_find_js, search_step_js,
 };
 use super::session::{Controller, Dirs, KeyOutcome};
 use super::toolkit::{Chrome, Prompt};
@@ -389,20 +389,19 @@ fn font_size_px(view: &FakeViewport) -> f64 {
         .unwrap_or_else(|_| panic!("unparseable font size in {js:?}"))
 }
 
-/// Just the find-related calls, in order — a search's whole observable story.
-fn find_calls(view: &FakeViewport) -> Vec<ViewCall> {
-    view.calls()
+/// Just the search scripts evaluated, in order — a search's whole story on
+/// the page side.
+fn search_evals(view: &FakeViewport) -> Vec<String> {
+    view.evals()
         .into_iter()
-        .filter(|c| {
-            matches!(
-                c,
-                ViewCall::Find(_)
-                    | ViewCall::FindNext
-                    | ViewCall::FindPrevious
-                    | ViewCall::FindClear
-            )
-        })
+        .filter(|js| js.contains("__jmnj_search"))
         .collect()
+}
+
+/// A field of the state snapshot, as a JSON value.
+fn state_field(r: &Reader, key: &str) -> serde_json::Value {
+    let v: serde_json::Value = serde_json::from_str(&r.state()).expect("state is JSON");
+    v[key].clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -1373,41 +1372,128 @@ fn enter_runs_the_typed_command() {
 }
 
 #[test]
-fn slash_opens_a_search_and_enter_runs_it() {
+fn slash_opens_a_search_and_enter_runs_it_in_the_page() {
     let r = Reader::loaded(DOC);
     r.press('/');
     assert_eq!(r.chrome.prompt(), Some(Prompt::Search));
-    r.submit_input("beta");
+    r.submit_input("it's <b>");
     assert_eq!(r.chrome.prompt(), None);
-    assert_eq!(
-        find_calls(&r.view),
-        vec![ViewCall::Find("beta".to_string())]
-    );
+    // The query reaches the page as an escaped JS string literal.
+    assert_eq!(search_evals(&r.view), vec![search_find_js("it's <b>", 1)]);
+    assert!(search_find_js("it's <b>", 1).contains(&js_string("it's <b>")));
 }
 
 #[test]
-fn n_and_shift_n_step_through_the_matches() {
+fn a_search_is_a_jump() {
+    let r = Reader::loaded(DOC);
+    r.view.set_scroll_y(500.0);
+    r.search("beta");
+    r.view.set_scroll_y(900.0);
+    r.view.clear();
+
+    r.press_ctrl('o');
+    assert_eq!(scrolled_to_offsets(&r.view), vec![500.0]);
+}
+
+#[test]
+fn the_posted_result_shows_as_the_search_position() {
     let r = Reader::loaded(DOC);
     r.search("beta");
+    assert_eq!(state_field(&r, "search_matches"), 0, "no result posted yet");
+
+    r.message(message::SEARCH, "1 12 2");
+    assert_eq!(r.chrome.status_right().search, "[Search 3/12]");
+    assert_eq!(state_field(&r, "search_matches"), 12);
+    assert_eq!(state_field(&r, "search_active"), 3);
+}
+
+#[test]
+fn a_search_that_finds_nothing_says_so_as_zathura_does() {
+    let r = Reader::loaded(DOC);
+    r.search("zzz");
+    r.message(message::SEARCH, "1 0 -1");
+    assert_eq!(r.chrome.message(), "Pattern not found: zzz");
+    assert_eq!(r.chrome.status_right().search, "");
+    assert_eq!(state_field(&r, "search_matches"), 0);
+
+    // Nothing to step through.
+    r.view.clear();
+    r.press('n');
+    assert!(search_evals(&r.view).is_empty());
+}
+
+#[test]
+fn a_result_for_an_earlier_search_is_dropped() {
+    let r = Reader::loaded(DOC);
+    r.search("alpha");
+    r.search("beta");
+    r.message(message::SEARCH, "1 0 -1");
+    assert_eq!(r.chrome.message(), "", "search 1 was replaced");
+    r.message(message::SEARCH, "2 4 0");
+    assert_eq!(state_field(&r, "search_matches"), 4);
+
+    r.press_key(Key::Escape);
+    r.message(message::SEARCH, "2 4 1");
+    assert_eq!(state_field(&r, "search_matches"), 0, "search 2 was cleared");
+    for bad in ["2 4", "2 4 4", "2 4 -1", "x 4 0", "2 4 0 9"] {
+        r.message(message::SEARCH, bad);
+    }
+    assert_eq!(state_field(&r, "search_matches"), 0);
+}
+
+#[test]
+fn n_and_shift_n_step_through_the_matches_by_the_count() {
+    let r = Reader::loaded(DOC);
+    r.search("beta");
+    r.message(message::SEARCH, "1 12 0");
+    r.view.clear();
     r.press('n');
     r.press('N');
+    r.press('3');
+    r.press('N');
     assert_eq!(
-        find_calls(&r.view),
-        vec![
-            ViewCall::Find("beta".to_string()),
-            ViewCall::FindNext,
-            ViewCall::FindPrevious,
-        ]
+        search_evals(&r.view),
+        vec![search_step_js(1), search_step_js(-1), search_step_js(-3)]
     );
+
+    r.message(message::SEARCH, "1 12 11");
+    assert_eq!(r.chrome.status_right().search, "[Search 12/12]");
 }
 
 #[test]
 fn escape_drops_the_active_search() {
     let r = Reader::loaded(DOC);
     r.search("beta");
+    r.message(message::SEARCH, "1 12 0");
     r.view.clear();
     r.press_key(Key::Escape);
-    assert_eq!(find_calls(&r.view), vec![ViewCall::FindClear]);
+    assert_eq!(search_evals(&r.view), vec![search_clear_js()]);
+    assert_eq!(r.chrome.status_right().search, "");
+    assert_eq!(state_field(&r, "search_active"), 0);
+}
+
+#[test]
+fn an_empty_search_drops_the_active_search() {
+    let r = Reader::loaded(DOC);
+    r.search("beta");
+    r.message(message::SEARCH, "1 12 0");
+    r.view.clear();
+    r.search("");
+    assert_eq!(search_evals(&r.view), vec![search_clear_js()]);
+    assert_eq!(state_field(&r, "search_matches"), 0);
+}
+
+#[test]
+fn a_reload_drops_the_search_with_its_page() {
+    let r = Reader::loaded(DOC);
+    r.search("beta");
+    r.message(message::SEARCH, "1 12 0");
+    std::fs::write(&r.file, DOC).expect("rewrite document");
+    r.execute(Action::Reload, 1);
+    assert_eq!(state_field(&r, "search_matches"), 0);
+    r.view.clear();
+    r.press('n');
+    assert!(search_evals(&r.view).is_empty());
 }
 
 // ---------------------------------------------------------------------------

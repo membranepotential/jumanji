@@ -11,8 +11,6 @@ use gtk::{ApplicationWindow, gdk};
 use crate::controller::toolkit::Host;
 use crate::core::config::SelectionClipboard;
 
-use super::view::LastSelection;
-
 /// A running glib timeout, cancelled when dropped.
 ///
 /// glib's `SourceId` does *not* remove its source on drop, so every repeating
@@ -29,21 +27,15 @@ impl Drop for SourceGuard {
     }
 }
 
-/// The GTK host: the application window (for `quit`) and the shared record of
-/// the user's last real selection (for the find-clobbers-PRIMARY workaround in
-/// [`View::new`](super::view::View::new)).
+/// The GTK host: the application window (for `quit`).
 #[derive(Clone)]
 pub struct GlibHost {
     window: ApplicationWindow,
-    last_selection: LastSelection,
 }
 
 impl GlibHost {
-    pub fn new(window: ApplicationWindow, last_selection: LastSelection) -> Self {
-        Self {
-            window,
-            last_selection,
-        }
+    pub fn new(window: ApplicationWindow) -> Self {
+        Self { window }
     }
 }
 
@@ -80,7 +72,6 @@ impl Host for GlibHost {
     }
 
     fn copy_selection(&self, text: &str, target: SelectionClipboard) {
-        *self.last_selection.borrow_mut() = Some(text.to_string());
         if let Some(display) = gdk::Display::default() {
             let clipboard = match target {
                 SelectionClipboard::Primary => display.primary_clipboard(),

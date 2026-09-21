@@ -13,6 +13,7 @@
 //! lives outside this file.
 
 use std::cell::RefCell;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -64,6 +65,45 @@ enum Input {
         typed: String,
         links: Vec<HintLink>,
     },
+}
+
+/// The `/` search, as the controller knows it. The page holds the matches
+/// (the search script in `scripts.rs`); this mirrors what it last posted
+/// ([`message::SEARCH`]). Each search carries an id, so a post from a search
+/// that has since been replaced or cleared is recognised and dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Search {
+    /// No search: none was run, it was cleared, it found nothing, or the
+    /// document it ran in was replaced.
+    None,
+    /// The page is searching for `query` as search `id`; no result yet.
+    Pending { id: u64, query: String },
+    /// Search `id` found `count` matches, and match `active` (0-based) is the
+    /// current one.
+    Found {
+        id: u64,
+        active: usize,
+        count: NonZeroUsize,
+    },
+}
+
+impl Search {
+    /// The id of the search in flight or on screen.
+    fn id(&self) -> Option<u64> {
+        match self {
+            Search::None => None,
+            Search::Pending { id, .. } | Search::Found { id, .. } => Some(*id),
+        }
+    }
+
+    /// The statusbar's search position, zathura's `[Search 3/12]`; empty
+    /// unless the search found something.
+    fn indicator(&self) -> String {
+        match self {
+            Search::Found { active, count, .. } => format!("[Search {}/{count}]", active + 1),
+            Search::None | Search::Pending { .. } => String::new(),
+        }
+    }
 }
 
 /// Where the document's load stands.
@@ -350,6 +390,10 @@ struct Session<T: Toolkit> {
     graph_view: View,
     /// The generation the next graph walk is stamped with.
     graph_generation: u64,
+    /// The `/` search.
+    search: Search,
+    /// The id the last search was given; the next one gets the one after.
+    search_generation: u64,
     /// Pending `:`-completion cycle, if any.
     completion: Option<Completion>,
     /// Jumplist for `Ctrl-o` / `Ctrl-i` (per document; reset on `:open`).
@@ -544,6 +588,8 @@ impl<T: Toolkit + 'static> Controller<T> {
             graph: GraphState::Closed,
             graph_view: options.graph_view,
             graph_generation: 0,
+            search: Search::None,
+            search_generation: 0,
             completion: None,
             jumplist: Jumplist::new(),
             marks: Marks::new(),
@@ -677,6 +723,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                     self.graph_toggle(Some(index));
                 }
             }
+            message::SEARCH => self.on_search_posted(payload),
             _ => {}
         }
     }
@@ -702,7 +749,43 @@ impl<T: Toolkit + 'static> Controller<T> {
         s.chrome.refit_trail();
         let pending = s.matcher.pending_indicator();
         let zoom = zoom_indicator(s.zoom, s.text_zoom);
-        s.chrome.set_status_right(percent, &pending, &zoom);
+        s.chrome
+            .set_status_right(percent, &pending, &s.search.indicator(), &zoom);
+    }
+
+    /// A search result the page posted: `"<id> <count> <active>"` (see
+    /// [`message::SEARCH`]). Dropped unless it is for the search in flight or
+    /// on screen. A search that found nothing ends there, with zathura's
+    /// `Pattern not found: <query>`.
+    fn on_search_posted(&self, payload: &str) {
+        let mut fields = payload.split(' ');
+        let (Some(Ok(id)), Some(Ok(count)), Some(Ok(active)), None) = (
+            fields.next().map(str::parse::<u64>),
+            fields.next().map(str::parse::<usize>),
+            fields.next().map(str::parse::<i64>),
+            fields.next(),
+        ) else {
+            return;
+        };
+        {
+            let mut s = self.0.borrow_mut();
+            if s.search.id() != Some(id) {
+                return;
+            }
+            s.search = match NonZeroUsize::new(count) {
+                Some(count) => match usize::try_from(active) {
+                    Ok(active) if active < count.get() => Search::Found { id, active, count },
+                    _ => return,
+                },
+                None => {
+                    if let Search::Pending { query, .. } = &s.search {
+                        s.chrome.set_message(&format!("Pattern not found: {query}"));
+                    }
+                    Search::None
+                }
+            };
+        }
+        self.refresh_status();
     }
 
     /// Read the file, render it, and load the HTML. When `preserve_scroll`, capture
@@ -840,6 +923,8 @@ impl<T: Toolkit + 'static> Controller<T> {
                 let font_size_px = (s.text_zoom != 1.0).then(|| s.font_base_px * s.text_zoom);
                 let at = s.pending_position.clone();
                 s.view.load_document(&doc, &path, &at, dark, font_size_px);
+                // The search and its highlights go with the page they were in.
+                s.search = Search::None;
                 if s.load == Load::Done {
                     s.load = Load::Replacing;
                 }
@@ -1083,11 +1168,11 @@ impl<T: Toolkit + 'static> Controller<T> {
                 }
                 self.0.borrow_mut().completion = None;
                 if query.is_empty() {
-                    self.0.borrow().view.find_clear();
+                    self.0.borrow_mut().clear_search();
                     self.refresh_status();
                 } else {
                     // A search is a jump: record the pre-search position first.
-                    self.jump_to(move |s| s.view.find(&query));
+                    self.jump_to(move |s| s.start_search(query));
                 }
             }
             Some(Prompt::Command) => {
@@ -1187,7 +1272,7 @@ impl<T: Toolkit + 'static> Controller<T> {
     pub fn state(&self, callback: impl FnOnce(String) + 'static) {
         #[rustfmt::skip]
         let (view, file, trail, dark, wide, diagram_fit, diagram_hover, zoom, text_zoom, section,
-             toc_len, loaded, mode, vault_files, graph) = {
+             toc_len, loaded, mode, vault_files, graph, search) = {
             let s = self.0.borrow();
             // Report `stdin` for a stream, not its CWD sentinel path: it is
             // honest, and it keeps the D-Bus forward-search (which matches on
@@ -1213,6 +1298,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.mode_str().to_string(),
                 s.vault.index().file_count(),
                 s.graph_state(),
+                SearchSnapshot::of(&s.search),
             )
         };
         view.scroll_state(move |vs| {
@@ -1232,6 +1318,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 &mode,
                 vault_files,
                 &graph,
+                search,
             ));
         });
     }
@@ -1425,8 +1512,16 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.drop_graph_walk();
                 s.chrome.open_input(Prompt::Search);
             }
-            Action::SearchNext => s.view.find_next(),
-            Action::SearchPrevious => s.view.find_previous(),
+            Action::SearchNext | Action::SearchPrevious => {
+                if matches!(s.search, Search::Found { .. }) {
+                    let delta = if action == Action::SearchNext {
+                        count_i
+                    } else {
+                        -count_i
+                    };
+                    s.view.search_step(delta);
+                }
+            }
             Action::Recolor => {
                 s.dark = !s.dark;
                 let dark = s.dark;
@@ -1623,7 +1718,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 // Zathura's universal abort: Esc also drops any active search
                 // (highlights + `n`/`N` state) and clears any transient statusbar
                 // notice, returning the chrome to its resting state.
-                s.view.find_clear();
+                s.clear_search();
                 s.show_trail();
                 s.completion = None;
             }
@@ -1642,7 +1737,7 @@ impl<T: Toolkit + 'static> Controller<T> {
     /// the live scroll offset for the synchronous close-time history flush.
     fn refresh_status(&self) {
         let this = self.clone();
-        let (view, chrome, pending, zoom) = {
+        let (view, chrome, pending, search, zoom) = {
             let s = self.0.borrow();
             // The bar may have been resized since the breadcrumb was last laid out;
             // re-fitting here is idempotent and costs a string compare.
@@ -1651,12 +1746,13 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.view.clone(),
                 s.chrome.clone(),
                 s.matcher.pending_indicator(),
+                s.search.indicator(),
                 zoom_indicator(s.zoom, s.text_zoom),
             )
         };
         view.scroll_state(move |vs| {
             this.0.borrow_mut().last_scroll = vs.scroll_y;
-            chrome.set_status_right(vs.scroll_percent, &pending, &zoom);
+            chrome.set_status_right(vs.scroll_percent, &pending, &search, &zoom);
         });
     }
 
@@ -2487,6 +2583,22 @@ impl<T: Toolkit> Session<T> {
             .set_message(&format!("Graph: {}", self.graph_view.name()));
     }
 
+    /// Search the document for `query` as a new search, replacing any other.
+    fn start_search(&mut self, query: String) {
+        self.search_generation += 1;
+        let id = self.search_generation;
+        self.view.search(&query, id);
+        self.search = Search::Pending { id, query };
+    }
+
+    /// Drop the search, its highlights and its `n`/`N` state.
+    fn clear_search(&mut self) {
+        if self.search != Search::None {
+            self.view.search_clear();
+            self.search = Search::None;
+        }
+    }
+
     /// Put the status line back to what the mode shows at rest — the graph's
     /// view, the TOC's title, else the trail — after something transient (the
     /// input bar's completion echo) wrote over it.
@@ -2859,7 +2971,8 @@ fn expand_env_token(token: &str) -> String {
 /// and the only way an e2e can find a diagram without guessing at the host's
 /// device scale factor; `graph_view`, `graph_selected` and `graph_items`
 /// describe an open document graph (DESIGN D14), `graph_sel_*` its selected
-/// item's box on screen; the rest are unchanged.
+/// item's box on screen; `search_matches` and `search_active` the `/` search
+/// (see [`SearchSnapshot`]); the rest are unchanged.
 #[allow(clippy::too_many_arguments)]
 fn state_json(
     file: &str,
@@ -2877,6 +2990,7 @@ fn state_json(
     mode: &str,
     vault_files: usize,
     graph: &GraphSnapshot,
+    search: SearchSnapshot,
 ) -> String {
     format!(
         "{{\"file\":{file},\"trail\":{trail},\
@@ -2900,7 +3014,8 @@ fn state_json(
          \"section\":{section},\"toc_len\":{toc_len},\"loaded\":{loaded},\
          \"vault_files\":{vault_files},\
          \"graph_view\":{graph_view},\"graph_selected\":{graph_selected},\
-         \"graph_items\":{graph_items}}}",
+         \"graph_items\":{graph_items},\
+         \"search_matches\":{search_matches},\"search_active\":{search_active}}}",
         file = json_string(file),
         trail = json_string(trail),
         scroll_y = vs.scroll_y,
@@ -2931,7 +3046,33 @@ fn state_json(
         graph_view = json_string(graph.view),
         graph_selected = json_string(&graph.selected),
         graph_items = graph.items,
+        search_matches = search.matches,
+        search_active = search.active,
     )
+}
+
+/// The `/` search as the state snapshot reports it: the match count, and the
+/// current match's 1-based position as the statusbar shows it — both 0 while
+/// no search has found anything.
+#[derive(Debug, Clone, Copy)]
+struct SearchSnapshot {
+    matches: usize,
+    active: usize,
+}
+
+impl SearchSnapshot {
+    fn of(search: &Search) -> Self {
+        match search {
+            Search::Found { active, count, .. } => Self {
+                matches: count.get(),
+                active: active + 1,
+            },
+            Search::None | Search::Pending { .. } => Self {
+                matches: 0,
+                active: 0,
+            },
+        }
+    }
 }
 
 /// The document graph as the state snapshot reports it: `view` is `""` and

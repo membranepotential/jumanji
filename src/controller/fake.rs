@@ -63,10 +63,6 @@ pub enum ViewCall {
     EvalJson(String),
     SetZoomLevel(f64),
     SetBackgroundDark(bool),
-    Find(String),
-    FindNext,
-    FindPrevious,
-    FindClear,
     Focus,
 }
 
@@ -228,22 +224,6 @@ impl Viewport for FakeViewport {
         self.record(ViewCall::SetBackgroundDark(dark));
     }
 
-    fn find(&self, text: &str) {
-        self.record(ViewCall::Find(text.to_string()));
-    }
-
-    fn find_next(&self) {
-        self.record(ViewCall::FindNext);
-    }
-
-    fn find_previous(&self) {
-        self.record(ViewCall::FindPrevious);
-    }
-
-    fn find_clear(&self) {
-        self.record(ViewCall::FindClear);
-    }
-
     fn focus(&self) {
         self.record(ViewCall::Focus);
     }
@@ -258,6 +238,7 @@ impl Viewport for FakeViewport {
 pub struct StatusRight {
     pub percent: u32,
     pub pending: String,
+    pub search: String,
     pub zoom: String,
 }
 
@@ -326,10 +307,11 @@ impl Chrome for FakeChrome {
         STATUS_COLUMNS
     }
 
-    fn set_status_right(&self, percent: u32, pending: &str, zoom: &str) {
+    fn set_status_right(&self, percent: u32, pending: &str, search: &str, zoom: &str) {
         self.0.borrow_mut().right = StatusRight {
             percent,
             pending: pending.to_string(),
+            search: search.to_string(),
             zoom: zoom.to_string(),
         };
     }

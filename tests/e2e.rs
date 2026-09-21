@@ -190,6 +190,10 @@ struct State {
     graph_sel_y: f64,
     graph_sel_width: f64,
     graph_sel_height: f64,
+    /// The `/` search: its match count, and the current match's 1-based
+    /// position (the statusbar's `[Search 3/12]`); both 0 without a result.
+    search_matches: usize,
+    search_active: usize,
 }
 
 impl State {
@@ -236,6 +240,8 @@ impl State {
             graph_sel_y: field(json, "graph_sel_y")?.parse().ok()?,
             graph_sel_width: field(json, "graph_sel_width")?.parse().ok()?,
             graph_sel_height: field(json, "graph_sel_height")?.parse().ok()?,
+            search_matches: field(json, "search_matches")?.parse().ok()?,
+            search_active: field(json, "search_active")?.parse().ok()?,
         })
     }
 }
@@ -3679,6 +3685,151 @@ fn ctrl_wheel_zooms_the_graph_about_the_pointer() {
         after.graph_sel_x,
         after.graph_sel_y
     );
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+// ---------------------------------------------------------------------------
+// `/` search
+// ---------------------------------------------------------------------------
+
+/// A document whose matches test what "the rendered text" means: `fox` five
+/// times, one of them in a code block and one only after a soft line break;
+/// phrases across a soft break and across inline markup; and a phrase that
+/// only exists across a block boundary.
+fn search_fixture(vault: &Path) -> PathBuf {
+    let doc = vault.join("search.md");
+    std::fs::write(
+        &doc,
+        "# Search\n\n\
+         The quick brown fox jumps\n\
+         over the lazy dog. Another\n\
+         fox here.\n\n\
+         A **bold** word and foo **bar** baz.\n\n\
+         - fox in a list\n\n\
+         ```text\n\
+         fox_in_code\n\
+         ```\n\n\
+         Last fox.\n",
+    )
+    .expect("write");
+    doc
+}
+
+impl Harness {
+    /// The whole `/` gesture: open the bar, type `query`, press Return, and
+    /// wait for the page's result (`matches` of them).
+    fn search(&self, query: &str, matches: usize) -> State {
+        self.key(&["slash"]);
+        self.wait_for_state("search bar open", SETTLE, |s| s.mode == "search");
+        self.type_text(query);
+        self.key(&["Return"]);
+        self.wait_for_state(&format!("/{query} finds {matches}"), SETTLE, |s| {
+            s.mode == "normal" && s.search_matches == matches
+        })
+    }
+}
+
+#[test]
+fn search_matches_the_rendered_text() {
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("search");
+    let h = Harness::launch_file(search_fixture(&vault));
+
+    let s = h.search("FOX", 5);
+    assert_eq!(
+        s.search_active, 1,
+        "the first match below the top is current"
+    );
+    // A phrase the markdown source breaks across two lines.
+    h.search("fox jumps over", 1);
+    h.search("another fox", 1);
+    // A phrase across inline markup.
+    h.search("foo bar baz", 1);
+    h.search("bold word", 1);
+    // Never across a block boundary: the list item ends before the code.
+    h.search("list fox_in_code", 0);
+    // An empty query clears the search.
+    h.search("fox", 5);
+    h.search("", 0);
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn n_and_shift_n_step_through_the_matches_and_wrap() {
+    let Some(_g) = setup_guard() else { return };
+    let vault = temp_vault("search-step");
+    let h = Harness::launch_file(search_fixture(&vault));
+
+    h.search("fox", 5);
+    let at = |n: usize| move |s: &State| s.search_matches == 5 && s.search_active == n;
+    h.key(&["n"]);
+    h.wait_for_state("n moves to match 2", SETTLE, at(2));
+    h.key(&["shift+n"]);
+    h.wait_for_state("N moves back to match 1", SETTLE, at(1));
+    h.key(&["shift+n"]);
+    h.wait_for_state("N wraps to the last match", SETTLE, at(5));
+    h.key(&["n"]);
+    h.wait_for_state("n wraps to the first match", SETTLE, at(1));
+    h.key(&["3", "n"]);
+    h.wait_for_state("3n moves three matches on", SETTLE, at(4));
+
+    h.key(&["Escape"]);
+    h.wait_for_state("Esc clears the search", SETTLE, |s| {
+        s.search_matches == 0 && s.search_active == 0
+    });
+    // Nothing left to step through.
+    h.key(&["n"]);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(h.get_state().search_matches, 0);
+
+    drop(h);
+    let _ = std::fs::remove_dir_all(&vault);
+}
+
+#[test]
+fn search_leaves_the_primary_selection_alone() {
+    // WebKit's own find selected each match, which copied it into PRIMARY,
+    // and the input bar selected its own text as it took focus. The page's
+    // search paints highlights and never touches the selection; the bar
+    // takes focus without selecting.
+    let Some(_g) = setup_guard() else { return };
+    let Some(xclip) = which("xclip") else {
+        eprintln!("skipping: xclip not installed");
+        return;
+    };
+    let vault = temp_vault("search-primary");
+    let h = Harness::launch_file(search_fixture(&vault));
+    let display = format!(":{}", h.display);
+    let primary = || {
+        let out = Command::new(&xclip)
+            .args(["-o", "-selection", "primary"])
+            .env("DISPLAY", &display)
+            .output()
+            .expect("run xclip");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let mut set = Command::new(&xclip)
+        .args(["-i", "-selection", "primary"])
+        .env("DISPLAY", &display)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("run xclip");
+    set.stdin
+        .take()
+        .expect("xclip stdin")
+        .write_all(b"sentinel")
+        .expect("write to xclip");
+    let _ = set.wait();
+    wait_for(SETTLE, || primary() == "sentinel").expect("PRIMARY holds the sentinel");
+
+    h.search("fox", 5);
+    h.key(&["n"]);
+    h.wait_for_state("n moves to match 2", SETTLE, |s| s.search_active == 2);
+    assert_eq!(primary(), "sentinel");
 
     drop(h);
     let _ = std::fs::remove_dir_all(&vault);

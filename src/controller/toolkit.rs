@@ -4,8 +4,8 @@
 //! controller is generic over a single type:
 //!
 //! - [`Viewport`] — a webview, reduced to the primitives the controller
-//!   composes everything else from (load, eval, zoom, background, find, focus).
-//!   The scrolling, hint, zoom-anchoring and state-snapshot behaviour is *not*
+//!   composes everything else from (load, eval, zoom, background, focus).
+//!   The scrolling, search, hint, zoom-anchoring and state-snapshot behaviour is *not*
 //!   here: it is JS the controller owns and runs through `eval`, so it is the
 //!   same on every platform by construction.
 //! - [`Chrome`] — the status line, the input bar, and the table-of-contents
@@ -54,14 +54,6 @@ pub trait Viewport {
     /// not painted yet never flash a mismatched theme.
     fn set_background_dark(&self, dark: bool);
 
-    /// Find-in-page: highlight every match of `text`, select the first.
-    /// Case-insensitive, wrapping — the vim/zathura default.
-    fn find(&self, text: &str);
-    fn find_next(&self);
-    fn find_previous(&self);
-    /// Drop the current search: highlights and `n`/`N` state.
-    fn find_clear(&self);
-
     /// Give the document keyboard focus (after the input bar closes, after
     /// leaving the TOC page).
     fn focus(&self);
@@ -92,7 +84,7 @@ impl Prompt {
 /// The bar has two fields. The **left** shows either the jumplist breadcrumb
 /// (`set_trail`, re-fitted to the width on demand) or a transient message
 /// that holds until the trail is set again. The **right** shows the scroll
-/// percent plus optional pending-key and zoom indicators.
+/// percent plus optional pending-key, search-position and zoom indicators.
 pub trait Chrome {
     /// Show the breadcrumb — the route to the current document, oldest first,
     /// as display names — fitted to the bar. Replaces any transient message.
@@ -104,9 +96,10 @@ pub trait Chrome {
     /// anything laid out to fit it (breadcrumb, completion echo) works with.
     /// `usize::MAX` when the width is not yet known.
     fn status_columns(&self) -> usize;
-    /// Right-hand status: pending count/key indicator, zoom indicator (empty
-    /// strings when there is nothing to show), scroll percent.
-    fn set_status_right(&self, percent: u32, pending: &str, zoom: &str);
+    /// Right-hand status: pending count/key indicator, search position
+    /// (`[Search 3/12]`), zoom indicator (empty strings when there is nothing
+    /// to show), scroll percent.
+    fn set_status_right(&self, percent: u32, pending: &str, search: &str, zoom: &str);
     /// A transient notice on the left (`no links in view`, errors, `Index`).
     fn set_message(&self, msg: &str);
 

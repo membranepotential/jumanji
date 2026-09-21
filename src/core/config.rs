@@ -188,6 +188,16 @@ pub const DIAGRAM_ZOOM_VAR: &str = "--dz";
 /// class is absent and the box keeps exactly its unzoomed geometry.
 pub const DIAGRAM_ZOOM_CLASS: &str = "jmnj-diagram-zoomed";
 
+/// The CSS highlight (the Custom Highlight API's `::highlight(<name>)`) that
+/// paints every `/` match but the current one, in `--highlight`. The
+/// controller's search script registers it; `assets/style.css` styles it.
+pub const SEARCH_HIGHLIGHT: &str = "jmnj-find";
+
+/// The CSS highlight that paints the current `/` match, in
+/// `--highlight-active`. The current match is never in [`SEARCH_HIGHLIGHT`]
+/// too, so the two colours never blend.
+pub const SEARCH_ACTIVE_HIGHLIGHT: &str = "jmnj-find-active";
+
 /// One kind of block that may break out of the reading column to window width.
 ///
 /// Bounded measure is right for prose and wrong for pictures: a 1800 px diagram

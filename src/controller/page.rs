@@ -16,7 +16,8 @@ use crate::controller::scripts::{
     APPLY_GLOBAL, FIRST_FRAME_GLOBAL, OPEN_ATTRIBUTE, POINTER_GLOBAL, RESTORING_CLASS,
     REVEAL_GLOBAL, anchored_js, capture_anchor_js, diagram_fit_class_js, diagram_zoom_js,
     diagram_zoom_reset_js, graph_call_js, graph_show_js, graph_update_js, hints_build_js,
-    js_string, nearest_source_element_js, rebase_anchor_js, restore_anchor_js, wide_class_js,
+    js_string, nearest_source_element_js, rebase_anchor_js, restore_anchor_js, search_clear_js,
+    search_find_js, search_step_js, wide_class_js,
 };
 use crate::controller::toolkit::Viewport;
 use crate::core::RenderedDocument;
@@ -520,6 +521,22 @@ pub trait Page: Viewport + Clone + 'static {
             graph_call_js("close()"),
             rebase_anchor_js()
         ));
+    }
+
+    /// Search the document for `query` and paint the matches (see
+    /// [`search_find_js`]); the page posts the result under `id`.
+    fn search(&self, query: &str, id: u64) {
+        self.eval(&search_find_js(query, id));
+    }
+
+    /// Move the current search match `delta` matches on, wrapping.
+    fn search_step(&self, delta: i64) {
+        self.eval(&search_step_js(delta));
+    }
+
+    /// Drop the search: highlights and `n`/`N` state.
+    fn search_clear(&self) {
+        self.eval(&search_clear_js());
     }
 
     /// Remove the hint overlay.

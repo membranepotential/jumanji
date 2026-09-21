@@ -84,8 +84,8 @@ impl Chrome for GtkChrome {
         self.bar.status_columns()
     }
 
-    fn set_status_right(&self, percent: u32, pending: &str, zoom: &str) {
-        self.bar.set_status_right(percent, pending, zoom);
+    fn set_status_right(&self, percent: u32, pending: &str, search: &str, zoom: &str) {
+        self.bar.set_status_right(percent, pending, search, zoom);
     }
 
     fn set_message(&self, msg: &str) {

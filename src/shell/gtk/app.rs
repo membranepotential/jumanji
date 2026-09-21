@@ -3,7 +3,6 @@
 //! on [`Controller`], which owns all of the reader's behaviour; nothing here
 //! decides anything.
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk::gdk::{Key as GdkKey, ModifierType};
@@ -28,7 +27,7 @@ use crate::core::source::Source;
 use super::chrome::GtkChrome;
 use super::dbus;
 use super::host::GlibHost;
-use super::view::{LastSelection, View};
+use super::view::View;
 
 const APP_ID: &str = "org.membranepotential.jumanji";
 
@@ -84,10 +83,7 @@ fn build_ui(
     keymap: Keymap,
     forward: Option<u32>,
 ) {
-    // Shared with the host so the copy-on-select write and the find-clobbers-
-    // PRIMARY restore agree on what the user's last real selection was.
-    let last_selection: LastSelection = Rc::new(RefCell::new(None));
-    let view = View::new(last_selection.clone());
+    let view = View::new();
     let chrome = GtkChrome::new(view.widget());
 
     let window = ApplicationWindow::builder()
@@ -98,7 +94,7 @@ fn build_ui(
         .child(chrome.widget())
         .build();
 
-    let host = GlibHost::new(window.clone(), last_selection);
+    let host = GlibHost::new(window.clone());
 
     let controller = Controller::<Gtk>::new(
         view.clone(),

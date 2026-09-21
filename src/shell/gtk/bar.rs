@@ -129,17 +129,16 @@ impl Bar {
         (width as usize * SAMPLE.len()) / run as usize
     }
 
-    /// Right-hand status: any pending count/key indicator, a zoom indicator when
-    /// either zoom axis is off 100% (e.g. `150%/120%T`), and the scroll percent.
-    pub fn set_status_right(&self, percent: u32, pending: &str, zoom: &str) {
+    /// Right-hand status: any pending count/key indicator, the search position
+    /// (`[Search 3/12]`), a zoom indicator when either zoom axis is off 100%
+    /// (e.g. `150%/120%T`), and the scroll percent.
+    pub fn set_status_right(&self, percent: u32, pending: &str, search: &str, zoom: &str) {
         let mut text = String::new();
-        if !pending.is_empty() {
-            text.push_str(pending);
-            text.push_str("   ");
-        }
-        if !zoom.is_empty() {
-            text.push_str(zoom);
-            text.push_str("   ");
+        for part in [pending, search, zoom] {
+            if !part.is_empty() {
+                text.push_str(part);
+                text.push_str("   ");
+            }
         }
         text.push_str(&format!("{percent}%"));
         self.status_right.set_text(&text);
@@ -157,7 +156,10 @@ impl Bar {
         self.prompt.set(Some(prompt));
         self.entry.set_text(prompt.prefix());
         self.entry.set_visible(true);
-        self.entry.grab_focus();
+        // Not `grab_focus`: an entry selects all of its text when it takes
+        // focus that way, and a selection in the entry claims PRIMARY — the
+        // `/` gesture would clobber what the reader last selected.
+        self.entry.grab_focus_without_selecting();
         self.entry.set_position(-1);
     }
 

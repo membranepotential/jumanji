@@ -19,7 +19,10 @@
 //! scripts themselves.
 
 use crate::controller::page::ZoomAnchor;
-use crate::core::config::{DIAGRAM_FIT_CLASS, DIAGRAM_ZOOM_CLASS, DIAGRAM_ZOOM_VAR, WIDE_CLASS};
+use crate::core::config::{
+    DIAGRAM_FIT_CLASS, DIAGRAM_ZOOM_CLASS, DIAGRAM_ZOOM_VAR, SEARCH_ACTIVE_HIGHLIGHT,
+    SEARCH_HIGHLIGHT, WIDE_CLASS,
+};
 
 /// The function every shared script posts through:
 /// `window.__jmnj_post(name, payload)`. Defined by each shell in its own
@@ -71,6 +74,11 @@ pub mod message {
     /// A click on a node's fold handle (`+n` / `−`): select it and flip its
     /// fold — the payload is as for [`GRAPH_SELECT`].
     pub const GRAPH_FOLD: &str = "graphfold";
+    /// A `/` search's result, after the search and after every `n`/`N` — the
+    /// payload is `"<id> <count> <active>"`: the id the controller gave the
+    /// search, its match count, and the current match's 0-based index (`-1`
+    /// when there is no match).
+    pub const SEARCH: &str = "search";
 }
 
 /// Build a `window.__jmnj_post('<name>', <payload_expr>);` statement. Keeps
@@ -666,13 +674,10 @@ pub fn scroll_restore_js() -> String {
 
 /// Wire zathura-style copy-on-select: posts the current non-empty selection on
 /// **`mouseup`** (the end of a pointer selection gesture) via
-/// [`message::SELECTION`]. Keying off `mouseup` — not `selectionchange` — is
-/// deliberate: WebKit's find highlight sets the DOM selection programmatically,
-/// so a `selectionchange` listener would copy every search match (and each
-/// `n`/`N` step), which is not what a copy-*on-select* feature should do. A
-/// find never synthesises `mouseup`, so search leaves the clipboard alone. An
-/// empty selection posts nothing, so a plain click (which collapses any
-/// selection) never clobbers the clipboard with `""`.
+/// [`message::SELECTION`]. Keying off `mouseup` — not `selectionchange` — makes
+/// it copy what the *pointer* selected and nothing a script set. An empty
+/// selection posts nothing, so a plain click (which collapses any selection)
+/// never clobbers the clipboard with `""`.
 fn selection_copy_js() -> String {
     format!(
         "(function () {{\n\
@@ -786,10 +791,10 @@ fn editor_sync_js() -> String {
 
 /// The scripts every shell installs at document start in the top frame, in
 /// this order, on every document: selection copy, drag-select reset, editor
-/// sync, the page's pointer (position and diagram flag), scroll notify, the resize anchor, then
-/// the scroll-restore no-flash gate. Order matters only in that scripts run in
-/// insertion order; the gate calls the resize anchor's rebase if it exists, so
-/// the anchor goes first. Otherwise each is independent of the others, and
+/// sync, the page's pointer (position and diagram flag), scroll notify, the
+/// `/` search, the resize anchor, then the scroll-restore no-flash gate. Order
+/// matters only in that scripts run in insertion order; the gate calls the
+/// resize anchor's rebase if it exists, so the anchor goes first. Otherwise each is independent of the others, and
 /// this is simply the one canonical order every shell uses.
 ///
 /// Not included: the shell's own [`POST_FN`] prelude (toolkit-specific, must
@@ -802,9 +807,49 @@ pub fn document_start() -> Vec<String> {
         editor_sync_js(),
         pointer_js(),
         scroll_notify_js(),
+        search_js(),
         reading_anchor_js(),
         scroll_restore_js(),
     ]
+}
+
+/// Find in page (`/`, `n`, `N`): a function expression taking
+/// `(names, post)`, kept as a real `.js` file; [`search_js`] installs it.
+const SEARCH_JS: &str = include_str!("assets/search.js");
+
+/// The page global the search script exposes: `find(query, id)`,
+/// `step(delta)` and `clear()`.
+const SEARCH_GLOBAL: &str = "window.__jmnj_search";
+
+/// Install the search script: it paints matches as the two CSS highlights the
+/// stylesheet styles, and posts each result via [`message::SEARCH`].
+fn search_js() -> String {
+    format!(
+        "({SEARCH_JS})({{all: '{SEARCH_HIGHLIGHT}', active: '{SEARCH_ACTIVE_HIGHLIGHT}'}}, \
+         (id, count, active) => {{ {post} }});",
+        post = post_call(message::SEARCH, "id + ' ' + count + ' ' + active"),
+    )
+}
+
+/// Search the document for `query` (case-insensitive), paint every match, make
+/// the first at or below the top of the viewport current (wrapping to the
+/// first), and post the result under `id`. Replaces any earlier search.
+pub fn search_find_js(query: &str, id: u64) -> String {
+    format!(
+        "if ({SEARCH_GLOBAL}) {SEARCH_GLOBAL}.find({}, {id});",
+        js_string(query)
+    )
+}
+
+/// Move the current match `delta` matches on (negative: back), wrapping, and
+/// post the result. A no-op without a search.
+pub fn search_step_js(delta: i64) -> String {
+    format!("if ({SEARCH_GLOBAL}) {SEARCH_GLOBAL}.step({delta});")
+}
+
+/// Drop the search: both highlights and the `n`/`N` state. Posts nothing.
+pub fn search_clear_js() -> String {
+    format!("if ({SEARCH_GLOBAL}) {SEARCH_GLOBAL}.clear();")
 }
 
 /// The document-graph overlay (DESIGN D14): a function expression taking

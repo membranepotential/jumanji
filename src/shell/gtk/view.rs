@@ -2,7 +2,7 @@
 //! [`Viewport`](crate::controller::toolkit::Viewport).
 //!
 //! Only engine primitives live here — load, eval, zoom level, background
-//! colour, find, focus — plus the WebKitGTK-specific plumbing around them: the
+//! colour, focus — plus the WebKitGTK-specific plumbing around them: the
 //! `window.__jmnj_post` prelude, the user-script installation, the single
 //! script-message router, and the navigation policy. Everything the reader
 //! *does* with a document (scrolling, hints, anchored zoom, the document-load
@@ -19,8 +19,8 @@ use gtk::gdk::RGBA;
 use gtk::prelude::*;
 use webkit6::prelude::*;
 use webkit6::{
-    FindController, FindOptions, NavigationPolicyDecision, NavigationType, PolicyDecisionType,
-    UserContentInjectedFrames, UserContentManager, UserScript, UserScriptInjectionTime, WebView,
+    NavigationPolicyDecision, NavigationType, PolicyDecisionType, UserContentInjectedFrames,
+    UserContentManager, UserScript, UserScriptInjectionTime, WebView,
 };
 
 use crate::controller::scripts::{self, POST_FN};
@@ -33,11 +33,6 @@ type NavigateSink = Rc<RefCell<Option<Box<dyn Fn(String)>>>>;
 /// The controller's message sink: `(name, payload)` for everything the shared
 /// scripts post through [`POST_HANDLER`].
 type MessageSink = Rc<RefCell<Option<Box<dyn Fn(&str, &str)>>>>;
-
-/// The last selection the *user* made, shared with the shell's
-/// [`Host`](crate::controller::toolkit::Host) so both halves of the
-/// copy-on-select feature agree on what PRIMARY should hold.
-pub type LastSelection = Rc<RefCell<Option<String>>>;
 
 /// Native WebView background painted behind the document, matched to the theme
 /// so unpainted regions never flash a mismatched colour (light `#ffffff`,
@@ -59,7 +54,7 @@ const POST_HANDLER: &str = "jmnj";
 pub struct View {
     webview: WebView,
     /// Called with the name and payload of every message the shared scripts
-    /// post (`selection`, `scroll`, `hints`, `editorsync`).
+    /// post (`scripts::message`).
     message_cb: MessageSink,
     /// Called with a resolved target URI when the webview tries to navigate
     /// (a link click); the controller decides whether to scroll, open, or
@@ -68,10 +63,7 @@ pub struct View {
 }
 
 impl View {
-    /// `last_selection` is shared with the shell's `Host`: WebKitGTK copies a
-    /// find match into PRIMARY as it selects it, and the `found-text` hook
-    /// below undoes that by writing the user's last real selection back.
-    pub fn new(last_selection: LastSelection) -> Self {
+    pub fn new() -> Self {
         let ucm = UserContentManager::new();
         let message_cb: MessageSink = Rc::new(RefCell::new(None));
 
@@ -90,20 +82,6 @@ impl View {
         connect_message_router(&ucm, message_cb.clone());
 
         let webview = WebView::builder().user_content_manager(&ucm).build();
-        // WebKitGTK copies the find match into PRIMARY as it selects it. `found-text`
-        // fires after that write, so restoring PRIMARY here — to the user's last real
-        // selection, or empty — reliably undoes it. This is the
-        // only reliable hook: clearing the DOM selection does not retract the write,
-        // and a plain post-find eval races WebKit and loses.
-        if let Some(fc) = webview.find_controller() {
-            let last = last_selection.clone();
-            fc.connect_found_text(move |_, _| {
-                if let Some(display) = gtk::gdk::Display::default() {
-                    let text = last.borrow().clone().unwrap_or_default();
-                    display.primary_clipboard().set_text(&text);
-                }
-            });
-        }
         webview.set_vexpand(true);
         webview.set_hexpand(true);
         webview.set_background_color(&BG_LIGHT);
@@ -153,10 +131,6 @@ impl View {
     pub fn set_navigate_handler(&self, f: impl Fn(String) + 'static) {
         *self.navigate_cb.borrow_mut() = Some(Box::new(f));
     }
-
-    fn find_controller(&self) -> Option<FindController> {
-        self.webview.find_controller()
-    }
 }
 
 impl Viewport for View {
@@ -191,35 +165,6 @@ impl Viewport for View {
     fn set_background_dark(&self, dark: bool) {
         self.webview
             .set_background_color(if dark { &BG_DARK } else { &BG_LIGHT });
-    }
-
-    /// Search the document. WebKit highlights every match and selects the first;
-    /// the `found-text` handler installed in [`View::new`] then restores PRIMARY,
-    /// so the highlight stays but the match never lands on the clipboard.
-    fn find(&self, text: &str) {
-        // Case-insensitive, wrapping search — the vim/zathura default.
-        let opts = FindOptions::CASE_INSENSITIVE | FindOptions::WRAP_AROUND;
-        if let Some(fc) = self.find_controller() {
-            fc.search(text, opts.bits(), u32::MAX);
-        }
-    }
-
-    fn find_next(&self) {
-        if let Some(fc) = self.find_controller() {
-            fc.search_next();
-        }
-    }
-
-    fn find_previous(&self) {
-        if let Some(fc) = self.find_controller() {
-            fc.search_previous();
-        }
-    }
-
-    fn find_clear(&self) {
-        if let Some(fc) = self.find_controller() {
-            fc.search_finish();
-        }
     }
 
     fn focus(&self) {
