@@ -119,5 +119,6 @@ the tag alone is not a release. Steps:
    release. Write real notes (what changed, user-facing), not a bare version.
 4. Point the AUR `packaging/aur/PKGBUILD` at the new tag: set `pkgver` and
    replace `sha256sums` with the sha256 of the pushed tag tarball
-   (`https://github.com/membranepotential/jumanji/archive/refs/tags/vX.Y.Z.tar.gz`).
-   Commit as `chore: point PKGBUILD at vX.Y.Z`.
+   (`https://github.com/membranepotential/jumanji/archive/refs/tags/vX.Y.Z.tar.gz`),
+   then regenerate `.SRCINFO` (`cd packaging/aur && makepkg --printsrcinfo >
+   .SRCINFO`). Commit both as `chore: point PKGBUILD at vX.Y.Z`.
