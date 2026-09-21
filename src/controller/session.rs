@@ -1172,7 +1172,15 @@ impl<T: Toolkit + 'static> Controller<T> {
                     self.refresh_status();
                 } else {
                     // A search is a jump: record the pre-search position first.
-                    self.jump_to(move |s| s.start_search(query));
+                    // The search is current from now on, so an Esc before the
+                    // position arrives cancels it; the page runs it only if it
+                    // still is.
+                    let id = self.0.borrow_mut().begin_search(query.clone());
+                    self.jump_to(move |s| {
+                        if s.search.id() == Some(id) {
+                            s.view.search(&query, id);
+                        }
+                    });
                 }
             }
             Some(Prompt::Command) => {
@@ -2583,12 +2591,13 @@ impl<T: Toolkit> Session<T> {
             .set_message(&format!("Graph: {}", self.graph_view.name()));
     }
 
-    /// Search the document for `query` as a new search, replacing any other.
-    fn start_search(&mut self, query: String) {
+    /// Make `query` the current search, replacing any other, and return its
+    /// id. The caller runs it in the page (`view.search`) with that id.
+    fn begin_search(&mut self, query: String) -> u64 {
         self.search_generation += 1;
         let id = self.search_generation;
-        self.view.search(&query, id);
         self.search = Search::Pending { id, query };
+        id
     }
 
     /// Drop the search, its highlights and its `n`/`N` state.

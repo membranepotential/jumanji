@@ -1473,6 +1473,23 @@ fn escape_drops_the_active_search() {
 }
 
 #[test]
+fn escape_before_the_search_starts_cancels_it() {
+    let r = Reader::loaded(DOC);
+    r.press('/');
+    r.chrome.set_input_query("beta");
+    // Submitted, but the pre-search position is still on its way.
+    r.controller.on_input_submitted();
+    r.press_key(Key::Escape);
+    r.settle();
+    assert!(
+        !search_evals(&r.view).contains(&search_find_js("beta", 1)),
+        "{:?}",
+        search_evals(&r.view)
+    );
+    assert_eq!(r.chrome.status_right().search, "");
+}
+
+#[test]
 fn an_empty_search_drops_the_active_search() {
     let r = Reader::loaded(DOC);
     r.search("beta");
