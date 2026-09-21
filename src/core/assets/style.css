@@ -40,7 +40,10 @@
   --note-bg: #fff8e6;
   --note-border: #e6b800;
   --note-fg: #7a5b00;
-  --selection: #b3d4fc;
+  /* zathura's default `highlight-color`. One value for both themes: WebKit
+   * paints the current `/` match as the selection, so this is the search
+   * highlight too. */
+  --selection: rgba(159, 251, 0, 0.5);
 
   /* Callout accents (the GitHub alert palette). Each drives a callout's left
    * border and title colour; the box background is a faint tint of the accent.
@@ -68,7 +71,6 @@ html.dark {
   --note-bg: #2b2410;
   --note-border: #8a6d00;
   --note-fg: #e8c766;
-  --selection: #2c5480;
 
   --alert-note: #4493f8;
   --alert-tip: #3fb950;
