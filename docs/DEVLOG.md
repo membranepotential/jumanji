@@ -16,13 +16,14 @@ its last frame on return. The TOC is now a GtkOverlay child over the
 document, so the view never leaves the screen. Seen on the owner's GPU
 session only; Xvfb's software renderer repaints on return.
 
-`resources/theme.example.css` is a Solarized theme that sets every colour
-variable; a unit test keeps it in sync with `style.css`. Next: install it
+`resources/theme.example.css` holds the built-in colours, every variable
+for light and dark, as a theme to copy and edit; a unit test keeps its values
+equal to `style.css`. Next: install it
 beside `config.example.toml` in the PKGBUILD at the next release (the pinned
 v1.10.0 tarball does not have it).
 
-Open: a 1 px strip of the page below the status bar on the owner's screen;
-not reproduced under Xvfb at scale 1 or 2, Xft.dpi 192, or six heights.
+A reported 1 px strip of the page below the status bar was not reproduced,
+under Xvfb (scale 1 and 2, Xft.dpi 192, six heights) or by the owner; closed.
 
 ## 2026-09-21 — search is page JS, in zathura's two colours
 

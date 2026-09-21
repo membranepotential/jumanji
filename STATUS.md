@@ -24,7 +24,7 @@ Shipped through **v1.10.0** (the document graph, pointer-anchored zoom).
   Open: SVG `<text>` matches are found but not painted.
 - **completion, TOC flash, theme (2026-09-21, 6ce0ace..b47bbf1)** — multi-word
   Tab completion + Shift-Tab; TOC is an overlay (no stale graph frame);
-  `resources/theme.example.css`. Open: 1 px strip under the status bar.
+  `resources/theme.example.css` (the built-in colours).
 - **v1.10.0 (2026-09-19)** — the document graph; after it: zoom clamp, peek
   drawn as scene nodes, arrow keys + Tab, view line, mermaid docs test.
 - **pre-release review fixes (2026-09-19, 31f895f, 327269f)** — Astra review

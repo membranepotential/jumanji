@@ -613,19 +613,33 @@ mod tests {
     }
 
     #[test]
-    fn the_example_theme_sets_only_variables_the_stylesheet_has() {
-        let names = |css: &str| -> std::collections::BTreeSet<String> {
-            css.lines()
+    fn the_example_theme_is_the_built_in_colours() {
+        // `--name: value` pairs of the first `selector {` block in `css`.
+        let vars = |css: &str, selector: &str| -> Vec<(String, String)> {
+            let start = css.find(&format!("\n{selector} {{")).expect(selector);
+            let body = &css[start..];
+            body[..body.find("\n}").expect("block end")]
+                .lines()
                 .filter_map(|l| l.trim().strip_prefix("--"))
                 .filter_map(|l| l.split_once(':'))
-                .map(|(name, _)| name.to_string())
+                .map(|(name, value)| {
+                    let value = value.split(';').next().unwrap_or("").trim();
+                    (name.to_string(), value.to_string())
+                })
                 .collect()
         };
-        let example = names(include_str!("../../resources/theme.example.css"));
-        let builtin = names(include_str!("assets/style.css"));
-        assert!(example.len() > 20, "{example:?}");
-        let unknown: Vec<_> = example.difference(&builtin).collect();
-        assert!(unknown.is_empty(), "not in style.css: {unknown:?}");
+        let example = include_str!("../../resources/theme.example.css");
+        let builtin = include_str!("assets/style.css");
+        // Layout constants, not colours: the example leaves them out.
+        let layout = ["content-width", "main-pad-x", "mermaid-pad", "wide-gutter"];
+        for selector in [":root", "html.dark"] {
+            let want: Vec<_> = vars(builtin, selector)
+                .into_iter()
+                .filter(|(name, _)| !layout.contains(&name.as_str()))
+                .collect();
+            assert!(want.len() > 10, "{selector}: {want:?}");
+            assert_eq!(vars(example, selector), want, "{selector}");
+        }
     }
 
     #[test]
