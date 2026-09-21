@@ -81,7 +81,8 @@ zooms the text, the back/forward side buttons walk the jumplist (same as
 `Ctrl-o` / `Ctrl-i`), and links are clickable (external links open in your
 browser — jumanji itself never touches the network). Scroll position and zoom are
 remembered per file. Drop `.css` files into `~/.config/jumanji/themes/` to
-restyle the reader; GFM alerts (`> [!NOTE]` …) render as callouts. LaTeX math —
+restyle the reader ([`resources/theme.example.css`](resources/theme.example.css)
+is a Solarized theme listing every colour variable; edits apply live); GFM alerts (`> [!NOTE]` …) render as callouts. LaTeX math —
 inline `$…$` and display `$$…$$`, matrices and aligned environments — is
 typeset to native MathML (no JavaScript), and recolors with the page.
 

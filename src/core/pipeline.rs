@@ -613,6 +613,22 @@ mod tests {
     }
 
     #[test]
+    fn the_example_theme_sets_only_variables_the_stylesheet_has() {
+        let names = |css: &str| -> std::collections::BTreeSet<String> {
+            css.lines()
+                .filter_map(|l| l.trim().strip_prefix("--"))
+                .filter_map(|l| l.split_once(':'))
+                .map(|(name, _)| name.to_string())
+                .collect()
+        };
+        let example = names(include_str!("../../resources/theme.example.css"));
+        let builtin = names(include_str!("assets/style.css"));
+        assert!(example.len() > 20, "{example:?}");
+        let unknown: Vec<_> = example.difference(&builtin).collect();
+        assert!(unknown.is_empty(), "not in style.css: {unknown:?}");
+    }
+
+    #[test]
     fn font_family_is_css_escaped() {
         // A quote in the value must not break out of the CSS string / style rule.
         let escaped = css_font_family("Ev\"il</style>");

@@ -1,0 +1,92 @@
+/* Example jumanji theme: Solarized, light and dark.
+ *
+ * Install: copy to ~/.config/jumanji/themes/solarized.css (or
+ * $XDG_CONFIG_HOME/jumanji/themes/). Every .css file there is loaded after the
+ * built-in stylesheet, in filename order, so its rules win. Edits apply live.
+ *
+ * Most colours are CSS variables: light mode reads them from `:root`, dark
+ * mode (Ctrl-r, or `default-recolor = true`) from `html.dark`. Set only the
+ * ones you want to change; the rest keep their built-in values. A test keeps
+ * this list in sync with the stylesheet.
+ *
+ * The status bar, input bar and TOC are GTK widgets, not part of the page;
+ * they follow your GTK theme (~/.config/gtk-4.0/gtk.css). */
+
+:root {
+  --bg: #fdf6e3; /* page background */
+  --fg: #657b83; /* body text */
+  --fg-muted: #93a1a1; /* secondary text: captions, footnotes */
+  --heading: #586e75;
+  --accent: #268bd2; /* links */
+  --border: #eee8d5; /* rules, table borders */
+  --border-strong: #93a1a1;
+  --code-bg: #eee8d5; /* inline code */
+  --quote-border: #93a1a1;
+  --table-head-bg: #eee8d5;
+  --table-zebra: #f5efdc;
+  --note-bg: #eee8d5; /* render-error notes */
+  --note-border: #b58900;
+  --note-fg: #586e75;
+
+  /* Callouts: `> [!NOTE]`, `> [!TIP]`, … */
+  --alert-note: #268bd2;
+  --alert-tip: #859900;
+  --alert-important: #6c71c4;
+  --alert-warning: #b58900;
+  --alert-caution: #dc322f;
+
+  /* The selection and search matches. The `highlight-color` and
+   * `highlight-active-color` options set these too; a theme wins over them. */
+  --highlight: rgba(181, 137, 0, 0.35);
+  --highlight-active: rgba(203, 75, 22, 0.5);
+}
+
+html.dark {
+  --bg: #002b36;
+  --fg: #839496;
+  --fg-muted: #586e75;
+  --heading: #93a1a1;
+  --accent: #268bd2;
+  --border: #073642;
+  --border-strong: #586e75;
+  --code-bg: #073642;
+  --quote-border: #586e75;
+  --table-head-bg: #073642;
+  --table-zebra: #01313d;
+  --note-bg: #073642;
+  --note-border: #b58900;
+  --note-fg: #93a1a1;
+
+  --alert-note: #268bd2;
+  --alert-tip: #859900;
+  --alert-important: #6c71c4;
+  --alert-warning: #b58900;
+  --alert-caution: #dc322f;
+}
+
+/* Beyond the variables, any CSS works. Some examples: */
+
+/* Code blocks take their colours from the built-in syntax palettes (GitHub
+ * light, Base16 Ocean dark). A block's background can follow the theme: */
+html:not(.dark) pre.code {
+  background: #eee8d5;
+}
+html.dark pre.code {
+  background: #073642;
+}
+
+/* Fonts. The `font-body`, `font-mono` and `font-size` options cover the
+ * common case; a theme can go further, e.g. a separate heading face. */
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  font-family: "Source Sans 3", sans-serif;
+}
+
+/* Links underlined only on hover. */
+.markdown-body a {
+  text-decoration: none;
+}
+.markdown-body a:hover {
+  text-decoration: underline;
+}
