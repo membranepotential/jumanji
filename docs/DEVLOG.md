@@ -18,9 +18,8 @@ session only; Xvfb's software renderer repaints on return.
 
 `resources/theme.example.css` holds the built-in colours, every variable
 for light and dark, as a theme to copy and edit; a unit test keeps its values
-equal to `style.css`. Next: install it
-beside `config.example.toml` in the PKGBUILD at the next release (the pinned
-v1.10.0 tarball does not have it).
+equal to `style.css`. The PKGBUILD installs it beside `config.example.toml`
+from v1.11.0.
 
 A reported 1 px strip of the page below the status bar was not reproduced,
 under Xvfb (scale 1 and 2, Xft.dpi 192, six heights) or by the owner; closed.

@@ -9,7 +9,7 @@ content pipeline, modal vim/zathura keys, Obsidian dialect. Linux-first.
 
 ## Now
 
-Shipped through **v1.10.0** (the document graph, pointer-anchored zoom).
+Shipped through **v1.11.0** (search and selection in zathura's colours).
 
 - **macOS port (issue #1)** — [05-macos-port.md](docs/research/05-macos-port.md);
   tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
