@@ -40,10 +40,12 @@
   --note-bg: #fff8e6;
   --note-border: #e6b800;
   --note-fg: #7a5b00;
-  /* Overridden by a generated block using opts.highlight_color (zathura's
-   * default `highlight-color`). One value for both themes: WebKit paints the
-   * current `/` match as the selection, so this is the search highlight too. */
-  --selection: rgba(159, 251, 0, 0.5);
+  /* Overridden by a generated block from `highlight-color` and
+   * `highlight-active-color` (zathura's defaults here). One value for both
+   * themes. `--highlight` paints the selection and every `/` match,
+   * `--highlight-active` the current match. */
+  --highlight: rgba(159, 251, 0, 0.5);
+  --highlight-active: rgba(0, 188, 0, 0.5);
 
   /* Callout accents (the GitHub alert palette). Each drives a callout's left
    * border and title colour; the box background is a faint tint of the accent.
@@ -120,7 +122,7 @@ body {
 }
 
 ::selection {
-  background: var(--selection);
+  background: var(--highlight);
 }
 
 main.markdown-body {

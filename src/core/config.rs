@@ -60,6 +60,15 @@ impl Rgba {
         a: 0.5,
     };
 
+    /// zathura's default `highlight-active-color`, the green of its current
+    /// search hit.
+    pub const ZATHURA_HIGHLIGHT_ACTIVE: Self = Self {
+        r: 0,
+        g: 188,
+        b: 0,
+        a: 0.5,
+    };
+
     pub fn parse(s: &str) -> Result<Self, String> {
         let s = s.trim();
         let invalid = || {
@@ -380,9 +389,12 @@ pub struct Options {
     /// (`tree`). What `v` starts out flipping; `:set` applies it to an open
     /// graph.
     pub graph_view: GraphView,
-    /// The colour of a text selection and so of the current `/` match, which
-    /// WebKit shows as the selection. zathura's `highlight-color` and default.
+    /// The colour of a text selection and of every `/` match. zathura's
+    /// `highlight-color` and default.
     pub highlight_color: Rgba,
+    /// The colour of the current `/` match, the one `n`/`N` step from.
+    /// zathura's `highlight-active-color` and default.
+    pub highlight_active_color: Rgba,
     /// Which clipboard a selection is copied to on select.
     pub selection_clipboard: SelectionClipboard,
     /// Reverse editor sync (DESIGN D7): the command spawned on Ctrl+click, with
@@ -415,6 +427,7 @@ impl Default for Options {
             diagram_fit: false,
             graph_view: GraphView::Links,
             highlight_color: Rgba::ZATHURA_HIGHLIGHT,
+            highlight_active_color: Rgba::ZATHURA_HIGHLIGHT_ACTIVE,
             selection_clipboard: SelectionClipboard::Primary,
             editor_command: EditorCommand::default(),
             renderers: BTreeMap::new(),
@@ -494,6 +507,11 @@ impl Options {
             "highlight-color" => {
                 self.highlight_color =
                     Rgba::parse(unquote(value)).map_err(|m| format!("highlight-color: {m}"))?;
+                Ok(SetEffect::Rerender)
+            }
+            "highlight-active-color" => {
+                self.highlight_active_color = Rgba::parse(unquote(value))
+                    .map_err(|m| format!("highlight-active-color: {m}"))?;
                 Ok(SetEffect::Rerender)
             }
             "scroll-step" => {
@@ -622,6 +640,13 @@ impl Config {
             })?,
             None => defaults.highlight_color,
         };
+        let highlight_active_color = match raw_opts.highlight_active_color {
+            Some(s) => Rgba::parse(&s).map_err(|message| ConfigError::OptionValue {
+                key: "highlight-active-color",
+                message,
+            })?,
+            None => defaults.highlight_active_color,
+        };
         let options = Options {
             scroll_step_px: raw_opts.scroll_step.unwrap_or(defaults.scroll_step_px),
             zoom_step: raw_opts.zoom_step.unwrap_or(defaults.zoom_step),
@@ -640,6 +665,7 @@ impl Config {
             diagram_fit: raw_opts.diagram_fit.unwrap_or(defaults.diagram_fit),
             graph_view,
             highlight_color,
+            highlight_active_color,
             selection_clipboard,
             editor_command,
             // Normalise fence-language keys to lowercase so the lookup (which
@@ -907,6 +933,7 @@ pub fn option_keys() -> &'static [&'static str] {
         "diagram-fit",
         "graph-view",
         "highlight-color",
+        "highlight-active-color",
         "selection-clipboard",
     ]
 }
@@ -1007,6 +1034,8 @@ struct RawOptions {
     graph_view: Option<String>,
     #[serde(rename = "highlight-color")]
     highlight_color: Option<String>,
+    #[serde(rename = "highlight-active-color")]
+    highlight_active_color: Option<String>,
     #[serde(rename = "selection-clipboard")]
     selection_clipboard: Option<String>,
     #[serde(rename = "editor-command")]
@@ -1491,6 +1520,26 @@ mod tests {
             "rgba(0, 188, 0, 0.5)"
         );
         assert!(Config::parse("[options]\nhighlight-color = \"blue\"\n").is_err());
+    }
+
+    #[test]
+    fn highlight_active_color_defaults_to_zathuras_and_is_settable() {
+        let mut o = Options::default();
+        assert_eq!(o.highlight_active_color, Rgba::ZATHURA_HIGHLIGHT_ACTIVE);
+        assert_eq!(o.highlight_active_color.to_string(), "rgba(0, 188, 0, 0.5)");
+        assert_eq!(
+            o.set("highlight-active-color", "\"#f00\"").unwrap(),
+            SetEffect::Rerender
+        );
+        assert_eq!(o.highlight_active_color.to_string(), "rgba(255, 0, 0, 1)");
+        assert!(o.set("highlight-active-color", "nope").is_err());
+
+        let c = Config::parse("[options]\nhighlight-active-color = \"#00ff0080\"\n").unwrap();
+        assert_eq!(
+            c.options.highlight_active_color.to_string(),
+            "rgba(0, 255, 0, 0.5019607843137255)"
+        );
+        assert!(Config::parse("[options]\nhighlight-active-color = \"green\"\n").is_err());
     }
 
     #[test]

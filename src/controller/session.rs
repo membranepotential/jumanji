@@ -493,6 +493,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 font_mono: options.font_mono.clone(),
                 font_size_px: options.font_size_px,
                 highlight_color: options.highlight_color,
+                highlight_active_color: options.highlight_active_color,
                 // Populated per-render from `<config>/jumanji/themes/*.css`.
                 extra_css: Vec::new(),
                 // External fence renderers are config-only (no runtime `:set`), so
@@ -2254,6 +2255,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                     s.render_opts.font_mono = o.font_mono.clone();
                     s.render_opts.font_size_px = o.font_size_px;
                     s.render_opts.highlight_color = o.highlight_color;
+                    s.render_opts.highlight_active_color = o.highlight_active_color;
                     s.render_opts.wide = o.wide;
                     s.render_opts.wide_blocks = o.wide_blocks.clone();
                     s.render_opts.diagram_fit = o.diagram_fit;
