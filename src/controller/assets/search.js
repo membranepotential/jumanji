@@ -198,7 +198,9 @@
     find(query, id) {
       unregister();
       search = { id, ranges: [], active: -1, all: new Highlight(), current: new Highlight() };
-      const needle = query.toLowerCase().replace(/[ \t\n\r\f]+/g, ' ').replace(/\u00a0/g, ' ');
+      // As typed: the scan side already collapsed the page's whitespace
+      // where CSS does, so `let  x` still finds two spaces in a code block.
+      const needle = query.toLowerCase().replace(/\u00a0/g, ' ');
       const main = document.querySelector('main.markdown-body');
       if (needle.length > 0 && main) {
         const { string, segs } = scan(main);

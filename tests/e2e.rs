@@ -3710,6 +3710,7 @@ fn search_fixture(vault: &Path) -> PathBuf {
          - fox in a list\n\n\
          ```text\n\
          fox_in_code\n\
+         let  x = 1\n\
          ```\n\n\
          Last fox.\n",
     )
@@ -3750,6 +3751,9 @@ fn search_matches_the_rendered_text() {
     h.search("bold word", 1);
     // Never across a block boundary: the list item ends before the code.
     h.search("list fox_in_code", 0);
+    // Code keeps its whitespace, and so does the query.
+    h.search("let  x", 1);
+    h.search("let x", 0);
     // An empty query clears the search.
     h.search("fox", 5);
     h.search("", 0);
