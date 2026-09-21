@@ -22,6 +22,9 @@ Shipped through **v1.10.0** (the document graph, pointer-anchored zoom).
   `highlight-color`/`highlight-active-color`; search is controller JS painted
   with CSS highlights (no FindController); selection no longer spans the window.
   Open: SVG `<text>` matches are found but not painted.
+- **completion, TOC flash, theme (2026-09-21, 6ce0ace..b47bbf1)** — multi-word
+  Tab completion + Shift-Tab; TOC is an overlay (no stale graph frame);
+  `resources/theme.example.css`. Open: 1 px strip under the status bar.
 - **v1.10.0 (2026-09-19)** — the document graph; after it: zoom clamp, peek
   drawn as scene nodes, arrow keys + Tab, view line, mermaid docs test.
 - **pre-release review fixes (2026-09-19, 31f895f, 327269f)** — Astra review
@@ -33,8 +36,6 @@ Shipped through **v1.10.0** (the document graph, pointer-anchored zoom).
 - **document graph v2 (2026-09-19, e4aa0b2)** — [interaction model](docs/graph/interaction.md):
   one node, one handle, `Space` folds, peek, route-first framing;
   [docs/graph/](docs/graph/README.md) with screenshots + demo tree.
-- **docs split into feature folders (2026-09-19)** — [docs/README.md](docs/README.md)
-  indexes every decision; DESIGN.md is an anchor stub.
 - **position held across resize, toggles and zoom (2026-09-13..18)** — the
   D5a.0 anchor for `s`, `a`, fullscreen; `probe_text` e2e observables.
 - **v1.9.0** — wide blocks (D5a.1), diagram fit + per-diagram zoom (D5a.2),

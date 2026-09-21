@@ -2,7 +2,29 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-21 (latest) — search is page JS, in zathura's two colours
+## 2026-09-21 (latest) — completion past a space; no graph flash; example theme
+
+Tab completion treated the text before the first space as the command
+word, so every multi-word action (`scroll down`, `zoom in`) completed to
+nothing once the input held a space: `:` Tab, cycle, delete a character,
+and Tab stopped working. Names now match by prefix, spaces included.
+Shift-Tab now cycles backwards, as in vim.
+
+`t`, Tab, Tab flashed the graph. The TOC was a GtkStack page, which took the
+web view off screen; the graph closed while it was away, and the view showed
+its last frame on return. The TOC is now a GtkOverlay child over the
+document, so the view never leaves the screen. Seen on the owner's GPU
+session only; Xvfb's software renderer repaints on return.
+
+`resources/theme.example.css` is a Solarized theme that sets every colour
+variable; a unit test keeps it in sync with `style.css`. Next: install it
+beside `config.example.toml` in the PKGBUILD at the next release (the pinned
+v1.10.0 tarball does not have it).
+
+Open: a 1 px strip of the page below the status bar on the owner's screen;
+not reproduced under Xvfb at scale 1 or 2, Xft.dpi 192, or six heights.
+
+## 2026-09-21 — search is page JS, in zathura's two colours
 
 `/` no longer uses WebKit's `FindController`. Search is a document-start
 script the controller owns (`controller/assets/search.js`), driven through
