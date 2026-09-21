@@ -2,7 +2,56 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-21 (latest) — selection in zathura's colour, only over the text
+## 2026-09-21 (latest) — search is page JS, in zathura's two colours
+
+`/` no longer uses WebKit's `FindController`. Search is a document-start
+script the controller owns (`controller/assets/search.js`), driven through
+`Viewport::eval` like scrolling and hints. It paints every match in
+`highlight-color` and the current match in the new `highlight-active-color`
+(zathura's option and default, rgba(0, 188, 0, 0.5)) with the CSS Custom
+Highlight API. The current match is in the active highlight only, so its
+colour is exact, not a blend of the two.
+
+Why: WebKit painted the other matches in its own marker colour, which the
+page could not set, and had no colour for the current match. Its find also
+selected each match, which copied it into PRIMARY; the shell undid that
+from a `found-text` hook. That hook, the shared last-selection record it
+needed, and `Viewport`'s four find methods are gone. The mac shell gets the
+same search for free. D2a in docs/architecture/README.md records the change.
+
+What the script searches: the rendered text of `main.markdown-body`. It
+skips what is not painted (`display: none`, `visibility`, a closed
+`<details>` except its summary, SVG text outside `<text>` and
+`<foreignObject>`, such as a diagram's `<style>`), collapses whitespace where
+CSS does (a phrase across a soft line break matches), and matches across
+inline markup but never across blocks. Case-insensitive. The first match at
+or below the top of the viewport is current; `n`/`N` wrap and take a count.
+A match is revealed inside its own scroller first (a wide code block), then
+the page, and only when it is not already in view. Each search carries an
+id, so a late result from a replaced or cleared search is dropped.
+
+Zathura's statusbar feedback: `[Search 3/12]` on the right while a search is
+active, `Pattern not found: <query>` when it finds nothing. GetState reports
+`search_matches` and `search_active`. Three e2e tests cover soft breaks,
+inline markup, block boundaries, `n`/`N` wrap and count, `Esc`, and PRIMARY.
+
+The PRIMARY e2e test found a second clobber: the input bar selected its own
+text as it took focus, which claimed PRIMARY on every `/` and `:`. It now
+takes focus without selecting.
+
+Measured against the native find (WebKitGTK 2.52, a scratch harness running
+both on the same page): on a 317 kB concatenation of the docs, eight queries
+give identical counts, 27233 matches of `e` included; that search takes
+445 ms in the page. On `demo/demo.md`, `e` gives 371 against 381: 8 are in
+a closed `<details>`, which the native find counts and this search skips on
+purpose; 2 are unexplained, somewhere in the diagrams or MathML.
+
+A known gap: WebKit paints no `::highlight` on SVG `<text>`. A match in a
+sequence diagram's label is found, counted and scrolled to, but not coloured
+(checked under Xvfb). Flowchart labels are HTML in a `<foreignObject>` and do
+paint. Next, if it matters: draw a rect behind SVG text matches.
+
+## 2026-09-21 — selection in zathura's colour, only over the text
 
 The selection was dark blue in dark mode and hard to see. WebKit shows the
 current `/` match as the selection, so search hits were just as faint. The
@@ -21,6 +70,8 @@ automated test covers it (it is paint only).
 WebKit draws the non-current matches with its own marker colour, which the
 page cannot set; jumanji has no separate current-match colour
 (zathura's `highlight-active-color`).
+*(Superseded the same day: search is now page JS with both colours; see the
+entry above.)*
 
 ## 2026-09-19 — every mermaid diagram is checked; the view explains itself
 

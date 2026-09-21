@@ -108,11 +108,11 @@ So the reader is three layers, not two:
   Toolkit>` owns the session state and every flow, and drives the window
   through three small traits it defines in `controller::toolkit`:
   `Viewport` (a webview reduced to load / eval / eval-to-JSON / zoom /
-  background / find / focus), `Chrome` (status line, input bar, TOC page) and
+  background / focus), `Chrome` (status line, input bar, TOC page) and
   `Host` (timers, a worker thread whose result lands on the main loop, the
   system URI handler, the selection clipboard, detached spawn, quit).
-  `controller::page` composes all viewport *behaviour* — scrolling, hints,
-  anchored zoom, the load-time `<html>` rewrite, the state snapshot — as JS
+  `controller::page` composes all viewport *behaviour* — scrolling, `/`
+  search, hints, anchored zoom, the load-time `<html>` rewrite, the state snapshot — as JS
   the controller owns and runs through `Viewport::eval`, so it is the same on
   every toolkit by construction. `controller::scripts` holds the document-
   start user scripts, byte-identical everywhere; they post back through a
@@ -123,8 +123,26 @@ So the reader is three layers, not two:
   implementing `Viewport`, `GtkChrome`, `GlibHost`, GTK event adapters
   (`KeyPress`, wheel, pointer, close), and the per-instance D-Bus interface,
   which calls the controller's automation surface (`state`, `execute_str`,
-  `goto_source_line`). Native `FindController`, PRIMARY selection and D-Bus
-  are deliberately GTK-only; a second shell provides its own or does without.
+  `goto_source_line`). PRIMARY selection and D-Bus are deliberately
+  GTK-only; a second shell provides its own or does without.
+
+**Search is controller JS (2026-09-21).** The first cut kept WebKitGTK's
+native `FindController` in the GTK shell. It is now a document-start script
+the controller owns (`controller/assets/search.js`), run through
+`Viewport::eval` like scrolling and hints, and `Viewport` has no find methods.
+Reasons: WebKit paints matches in its own colours, so `highlight-color` could
+colour only the current match (the selection) and there was no
+`highlight-active-color`; the page script paints every match and the current
+one with the CSS Custom Highlight API in the configured colours. WebKit's
+find selects the current match, which copied it into PRIMARY; the shell
+undid that from a `found-text` hook with a shared record of the last real
+selection, and all of that is gone because the script never touches the
+selection. And a mac shell, which has no native find through wry, gets the
+same search without writing one. The cost: the script decides what "the
+rendered text" is (whitespace collapsing, block boundaries, what is painted)
+instead of WebKit's text iterator. Measured on a 317 kB corpus of the docs,
+its counts equal the native ones; details in the
+[DEVLOG](../DEVLOG.md).
 
 **Rules.** The controller never imports `gtk`, `glib`, `gio`, `webkit6` or
 `javascriptcore` — the same rule core has, enforced by grep. Callbacks the
@@ -139,7 +157,7 @@ instruction-count A/B against v1.8.0 ([D13](#d13-performance-regressions-are-jud
 **What it buys.** The controller gets a fake toolkit and fast unit tests for
 flows that previously needed a display. A macOS shell (tao + wry) becomes
 `shell/mac/`, `cfg(target_os = "macos")`, tier 2, never on the Linux release
-path — its design questions (in-page chrome, JS find, no D-Bus, macOS 14.2
+path — its design questions (in-page chrome, no D-Bus, macOS 14.2
 floor) are recorded in the research note and become ADR entries only when
 that shell lands.
 

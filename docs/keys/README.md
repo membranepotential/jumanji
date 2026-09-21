@@ -24,7 +24,13 @@ toplevel handles vim keys *before* WebKit — architecturally guaranteed, no
 focus fights. Dispatch is girara-style: `mode × count × key-sequence → Action`,
 count-prefix handling done once in the dispatcher, never per-binding.
 Scrolling/zoom drive the webview via `webkit6` APIs and small JS snippets
-(`window.scrollBy`, anchor jumps); search uses WebKit's `FindController`.
+(`window.scrollBy`, anchor jumps). Search is JS the controller owns too
+(`controller/assets/search.js`): it searches the rendered text, paints matches
+with the CSS Custom Highlight API, and posts the match count back; see
+[D2a](../architecture/README.md#d2a-three-layers--core-controller-toolkit-shell-2026-09-02).
+Like zathura, the statusbar shows `[Search 3/12]` while a search is active, a
+search that finds nothing says `Pattern not found: <query>`, and `Esc` drops
+the search.
 
 ## D5: Config — TOML, zathura idioms
 
@@ -44,7 +50,8 @@ Options surface (all optional; defaults in parentheses):
 | `font-body` | string (`""`) | prose font family; empty = stylesheet default serif stack |
 | `font-mono` | string (`""`) | code font family; empty = stylesheet default mono stack |
 | `font-size` | u32 (`18`) | base body font px; also the text-zoom 100% reference |
-| `highlight-color` | colour (`"rgba(159, 251, 0, 0.5)"`) | selection colour, and so the current `/` match; zathura's option and default. `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(…)`, `rgba(…)` |
+| `highlight-color` | colour (`"rgba(159, 251, 0, 0.5)"`) | colour of a selection and of every `/` match; zathura's option and default. `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(…)`, `rgba(…)` |
+| `highlight-active-color` | colour (`"rgba(0, 188, 0, 0.5)"`) | colour of the current `/` match, the one `n`/`N` step from; zathura's option and default. Same forms as `highlight-color` |
 | `selection-clipboard` | `"primary"` \| `"clipboard"` (`primary`) | which clipboard copy-on-select writes to |
 | `background` | bool (`false`) | detach from the terminal at startup, so the prompt returns immediately; startup-only, and `--background`/`--foreground` override it |
 
@@ -54,13 +61,12 @@ Font names are CSS-escaped and quoted before emission into the generated
 message handler + injected user-script post the current non-empty selection to
 Rust on **`mouseup`** — the end of a real pointer-selection gesture — which
 writes it to the configured GDK clipboard. Keying off `mouseup` (not
-`selectionchange`) is deliberate: WebKit's `FindController` sets the DOM
-selection on the active match programmatically, and a `selectionchange` listener
-would copy every search hit. For the same reason search must actively *protect*
-the clipboard: WebKitGTK mirrors the find match into the X11 PRIMARY selection as
-it selects it, so the `FindController::found-text` handler restores PRIMARY to
-the user's last real selection (or clears it) after every `/`, `n`, `N` — the
-match highlight stays, but a search never lands on the clipboard.
+`selectionchange`) copies only what the pointer selected, never a selection a
+script set. Search leaves every clipboard alone by construction: it paints
+highlights and never touches the DOM selection. (WebKit's native find did select
+each match, which copied it into PRIMARY; the shell had to restore PRIMARY after
+every `/`, `n` and `N`. That workaround went with the native find.) The input bar
+also takes focus without selecting its own text, which would claim PRIMARY.
 
 `background` detaches by **re-executing the binary**, not by forking: the process
 is about to bring up GTK, WebKit and D-Bus, and `fork` in a soon-to-be-threaded

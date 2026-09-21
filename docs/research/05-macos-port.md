@@ -46,8 +46,11 @@ but has no webview there.
   dispatch, jumplist/history/quickmarks.
 - Linux-only, untouched: GTK4 widgets, native FindController, PRIMARY
   selection, D-Bus, the Xvfb/xdotool e2e harness, the Mesa/X11 workaround.
+  *(Update 2026-09-21: the FindController is gone. Search is controller JS
+  with the CSS Custom Highlight API on every toolkit, so it is shared, not
+  mac-only; see [D2a](../architecture/README.md#d2a-three-layers--core-controller-toolkit-shell-2026-09-02).)*
 - macOS-only, new: wry/tao window + custom protocol; JS find-in-page (CSS
-  Custom Highlight API); keyboard via a capture-phase JS listener feeding the
+  Custom Highlight API; shared since 2026-09-21); keyboard via a capture-phase JS listener feeding the
   core keymap; statusbar/inputbar/TOC as in-page overlays; single-instance and
   automation either a unix socket or dropped.
 
@@ -134,7 +137,7 @@ asserts holds; two items sharpen it (marked ▲).
 | wry `zoom()` reaches WKWebView page zoom | confirmed | documented macOS 11+; maps to `pageZoom` (same semantics as webkit6 `zoom_level` with text-only off), not window magnification |
 | Custom protocol on macOS | confirmed | `with_custom_protocol` / `with_asynchronous_custom_protocol` via `WKURLSchemeHandler` ([docs.rs](https://docs.rs/wry/latest/wry/struct.WebViewBuilder.html)) |
 | Init script + IPC round trip | confirmed | `with_initialization_script`, `with_ipc_handler`; on WKWebView `window.ipc.postMessage` is a shim over `webkit.messageHandlers.ipc` — which is why the shared scripts should post through a shell-defined `__jmnj_post`, not through `messageHandlers` directly |
-| No native find-in-page via wry | confirmed | wry's `WebView` exposes no find API at all; WKWebView's public `find(_:configuration:)` (macOS 11+) is unwrapped, would need objc FFI. JS find is the realistic route |
+| No native find-in-page via wry | confirmed | wry's `WebView` exposes no find API at all; WKWebView's public `find(_:configuration:)` (macOS 11+) is unwrapped, would need objc FFI. JS find is the realistic route (and since 2026-09-21 the route both shells take) |
 | CSS Custom Highlight API in system WKWebView | confirmed ▲ | shipped in **Safari 17.2 = macOS 14.2** (Dec 2023) ([caniuse](https://caniuse.com/mdn-api_highlight)). The mac shell's floor is therefore macOS 14.2, not "any WKWebView" |
 | WKWebView swallows key events before the tao window sees them | confirmed ▲ | a recurring issue cluster, not one bug: [tao#208](https://github.com/tauri-apps/tao/issues/208) (no keys until clicked), [tao#940](https://github.com/tauri-apps/tao/issues/940), [wry#184](https://github.com/tauri-apps/wry/issues/184), [tauri#5662](https://github.com/tauri-apps/tauri/issues/5662). The in-page listener sidesteps the event-routing half; the focus-handoff half (window up, webview not first responder) still needs care in the shell |
 | `loadHTMLString:baseURL:` grants no local file read | confirmed (secondary sources) | Apple forum threads + write-ups; the sanctioned route is `loadFileURL:allowingReadAccessToURL:` or a scheme handler — the issue's custom protocol is the right call |
@@ -190,7 +193,9 @@ upload in §5.1.
    - **macOS 14.2 or newer.** The JS find needs the CSS Custom Highlight API,
      Safari 17.2+ (§3).
    - **Find is JS**, with match highlighting via the CSS Custom Highlight API,
-     not the engine's FindController. Behaviourally close; not identical.
+     not the engine's FindController. *(Update 2026-09-21: the Linux shell
+     uses the same controller JS now, so this is no longer a divergence. The
+     macOS 14.2 floor above still stands.)*
    - **Bars and TOC are in-page overlays.** Different look, and they share the
      document's zoom/scroll context — the JS category DESIGN [D12](../reading/README.md#d12-a-document-opens-where-it-is-meant-to-open-post-10-implemented) sanctions as
      "shell viewport glue", but a real UX divergence.
