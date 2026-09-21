@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use comrak::nodes::{Ast, AstNode, LineColumn, NodeHtmlBlock, NodeValue};
 use comrak::{Arena, Options as ComrakOptions, format_html, parse_document};
 
-use super::config::{DIAGRAM_FIT_CLASS, WIDE_CLASS, WideBlocks};
+use super::config::{DIAGRAM_FIT_CLASS, Rgba, WIDE_CLASS, WideBlocks};
 use super::highlight::escape_html;
 use super::vault::Vault;
 use super::{
@@ -58,6 +58,8 @@ pub struct Options {
     pub font_mono: String,
     /// Base body font size in pixels (the text-zoom 100% reference).
     pub font_size_px: u32,
+    /// Selection (and current-match) colour: `--selection`.
+    pub highlight_color: Rgba,
     /// User CSS theme sources, each emitted verbatim in its own `<style>`
     /// block *after* the built-in and generated CSS so user rules win the
     /// cascade. The shell populates this from `~/.config/jumanji/themes/*.css`
@@ -93,6 +95,7 @@ impl Default for Options {
             font_body: String::new(),
             font_mono: String::new(),
             font_size_px: 18,
+            highlight_color: Rgba::ZATHURA_HIGHLIGHT,
             extra_css: Vec::new(),
             renderers: BTreeMap::new(),
             wide: true,
@@ -120,12 +123,12 @@ fn html_classes(opts: &Options) -> String {
 }
 
 /// Emit the `:root` custom-property overrides the stylesheet consumes:
-/// `--content-width`, `--font-size`, and — only when the user set them —
+/// `--content-width`, `--font-size`, `--selection`, and — only when the user set them —
 /// `--font-body`/`--font-mono`. Font names are CSS-escaped and quoted.
 fn root_vars_css(opts: &Options) -> String {
     let mut vars = format!(
-        "--content-width:{}px;--font-size:{}px;",
-        opts.page_width_px, opts.font_size_px
+        "--content-width:{}px;--font-size:{}px;--selection:{};",
+        opts.page_width_px, opts.font_size_px, opts.highlight_color
     );
     if !opts.font_body.trim().is_empty() {
         vars.push_str(&format!(
@@ -583,6 +586,21 @@ mod tests {
         .html;
         assert!(html.contains("--font-body:\"Source Serif 4\""));
         assert!(html.contains("--font-mono:\"JetBrains Mono\""));
+    }
+
+    #[test]
+    fn the_highlight_color_sets_the_selection_variable() {
+        assert!(render_str("# x\n").contains("--selection:rgba(159, 251, 0, 0.5);"));
+        let html = render(
+            "# x\n",
+            &Options {
+                highlight_color: Rgba::parse("#ff0").unwrap(),
+                ..Options::default()
+            },
+            &test_vault(),
+        )
+        .html;
+        assert!(html.contains("--selection:rgba(255, 255, 0, 1);"));
     }
 
     #[test]

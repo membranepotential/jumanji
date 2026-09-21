@@ -44,6 +44,7 @@ Options surface (all optional; defaults in parentheses):
 | `font-body` | string (`""`) | prose font family; empty = stylesheet default serif stack |
 | `font-mono` | string (`""`) | code font family; empty = stylesheet default mono stack |
 | `font-size` | u32 (`18`) | base body font px; also the text-zoom 100% reference |
+| `highlight-color` | colour (`"rgba(159, 251, 0, 0.5)"`) | selection colour, and so the current `/` match; zathura's option and default. `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(…)`, `rgba(…)` |
 | `selection-clipboard` | `"primary"` \| `"clipboard"` (`primary`) | which clipboard copy-on-select writes to |
 | `background` | bool (`false`) | detach from the terminal at startup, so the prompt returns immediately; startup-only, and `--background`/`--foreground` override it |
 

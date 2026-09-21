@@ -38,6 +38,110 @@ impl SelectionClipboard {
     }
 }
 
+/// An sRGB colour with alpha, for colour options. Parsed from the forms
+/// zathura's config takes — `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(r, g, b)`,
+/// `rgba(r, g, b, a)` — so a zathurarc value copies over. Emitted as CSS
+/// `rgba(…)`; being validated, it cannot break out of the generated rule.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rgba {
+    r: u8,
+    g: u8,
+    b: u8,
+    /// Opacity in `0.0..=1.0`.
+    a: f64,
+}
+
+impl Rgba {
+    /// zathura's default `highlight-color`, the yellow-green of its search hits.
+    pub const ZATHURA_HIGHLIGHT: Self = Self {
+        r: 159,
+        g: 251,
+        b: 0,
+        a: 0.5,
+    };
+
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        let invalid = || {
+            format!(
+                "expected #rgb, #rrggbb, #rrggbbaa, rgb(r, g, b) or rgba(r, g, b, a), got {s:?}"
+            )
+        };
+        if let Some(hex) = s.strip_prefix('#') {
+            let digits = |range: std::ops::Range<usize>, width: usize| {
+                let v = u8::from_str_radix(hex.get(range).ok_or_else(invalid)?, 16)
+                    .map_err(|_| invalid())?;
+                // `#abc` is `#aabbcc`: a single digit repeats.
+                Ok::<u8, String>(if width == 1 { v * 17 } else { v })
+            };
+            if !hex.is_ascii() {
+                return Err(invalid());
+            }
+            return match hex.len() {
+                3 => Ok(Self {
+                    r: digits(0..1, 1)?,
+                    g: digits(1..2, 1)?,
+                    b: digits(2..3, 1)?,
+                    a: 1.0,
+                }),
+                6 | 8 => Ok(Self {
+                    r: digits(0..2, 2)?,
+                    g: digits(2..4, 2)?,
+                    b: digits(4..6, 2)?,
+                    a: if hex.len() == 8 {
+                        f64::from(digits(6..8, 2)?) / 255.0
+                    } else {
+                        1.0
+                    },
+                }),
+                _ => Err(invalid()),
+            };
+        }
+        let lower = s.to_ascii_lowercase();
+        let (args, has_alpha) = if let Some(rest) = lower.strip_prefix("rgba(") {
+            (rest, true)
+        } else if let Some(rest) = lower.strip_prefix("rgb(") {
+            (rest, false)
+        } else {
+            return Err(invalid());
+        };
+        let parts: Vec<&str> = args
+            .strip_suffix(')')
+            .ok_or_else(invalid)?
+            .split(',')
+            .map(str::trim)
+            .collect();
+        let channel = |p: &str| p.parse::<u8>().map_err(|_| invalid());
+        match (parts.as_slice(), has_alpha) {
+            ([r, g, b], false) => Ok(Self {
+                r: channel(r)?,
+                g: channel(g)?,
+                b: channel(b)?,
+                a: 1.0,
+            }),
+            ([r, g, b, a], true) => {
+                let a = a.parse::<f64>().map_err(|_| invalid())?;
+                if !(0.0..=1.0).contains(&a) {
+                    return Err(invalid());
+                }
+                Ok(Self {
+                    r: channel(r)?,
+                    g: channel(g)?,
+                    b: channel(b)?,
+                    a,
+                })
+            }
+            _ => Err(invalid()),
+        }
+    }
+}
+
+impl fmt::Display for Rgba {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "rgba({}, {}, {}, {})", self.r, self.g, self.b, self.a)
+    }
+}
+
 /// The `<html>` class that gates every wide-block breakout: the master switch
 /// [`Action::ToggleWide`](crate::core::Action::ToggleWide) flips at runtime,
 /// exactly the contract `html.dark` has with the recolor. Each eligible kind
@@ -276,6 +380,9 @@ pub struct Options {
     /// (`tree`). What `v` starts out flipping; `:set` applies it to an open
     /// graph.
     pub graph_view: GraphView,
+    /// The colour of a text selection and so of the current `/` match, which
+    /// WebKit shows as the selection. zathura's `highlight-color` and default.
+    pub highlight_color: Rgba,
     /// Which clipboard a selection is copied to on select.
     pub selection_clipboard: SelectionClipboard,
     /// Reverse editor sync (DESIGN D7): the command spawned on Ctrl+click, with
@@ -307,6 +414,7 @@ impl Default for Options {
             wide: true,
             diagram_fit: false,
             graph_view: GraphView::Links,
+            highlight_color: Rgba::ZATHURA_HIGHLIGHT,
             selection_clipboard: SelectionClipboard::Primary,
             editor_command: EditorCommand::default(),
             renderers: BTreeMap::new(),
@@ -382,6 +490,11 @@ impl Options {
                 self.graph_view =
                     GraphView::parse(value).map_err(|m| format!("graph-view: {m}"))?;
                 Ok(SetEffect::Relayout)
+            }
+            "highlight-color" => {
+                self.highlight_color =
+                    Rgba::parse(unquote(value)).map_err(|m| format!("highlight-color: {m}"))?;
+                Ok(SetEffect::Rerender)
             }
             "scroll-step" => {
                 self.scroll_step_px = parse_scalar::<u32>(value, "scroll-step")?;
@@ -502,6 +615,13 @@ impl Config {
             })?,
             None => defaults.graph_view,
         };
+        let highlight_color = match raw_opts.highlight_color {
+            Some(s) => Rgba::parse(&s).map_err(|message| ConfigError::OptionValue {
+                key: "highlight-color",
+                message,
+            })?,
+            None => defaults.highlight_color,
+        };
         let options = Options {
             scroll_step_px: raw_opts.scroll_step.unwrap_or(defaults.scroll_step_px),
             zoom_step: raw_opts.zoom_step.unwrap_or(defaults.zoom_step),
@@ -519,6 +639,7 @@ impl Config {
             wide: raw_opts.wide.unwrap_or(defaults.wide),
             diagram_fit: raw_opts.diagram_fit.unwrap_or(defaults.diagram_fit),
             graph_view,
+            highlight_color,
             selection_clipboard,
             editor_command,
             // Normalise fence-language keys to lowercase so the lookup (which
@@ -785,6 +906,7 @@ pub fn option_keys() -> &'static [&'static str] {
         "wide",
         "diagram-fit",
         "graph-view",
+        "highlight-color",
         "selection-clipboard",
     ]
 }
@@ -883,6 +1005,8 @@ struct RawOptions {
     diagram_fit: Option<bool>,
     #[serde(rename = "graph-view")]
     graph_view: Option<String>,
+    #[serde(rename = "highlight-color")]
+    highlight_color: Option<String>,
     #[serde(rename = "selection-clipboard")]
     selection_clipboard: Option<String>,
     #[serde(rename = "editor-command")]
@@ -1315,6 +1439,58 @@ mod tests {
             SetEffect::Rerender
         );
         assert_eq!(o.font_mono, "JetBrains Mono");
+    }
+
+    #[test]
+    fn highlight_color_parses_zathuras_forms() {
+        let hl = |s: &str| Rgba::parse(s).map(|c| c.to_string());
+        assert_eq!(hl("#ff0").unwrap(), "rgba(255, 255, 0, 1)");
+        assert_eq!(hl("#9FFB00").unwrap(), "rgba(159, 251, 0, 1)");
+        assert_eq!(
+            hl("#9ffb0080").unwrap(),
+            "rgba(159, 251, 0, 0.5019607843137255)"
+        );
+        assert_eq!(hl("rgb(1, 2, 3)").unwrap(), "rgba(1, 2, 3, 1)");
+        assert_eq!(
+            hl(" RGBA(159,251,0,0.5) ").unwrap(),
+            "rgba(159, 251, 0, 0.5)"
+        );
+        for bad in [
+            "",
+            "yellow",
+            "#12",
+            "#12345",
+            "#gg0000",
+            "#ffé",
+            "rgb(256, 0, 0)",
+            "rgb(1, 2)",
+            "rgb(1, 2, 3, 0.5)",
+            "rgba(1, 2, 3)",
+            "rgba(1, 2, 3, 1.5)",
+            "rgba(1, 2, 3, NaN)",
+            "rgb(1, 2, 3); } body { color: red",
+        ] {
+            assert!(hl(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn highlight_color_defaults_to_zathuras_and_is_settable() {
+        let mut o = Options::default();
+        assert_eq!(o.highlight_color, Rgba::ZATHURA_HIGHLIGHT);
+        assert_eq!(
+            o.set("highlight-color", "\"#ffff00\"").unwrap(),
+            SetEffect::Rerender
+        );
+        assert_eq!(o.highlight_color.to_string(), "rgba(255, 255, 0, 1)");
+        assert!(o.set("highlight-color", "nope").is_err());
+
+        let c = Config::parse("[options]\nhighlight-color = \"rgba(0, 188, 0, 0.5)\"\n").unwrap();
+        assert_eq!(
+            c.options.highlight_color.to_string(),
+            "rgba(0, 188, 0, 0.5)"
+        );
+        assert!(Config::parse("[options]\nhighlight-color = \"blue\"\n").is_err());
     }
 
     #[test]

@@ -2,7 +2,27 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-19 (latest) — every mermaid diagram is checked; the view explains itself
+## 2026-09-21 (latest) — selection in zathura's colour, only over the text
+
+The selection was dark blue in dark mode and hard to see. WebKit shows the
+current `/` match as the selection, so search hits were just as faint. The
+selection now defaults to zathura's `highlight-color`, rgba(159, 251, 0, 0.5),
+in both themes. A new option of the same name sets it, from the config or
+with `:set`; `Rgba` parses zathura's forms (`#rgb`, `#rrggbb`, `#rrggbbaa`,
+`rgb()`, `rgba()`), so a zathurarc value copies over. Named colours are not
+accepted.
+
+A selection also no longer spans the window. WebKit fills the "selection
+gaps" beside each selected line out to the edges of its selection root, the
+whole view. A no-op `transform: translate(0)` on `main` stops that fill.
+Checked under Xvfb with a mouse drag and screenshots, before and after; no
+automated test covers it (it is paint only).
+
+WebKit draws the non-current matches with its own marker colour, which the
+page cannot set; jumanji has no separate current-match colour
+(zathura's `highlight-active-color`).
+
+## 2026-09-19 — every mermaid diagram is checked; the view explains itself
 
 The diagram in docs/graph/README.md failed to render: a node named `graph`,
 which is a keyword in merman and mermaid.js alike. It is `model` now. A new

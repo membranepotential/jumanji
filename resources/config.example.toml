@@ -54,6 +54,10 @@
 # while the graph is open; `:set graph-view` changes an open graph too.
 # graph-view = "links"
 
+# The colour of a text selection, and so of the current `/` match. zathura's
+# `highlight-color` and default; takes #rgb, #rrggbb, #rrggbbaa, rgb(…), rgba(…).
+# highlight-color = "rgba(159, 251, 0, 0.5)"
+
 # Which system selection a copied text selection is written to, zathura-style:
 # "primary" (X11 PRIMARY, middle-click paste) or "clipboard" (Ctrl-V paste).
 # selection-clipboard = "primary"
