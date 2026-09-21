@@ -76,9 +76,10 @@ core, never back.
   `webkit.messageHandlers` directly. Unit-tested against a fake toolkit.
 - `src/shell/gtk/` — the Linux shell: GTK4 widgets, the webkit6 view as
   `Viewport`, `GtkChrome`, `GlibHost`, GTK event adapters, D-Bus. Wiring
-  only; no session logic. Native find, PRIMARY selection and D-Bus are
-  GTK-only by design. A second shell is a sibling directory under
-  `cfg(target_os = …)`, never a branch in the controller.
+  only; no session logic. PRIMARY selection and D-Bus are GTK-only by
+  design; search is controller JS, the same on every toolkit. A second
+  shell is a sibling directory under `cfg(target_os = …)`, never a branch
+  in the controller.
 - New features start with types in core, then a controller flow, then (only
   if a native capability is needed) a trait method — which every shell and
   the fake must then implement.

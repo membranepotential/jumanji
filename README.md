@@ -59,7 +59,7 @@ webview sees a keypress, so the vim layer is absolute. See
 | `J` / `K` | next / previous section (heading) |
 | `gg` / `G` / `<N>G` | go to top / bottom / section N |
 | `+` / `-` / `=` | zoom in / out / reset (reset clears text zoom too) |
-| `/` | search (`n` / `N` for next / previous match) |
+| `/` | search (`n` / `N` for next / previous match; the statusbar shows `[Search 3/12]`) |
 | `Tab` | table of contents (`j`/`k` move, `l`/`h` expand/collapse, `Enter` jump) |
 | `f` / `F` | follow link via hints / show link target |
 | `t` | document graph: the route you took as a line, and where its nodes lead (see below) |
@@ -281,6 +281,8 @@ wide-blocks = "diagrams,fences,tables"  # kinds that may break out (see below)
 wide = true             # start with the breakout on (`s` toggles it)
 diagram-fit = false     # start with diagrams fit to width (`a` toggles it)
 graph-view = "links"    # document graph: "links" or "tree" (`v` toggles it)
+highlight-color = "rgba(159, 251, 0, 0.5)"      # selection and search matches (zathura's default)
+highlight-active-color = "rgba(0, 188, 0, 0.5)" # the current search match (zathura's default)
 background = false      # detach from the terminal at startup (see below)
 editor-command = "$EDITOR +%l %f"  # reverse editor sync (Ctrl+click), %l line / %f file
 
