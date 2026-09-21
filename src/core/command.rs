@@ -74,42 +74,38 @@ pub enum Completions {
 /// Compute completions for a partial command line (without the leading `:`).
 pub fn complete(input: &str) -> Completions {
     let s = input.trim_start();
-    match s.find(' ') {
-        // Still typing the command word: complete command/action names.
-        None => Completions::Candidates(
-            command_names()
-                .filter(|name| name.starts_with(s))
-                .map(str::to_string)
-                .collect(),
-        ),
-        // A command word plus (partial) arguments.
-        Some(idx) => {
-            let cmd = &s[..idx];
-            let rest = &s[idx + 1..];
-            match cmd {
-                "open" | "o" => Completions::Path {
+    if let Some((cmd, rest)) = s.split_once(' ') {
+        match cmd {
+            "open" | "o" => {
+                return Completions::Path {
                     prefix: rest.trim_start().to_string(),
-                },
-                "set" | "se" => {
-                    let partial = rest.trim_start();
-                    // Once the option word is finished (another space), we have
-                    // no value candidates to offer.
-                    if partial.contains(' ') {
-                        Completions::Candidates(Vec::new())
-                    } else {
-                        Completions::Candidates(
-                            option_keys()
-                                .iter()
-                                .filter(|k| k.starts_with(partial))
-                                .map(|k| format!("set {k}"))
-                                .collect(),
-                        )
-                    }
-                }
-                _ => Completions::Candidates(Vec::new()),
+                };
             }
+            "set" | "se" => {
+                let partial = rest.trim_start();
+                // Once the option word is finished (another space), we have
+                // no value candidates to offer.
+                return Completions::Candidates(if partial.contains(' ') {
+                    Vec::new()
+                } else {
+                    option_keys()
+                        .iter()
+                        .filter(|k| k.starts_with(partial))
+                        .map(|k| format!("set {k}"))
+                        .collect()
+                });
+            }
+            _ => {}
         }
     }
+    // Command and action names, spaces included: an action name is several
+    // words (`zoom in`), so a space does not end the name being completed.
+    Completions::Candidates(
+        command_names()
+            .filter(|name| name.starts_with(s))
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// Marks the selected candidate. Every candidate reserves the column, so page
@@ -271,6 +267,24 @@ mod tests {
         assert!(c.contains(&"zoom in".to_string()));
         assert!(c.contains(&"zoom out".to_string()));
         assert!(c.contains(&"zoom reset".to_string()));
+    }
+
+    #[test]
+    fn complete_multi_word_names_past_the_space() {
+        for (input, want) in [
+            ("scroll dow", "scroll down"),
+            ("zoom ", "zoom in"),
+            ("mark ", "mark set"),
+        ] {
+            let Completions::Candidates(c) = complete(input) else {
+                panic!("expected candidates for {input:?}");
+            };
+            assert!(c.contains(&want.to_string()), "{input:?}: {c:?}");
+        }
+        let Completions::Candidates(c) = complete("scroll dow") else {
+            panic!("expected candidates");
+        };
+        assert_eq!(c, vec!["scroll down".to_string()]);
     }
 
     #[test]

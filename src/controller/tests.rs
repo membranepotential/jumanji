@@ -1361,6 +1361,42 @@ fn tab_completes_and_then_cycles_the_command_line() {
 }
 
 #[test]
+fn shift_tab_cycles_the_candidates_backwards() {
+    let r = Reader::loaded(DOC);
+    r.press(':');
+    r.chrome.set_input_query("zoom ");
+    let shift_tab = || {
+        r.controller
+            .on_key(Some(KeyPress::new(Key::Tab, false, true)));
+        r.settle();
+        r.chrome.input_query()
+    };
+    r.press_key(Key::Tab);
+    let first = r.chrome.input_query();
+    r.press_key(Key::Tab);
+    assert_eq!(shift_tab(), first);
+    // From fresh input, Shift-Tab starts at the last candidate.
+    r.chrome.set_input_query("zoom ");
+    let last = shift_tab();
+    assert_ne!(last, first);
+    r.press_key(Key::Tab);
+    assert_eq!(r.chrome.input_query(), first, "Tab wraps from the last");
+}
+
+#[test]
+fn tab_completes_again_after_an_edit_inside_a_multi_word_name() {
+    let r = Reader::loaded(DOC);
+    r.press(':');
+    r.chrome.set_input_query("scroll down");
+    r.press_key(Key::Tab);
+    // The user deletes a character: the entry edits, the cycle ends.
+    r.press_key(Key::Backspace);
+    r.chrome.set_input_query("scroll dow");
+    r.press_key(Key::Tab);
+    assert_eq!(r.chrome.input_query(), "scroll down");
+}
+
+#[test]
 fn enter_runs_the_typed_command() {
     let r = Reader::loaded(DOC);
     r.press(':');

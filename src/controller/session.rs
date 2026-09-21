@@ -1003,10 +1003,11 @@ impl<T: Toolkit + 'static> Controller<T> {
         //    `:` command line, and any edit invalidates a pending cycle.
         let input_visible = self.0.borrow().chrome.prompt().is_some();
         if input_visible {
-            if key.is_some_and(|kp| kp.key == Key::Tab) {
+            if let Some(kp) = key.filter(|kp| kp.key == Key::Tab) {
                 let is_cmd = self.0.borrow().chrome.prompt() == Some(Prompt::Command);
                 if is_cmd {
-                    self.do_completion();
+                    // Shift-Tab walks the candidates backwards, as in vim.
+                    self.do_completion(!kp.shift);
                 }
                 return KeyOutcome::Consumed;
             }
@@ -2390,8 +2391,9 @@ impl<T: Toolkit + 'static> Controller<T> {
         }
     }
 
-    /// Tab-complete the `:` command line, cycling on repeated presses.
-    fn do_completion(&self) {
+    /// Tab-complete the `:` command line, cycling on repeated presses:
+    /// `forward` for Tab, backwards for Shift-Tab.
+    fn do_completion(&self, forward: bool) {
         let mut s = self.0.borrow_mut();
         if s.chrome.prompt() != Some(Prompt::Command) {
             return;
@@ -2409,7 +2411,12 @@ impl<T: Toolkit + 'static> Controller<T> {
                 .map(|c| c == &current)
                 .unwrap_or(false);
             if showing_current && comp.candidates.len() > 1 {
-                comp.index = (comp.index + 1) % comp.candidates.len();
+                let n = comp.candidates.len();
+                comp.index = if forward {
+                    (comp.index + 1) % n
+                } else {
+                    (comp.index + n - 1) % n
+                };
                 let next = comp.candidates[comp.index].clone();
                 let line = command::completion_line(&comp.candidates, comp.index, cols);
                 s.chrome.set_input_query(&next);
@@ -2425,14 +2432,12 @@ impl<T: Toolkit + 'static> Controller<T> {
             s.completion = None;
             return;
         }
-        let first = candidates[0].clone();
-        let line = command::completion_line(&candidates, 0, cols);
-        s.chrome.set_input_query(&first);
+        // Shift-Tab starts from the last candidate, as in vim.
+        let index = if forward { 0 } else { candidates.len() - 1 };
+        let line = command::completion_line(&candidates, index, cols);
+        s.chrome.set_input_query(&candidates[index]);
         s.chrome.set_message(&line);
-        s.completion = Some(Completion {
-            candidates,
-            index: 0,
-        });
+        s.completion = Some(Completion { candidates, index });
     }
 
     // -----------------------------------------------------------------------
