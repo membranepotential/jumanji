@@ -348,7 +348,7 @@ The core is pure and toolkit-free; so is the controller.
 ┌─ shell/gtk (gtk4-rs + webkit6; Linux) ─────────────────────────┐
 │ app.rs        window, GTK event adapters → Controller<Gtk>     │
 │ view.rs       webkit6 WebView = Viewport; script router        │
-│ chrome.rs     Bar + TocView + Stack = Chrome                   │
+│ chrome.rs     Bar + TocView + Overlay = Chrome                 │
 │ host.rs       glib main loop + gio services = Host             │
 │ dbus.rs       per-instance automation / editor-sync interface  │
 └────────────────────────────────────────────────────────────────┘

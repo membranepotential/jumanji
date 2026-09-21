@@ -1,13 +1,12 @@
-//! The GTK implementation of [`Chrome`]: the girara-style bottom bar, the
-//! table-of-contents page, and the stack that swaps between the document and
-//! the TOC.
+//! The GTK implementation of [`Chrome`]: the girara-style bottom bar, and the
+//! table of contents laid over the document.
 //!
 //! Pure delegation — [`Bar`] and [`TocView`] hold the widget logic; this is the
 //! one type the controller talks to, so a toolkit without widgets can render
 //! the same three concerns as in-page overlays instead.
 
 use gtk::prelude::*;
-use gtk::{Box as GtkBox, Entry, Orientation, Stack, Widget};
+use gtk::{Box as GtkBox, Entry, Orientation, Overlay, Widget};
 
 use crate::controller::toolkit::{Chrome, Prompt};
 use crate::core::Heading;
@@ -15,17 +14,12 @@ use crate::core::Heading;
 use super::bar::Bar;
 use super::toc::TocView;
 
-/// Stack page names: the document, and the table of contents.
-const PAGE_CONTENT: &str = "content";
-const PAGE_TOC: &str = "toc";
-
-/// The reader's chrome: status/input bar plus the content↔TOC stack.
+/// The reader's chrome: status/input bar, and the TOC over the document.
 #[derive(Clone)]
 pub struct GtkChrome {
     bar: Bar,
     toc: TocView,
-    stack: Stack,
-    /// The whole column — stack above, bar below — for the window to adopt.
+    /// The whole column — document and TOC above, bar below — for the window.
     layout: GtkBox,
 }
 
@@ -35,23 +29,22 @@ impl GtkChrome {
         let bar = Bar::new();
         let toc = TocView::new();
 
-        let stack = Stack::new();
-        stack.set_vexpand(true);
-        stack.set_hexpand(true);
-        stack.add_named(content, Some(PAGE_CONTENT));
-        stack.add_named(toc.widget(), Some(PAGE_TOC));
-        stack.set_visible_child_name(PAGE_CONTENT);
+        // An overlay, not a stack: the document stays on screen under the
+        // TOC. A web view taken off screen keeps its last frame, and shows it
+        // again on return until it paints anew; that flashed the graph after
+        // `t`, Tab, Tab, since the graph closed while the view was away.
+        let overlay = Overlay::new();
+        overlay.set_vexpand(true);
+        overlay.set_hexpand(true);
+        overlay.set_child(Some(content));
+        overlay.add_overlay(toc.widget());
+        toc.widget().set_visible(false);
 
         let layout = GtkBox::new(Orientation::Vertical, 0);
-        layout.append(&stack);
+        layout.append(&overlay);
         layout.append(bar.widget());
 
-        Self {
-            bar,
-            toc,
-            stack,
-            layout,
-        }
+        Self { bar, toc, layout }
     }
 
     /// The chrome's whole widget column, for the window to adopt as its child.
@@ -113,12 +106,14 @@ impl Chrome for GtkChrome {
     }
 
     fn show_toc(&self, headings: &[Heading], section: usize, dark: bool) {
+        // Visible first: the rebuild focuses the selected row, and GTK
+        // focuses no widget that is not shown.
+        self.toc.widget().set_visible(true);
         self.toc.rebuild(headings, section, dark);
-        self.stack.set_visible_child_name(PAGE_TOC);
     }
 
     fn hide_toc(&self) {
-        self.stack.set_visible_child_name(PAGE_CONTENT);
+        self.toc.widget().set_visible(false);
     }
 
     fn toc_move(&self, delta: i32) {

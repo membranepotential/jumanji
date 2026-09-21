@@ -88,6 +88,9 @@ impl TocView {
         list.add_css_class("jmnj-toc");
 
         let scroller = ScrolledWindow::new();
+        // The TOC lies over the document (see `GtkChrome`), so the scroller
+        // paints the page colour too, below a list shorter than the window.
+        scroller.add_css_class("jmnj-toc");
         scroller.set_policy(PolicyType::Never, PolicyType::Automatic);
         scroller.set_vexpand(true);
         scroller.set_hexpand(true);
@@ -172,8 +175,10 @@ impl TocView {
 
     pub fn set_dark(&self, dark: bool) {
         if dark {
+            self.scroller.add_css_class("dark");
             self.list.add_css_class("dark");
         } else {
+            self.scroller.remove_css_class("dark");
             self.list.remove_css_class("dark");
         }
     }
