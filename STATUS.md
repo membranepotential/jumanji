@@ -18,8 +18,10 @@ Shipped through **v1.10.0** (the document graph, pointer-anchored zoom).
 
 ## Done (recent)
 
-- **selection colour (2026-09-21, 686b357..6f2de40)** — zathura's yellow-green
-  by default, `highlight-color` option, selection no longer spans the window.
+- **selection + search colours (2026-09-21, 686b357..d8f2557)** — zathura's
+  `highlight-color`/`highlight-active-color`; search is controller JS painted
+  with CSS highlights (no FindController); selection no longer spans the window.
+  Open: SVG `<text>` matches are found but not painted.
 - **v1.10.0 (2026-09-19)** — the document graph; after it: zoom clamp, peek
   drawn as scene nodes, arrow keys + Tab, view line, mermaid docs test.
 - **pre-release review fixes (2026-09-19, 31f895f, 327269f)** — Astra review
