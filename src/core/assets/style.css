@@ -138,6 +138,13 @@ main.markdown-body {
    * scroll — the one thing that must never happen. Code blocks (white-space:
    * pre) and diagrams keep their own overflow-x scrollers and are unaffected. */
   overflow-wrap: break-word;
+  /* A no-op transform so a selection covers only the text. WebKit fills the
+   * "selection gaps" beside each selected line out to its selection root's
+   * edges — here the window — and skips that fill for a transformed block.
+   * 2D, not `translateZ`, so it forces no compositing layer. Also the
+   * containing block for fixed/absolute descendants; `main` has none (the
+   * link-hint overlay hangs off <html>). */
+  transform: translate(0);
 }
 
 /* ---- Wide blocks (DESIGN D5a) -------------------------------------------- */
