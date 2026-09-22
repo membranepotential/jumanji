@@ -44,14 +44,14 @@ jobs:
         run: >-
           pacman -Syu --noconfirm --needed
           rust mold gtk4 webkitgtk-6.0 git
-          xorg-server-xvfb xdotool dbus mesa
+          xorg-server-xvfb xdotool dbus mesa xclip
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       # The suite skips silently when the tools are missing (see
       # docs/TESTING.md). CI must never mistake a skip for a pass, so the
       # tools are asserted present first.
       - name: Assert the harness tools are on PATH
-        run: command -v Xvfb xdotool dbus-daemon
+        run: command -v Xvfb xdotool dbus-daemon xclip
       - name: Run the e2e suite
         # bash for pipefail: a build failure upstream of `tee` must fail the
         # step, not vanish behind tee's exit code.

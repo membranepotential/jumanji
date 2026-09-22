@@ -101,6 +101,10 @@ suite skips**: it prints a one-line notice to stderr and every test passes as a
 no-op. CI and developer machines without a display therefore never fail on e2e.
 The file is also gated `#![cfg(unix)]`.
 
+One test, `search_leaves_the_primary_selection_alone`, also needs `xclip`
+(`sudo pacman -S xclip`) to read the PRIMARY selection; without it that test
+alone skips. CI installs it and fails on any skip.
+
 ## What it covers
 
 Each test injects keys (or calls a D-Bus method) and then polls `GetState`
