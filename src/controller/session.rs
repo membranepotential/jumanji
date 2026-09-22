@@ -686,6 +686,9 @@ impl<T: Toolkit + 'static> Controller<T> {
                 }
                 let (host, target) = {
                     let s = self.0.borrow();
+                    if !s.options.copy_on_select {
+                        return;
+                    }
                     (s.host.clone(), s.options.selection_clipboard)
                 };
                 host.copy_selection(payload, target);

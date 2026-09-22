@@ -62,8 +62,13 @@
 # `highlight-active-color` and default; takes the same forms.
 # highlight-active-color = "rgba(0, 188, 0, 0.5)"
 
-# Which system selection a copied text selection is written to, zathura-style:
-# "primary" (X11 PRIMARY, middle-click paste) or "clipboard" (Ctrl-V paste).
+# Whether a text selection is copied as soon as you release the mouse. Off by
+# default. Either way, Ctrl-C copies the selection to CLIPBOARD, and WebKit puts
+# every selection in X11 PRIMARY (middle-click paste) by itself.
+# copy-on-select = false
+
+# Where copy-on-select writes: "primary" (X11 PRIMARY, middle-click paste) or
+# "clipboard" (Ctrl-V paste). Has no effect while copy-on-select is off.
 # selection-clipboard = "primary"
 
 # Reverse editor sync (DESIGN D7): the command run on a Ctrl+click, to open your

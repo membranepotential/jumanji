@@ -52,12 +52,19 @@ Options surface (all optional; defaults in parentheses):
 | `font-size` | u32 (`18`) | base body font px; also the text-zoom 100% reference |
 | `highlight-color` | colour (`"rgba(159, 251, 0, 0.5)"`) | colour of a selection and of every `/` match; zathura's option and default. `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(…)`, `rgba(…)` |
 | `highlight-active-color` | colour (`"rgba(0, 188, 0, 0.5)"`) | colour of the current `/` match, the one `n`/`N` step from; zathura's option and default. Same forms as `highlight-color` |
+| `copy-on-select` | bool (`false`) | copy a selection when the mouse is released |
 | `selection-clipboard` | `"primary"` \| `"clipboard"` (`primary`) | which clipboard copy-on-select writes to |
 | `background` | bool (`false`) | detach from the terminal at startup, so the prompt returns immediately; startup-only, and `--background`/`--foreground` override it |
 
 Font names are CSS-escaped and quoted before emission into the generated
 `:root{…}` block (the stylesheet already consumes `--font-body`/`--font-mono`/
-`--font-size`). Copy-on-select is zathura parity: a `UserContentManager` script
+`--font-size`). Copy-on-select is opt-in (`copy-on-select`, off by default), a
+deliberate deviation from zathura, which always copies: a selection should not
+overwrite your Ctrl-V clipboard unless you ask for it. Two copies happen without
+it, both WebKit's own: Ctrl-C copies to CLIPBOARD (the key is unbound, so it
+passes through to the view), and every selection claims X11 PRIMARY
+(`WebEditorClient::respondToChangedSelection` calls `updateGlobalSelection` on
+GTK unconditionally; no setting turns it off). With the option on, a `UserContentManager` script
 message handler + injected user-script post the current non-empty selection to
 Rust on **`mouseup`** — the end of a real pointer-selection gesture — which
 writes it to the configured GDK clipboard. Keying off `mouseup` (not

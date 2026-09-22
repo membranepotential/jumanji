@@ -2,7 +2,22 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-21 (latest) — completion past a space; no graph flash; example theme
+## 2026-09-22 (latest) — copy-on-select is opt-in; CI installs xclip
+
+`copy-on-select` (bool, default `false`) now decides whether a finished
+pointer selection is copied; `selection-clipboard` still decides where it
+goes. Two copies happen either way, both WebKit's own: Ctrl-C copies to
+CLIPBOARD (the key is unbound and passes through), and every selection
+claims X11 PRIMARY. WebKitGTK calls `updateGlobalSelection` on every
+selection change with no setting to stop it; an e2e experiment confirmed it.
+Opt-in deviates from zathura on purpose: a selection should not overwrite
+the Ctrl-V clipboard unless asked. Recorded in `docs/keys/README.md`.
+
+CI failed since v1.11.0: `search_leaves_the_primary_selection_alone` skips
+without `xclip`, and the e2e job fails on any skip. The job now installs
+`xclip`.
+
+## 2026-09-21 — completion past a space; no graph flash; example theme
 
 Tab completion treated the text before the first space as the command
 word, so every multi-word action (`scroll down`, `zoom in`) completed to

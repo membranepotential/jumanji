@@ -2037,20 +2037,38 @@ fn goto_source_line_looks_up_the_nearest_source_element() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_selection_message_reaches_the_configured_clipboard() {
+fn a_selection_message_copies_nothing_by_default() {
     let r = Reader::loaded(DOC);
+    r.message(message::SELECTION, "picked text");
+    assert!(r.host.copied().is_empty());
+}
+
+#[test]
+fn with_copy_on_select_a_selection_reaches_the_configured_clipboard() {
+    let r = Reader::open_full(DOC, copy_on_select_options(), |_| {});
+    r.finish_load();
     r.message(message::SELECTION, "picked text");
     assert_eq!(
         r.host.copied(),
-        vec![("picked text".to_string(), SelectionClipboard::Primary)]
+        vec![("picked text".to_string(), SelectionClipboard::Clipboard)]
     );
 }
 
 #[test]
 fn an_empty_selection_message_copies_nothing() {
-    let r = Reader::loaded(DOC);
+    let r = Reader::open_full(DOC, copy_on_select_options(), |_| {});
+    r.finish_load();
     r.message(message::SELECTION, "");
     assert!(r.host.copied().is_empty());
+}
+
+/// Options that copy each selection to CLIPBOARD.
+fn copy_on_select_options() -> Options {
+    Options {
+        copy_on_select: true,
+        selection_clipboard: SelectionClipboard::Clipboard,
+        ..Options::default()
+    }
 }
 
 #[test]

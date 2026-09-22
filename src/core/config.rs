@@ -405,7 +405,11 @@ pub struct Options {
     /// The colour of the current `/` match, the one `n`/`N` step from.
     /// zathura's `highlight-active-color` and default.
     pub highlight_active_color: Rgba,
-    /// Which clipboard a selection is copied to on select.
+    /// Whether a finished pointer selection is copied without a keypress.
+    /// Off by default. Ctrl-C (WebKit's own copy, to CLIPBOARD) and WebKit's
+    /// own claim of PRIMARY work either way.
+    pub copy_on_select: bool,
+    /// Which clipboard copy-on-select writes to.
     pub selection_clipboard: SelectionClipboard,
     /// Reverse editor sync (DESIGN D7): the command spawned on Ctrl+click, with
     /// `%l`/`%f` substituted for the source line and file. Config-only (parsed
@@ -438,6 +442,7 @@ impl Default for Options {
             graph_view: GraphView::Links,
             highlight_color: Rgba::ZATHURA_HIGHLIGHT,
             highlight_active_color: Rgba::ZATHURA_HIGHLIGHT_ACTIVE,
+            copy_on_select: false,
             selection_clipboard: SelectionClipboard::Primary,
             editor_command: EditorCommand::default(),
             renderers: BTreeMap::new(),
@@ -534,6 +539,10 @@ impl Options {
             }
             "text-zoom-step" => {
                 self.text_zoom_step = parse_scalar::<f64>(value, "text-zoom-step")?;
+                Ok(SetEffect::None)
+            }
+            "copy-on-select" => {
+                self.copy_on_select = parse_scalar::<bool>(value, "copy-on-select")?;
                 Ok(SetEffect::None)
             }
             "selection-clipboard" => {
@@ -676,6 +685,7 @@ impl Config {
             graph_view,
             highlight_color,
             highlight_active_color,
+            copy_on_select: raw_opts.copy_on_select.unwrap_or(defaults.copy_on_select),
             selection_clipboard,
             editor_command,
             // Normalise fence-language keys to lowercase so the lookup (which
@@ -944,6 +954,7 @@ pub fn option_keys() -> &'static [&'static str] {
         "graph-view",
         "highlight-color",
         "highlight-active-color",
+        "copy-on-select",
         "selection-clipboard",
     ]
 }
@@ -1046,6 +1057,8 @@ struct RawOptions {
     highlight_color: Option<String>,
     #[serde(rename = "highlight-active-color")]
     highlight_active_color: Option<String>,
+    #[serde(rename = "copy-on-select")]
+    copy_on_select: Option<bool>,
     #[serde(rename = "selection-clipboard")]
     selection_clipboard: Option<String>,
     #[serde(rename = "editor-command")]
@@ -1258,6 +1271,21 @@ mod tests {
         assert_eq!(c.options.text_zoom_step, 0.2);
         // Untouched fields keep their defaults.
         assert_eq!(c.options.font_size_px, 20);
+    }
+
+    #[test]
+    fn copy_on_select_is_off_by_default_and_settable() {
+        assert!(!Config::parse("").unwrap().options.copy_on_select);
+        assert!(
+            Config::parse("[options]\ncopy-on-select = true")
+                .unwrap()
+                .options
+                .copy_on_select
+        );
+        let mut o = Options::default();
+        assert_eq!(o.set("copy-on-select", "true").unwrap(), SetEffect::None);
+        assert!(o.copy_on_select);
+        assert!(o.set("copy-on-select", "yes").is_err());
     }
 
     #[test]
