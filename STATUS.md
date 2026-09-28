@@ -9,14 +9,21 @@ content pipeline, modal vim/zathura keys, Obsidian dialect. Linux-first.
 
 ## Now
 
-Shipped through **v1.12.0** (copy-on-select is opt-in).
+Shipped through **v1.12.1** (class diagram labels no longer clipped).
 
 - **macOS port (issue #1)** — [05-macos-port.md](docs/research/05-macos-port.md);
   tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
 - **perf guard** — `.github/workflows/{ci,bench}.yml` + `scripts/bench-compare.sh`;
   e2e green in CI, trail is a workflow-artifact chain. Next: confirm the trail.
+- **diagram text measurer** — merman's only measurer uses fixed per-character
+  widths, 10–30 % short of real fonts (DEVLOG 2026-09-28). Decided: bundle an
+  open font + its width table, a `TextMeasurer` over it, diagram CSS on it.
+  State: not started.
 
 ## Done (recent)
+
+- **v1.12.1 (2026-09-28)** — classDiagram labels overflow instead of clipping
+  (CSS `overflow: visible`); seasoned dependency patch updates.
 
 - **selection + search colours (2026-09-21, 686b357..d8f2557)** — zathura's
   `highlight-color`/`highlight-active-color`; search is controller JS painted
@@ -42,8 +49,6 @@ Shipped through **v1.12.0** (copy-on-select is opt-in).
   merman 0.8 (−46 % on the mermaid bench).
 - **controller extraction (2026-09-02..12)** — toolkit-agnostic controller,
   GTK shell as wiring, fake toolkit + display-free tests.
-- **v1.2 – v1.8** — breadcrumb, `:` completion, Obsidian dialect, Neovim sync,
-  opening position (D12), session zoom (D5a), perf pass.
 
 ## Next
 
