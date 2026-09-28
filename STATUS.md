@@ -24,7 +24,6 @@ Shipped through **v1.12.1** (class diagram labels no longer clipped).
 
 - **v1.12.1 (2026-09-28)** — classDiagram labels overflow instead of clipping
   (CSS `overflow: visible`); seasoned dependency patch updates.
-
 - **selection + search colours (2026-09-21, 686b357..d8f2557)** — zathura's
   `highlight-color`/`highlight-active-color`; search is controller JS painted
   with CSS highlights (no FindController); selection no longer spans the window.
@@ -43,12 +42,8 @@ Shipped through **v1.12.1** (class diagram labels no longer clipped).
 - **document graph v2 (2026-09-19, e4aa0b2)** — [interaction model](docs/graph/interaction.md):
   one node, one handle, `Space` folds, peek, route-first framing;
   [docs/graph/](docs/graph/README.md) with screenshots + demo tree.
-- **position held across resize, toggles and zoom (2026-09-13..18)** — the
-  D5a.0 anchor for `s`, `a`, fullscreen; `probe_text` e2e observables.
 - **v1.9.0** — wide blocks (D5a.1), diagram fit + per-diagram zoom (D5a.2),
   merman 0.8 (−46 % on the mermaid bench).
-- **controller extraction (2026-09-02..12)** — toolkit-agnostic controller,
-  GTK shell as wiring, fake toolkit + display-free tests.
 
 ## Next
 
