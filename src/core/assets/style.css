@@ -715,6 +715,15 @@ details[open] > summary {
   width: calc(var(--dw) * var(--dz, 1));
   height: auto;
 }
+/* merman sizes each HTML label's `foreignObject` from its own font metrics,
+ * which come out a few px narrower than the text WebKit draws. Its flowchart
+ * renderer marks those boxes `overflow: visible`; its class renderer does not
+ * (merman 0.8.0-alpha.6), so WebKit clipped the last characters of every
+ * class title and member. Let every diagram label overflow its box the way
+ * flowchart labels already do. */
+.mermaid svg foreignObject {
+  overflow: visible;
+}
 
 /* ---- Diagram fit-to-width (`a`, DESIGN D5a.2) ---------------------------- */
 

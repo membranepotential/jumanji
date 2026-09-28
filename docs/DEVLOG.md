@@ -2,7 +2,19 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-22 (latest) — copy-on-select is opt-in; CI installs xclip
+## 2026-09-28 (latest) — class diagram labels no longer clipped
+
+Every Mermaid `classDiagram` lost the last one to three characters of each
+title, stereotype and member. merman sizes each HTML label's `foreignObject`
+from its own font metrics, which come out narrower than the text WebKit
+draws. merman's flowchart renderer marks those boxes `overflow: visible`, so
+flowcharts hid the error; its class renderer does not (0.8.0-alpha.6, the
+latest release), so WebKit clipped the text. `style.css` now gives every
+`.mermaid svg foreignObject` `overflow: visible`. Checked under Xvfb against
+the reported repro. Next: report the missing overflow (or the narrow metrics)
+upstream to merman.
+
+## 2026-09-22 — copy-on-select is opt-in; CI installs xclip
 
 `copy-on-select` (bool, default `false`) now decides whether a finished
 pointer selection is copied; `selection-clipboard` still decides where it

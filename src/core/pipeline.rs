@@ -1056,7 +1056,7 @@ mod tests {
         // Proves comments strip *before* any renderer sees the fence.
         let html = render_str("%%\n\n```mermaid\nflowchart TD\nA --> B\n```\n\n%%\n\nAfter.\n");
         assert!(!html.contains("<svg"), "{html}");
-        assert!(!html.contains("flowchart"));
+        assert!(!html.contains("flowchart TD"));
         assert!(html.contains("After."));
     }
 
