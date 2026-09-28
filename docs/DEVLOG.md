@@ -11,8 +11,25 @@ draws. merman's flowchart renderer marks those boxes `overflow: visible`, so
 flowcharts hid the error; its class renderer does not (0.8.0-alpha.6, the
 latest release), so WebKit clipped the text. `style.css` now gives every
 `.mermaid svg foreignObject` `overflow: visible`. Checked under Xvfb against
-the reported repro. Next: report the missing overflow (or the narrow metrics)
-upstream to merman.
+the reported repro.
+
+Root cause of the narrow boxes: merman 0.8 ships one measurement profile,
+`Deterministic`, which reads no font at all. `text/heuristic.rs` charges
+each character a fixed em width by class (lowercase 0.43, uppercase 0.60,
+space 0.33), so `none` is 4 × 0.43 × 16 = 27.52 px against Trebuchet's
+34.8 px. Every regular sans measured is 5–30 % wider than those estimates;
+only condensed fonts come close, and they still overflow on some labels.
+A sweep of 15 diagram types showed the same error everywhere: labels past
+their box border (requirement, ER, state, block, gitGraph), a pie title
+cut at the SVG edge, overlapping timeline lines.
+
+Decided: bundle an open font with its width table, point the diagram CSS
+at it, and give merman a `TextMeasurer` that uses the table (merman's
+`TextMeasurementPolicy::uniform`). Exact on every machine, no font lookup
+at render time. Next: that measurer, after v1.12.1.
+
+Dependencies: patch updates published on or before 2026-09-21 (7-day
+seasoning); every direct dependency is on its newest stable release.
 
 ## 2026-09-22 — copy-on-select is opt-in; CI installs xclip
 
