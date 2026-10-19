@@ -9,8 +9,9 @@ content pipeline, modal vim/zathura keys, Obsidian dialect. Linux-first.
 
 ## Now
 
-Shipped through **v1.12.1** (class diagram labels no longer clipped).
+Shipped through **v1.13.0** (`--no-focus`).
 
+- **merman alpha.6 → 0.9.0** — not started — next: tests, output, bench vs v1.13.0.
 - **macOS port (issue #1)** — [05-macos-port.md](docs/research/05-macos-port.md);
   tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
 - **perf guard** — `.github/workflows/{ci,bench}.yml` + `scripts/bench-compare.sh`;
@@ -22,6 +23,8 @@ Shipped through **v1.12.1** (class diagram labels no longer clipped).
 
 ## Done (recent)
 
+- **v1.13.0 (2026-10-19)** — `--no-focus`: `_NET_WM_USER_TIME` = 0 on realize,
+  `set_visible` instead of `present()`; for the jumanji skill's wrapper.
 - **v1.12.1 (2026-09-28)** — classDiagram labels overflow instead of clipping
   (CSS `overflow: visible`); seasoned dependency patch updates.
 - **selection + search colours (2026-09-21, 686b357..d8f2557)** — zathura's
@@ -42,8 +45,6 @@ Shipped through **v1.12.1** (class diagram labels no longer clipped).
 - **document graph v2 (2026-09-19, e4aa0b2)** — [interaction model](docs/graph/interaction.md):
   one node, one handle, `Space` folds, peek, route-first framing;
   [docs/graph/](docs/graph/README.md) with screenshots + demo tree.
-- **v1.9.0** — wide blocks (D5a.1), diagram fit + per-diagram zoom (D5a.2),
-  merman 0.8 (−46 % on the mermaid bench).
 
 ## Next
 
