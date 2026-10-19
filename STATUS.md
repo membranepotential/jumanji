@@ -9,9 +9,8 @@ content pipeline, modal vim/zathura keys, Obsidian dialect. Linux-first.
 
 ## Now
 
-Shipped through **v1.13.0** (`--no-focus`).
+Shipped through **v1.14.0** (merman 0.9.1, `diagram-look`, worktree vaults).
 
-- **merman alpha.6 → 0.9.0** — not started — next: tests, output, bench vs v1.13.0.
 - **macOS port (issue #1)** — [05-macos-port.md](docs/research/05-macos-port.md);
   tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
 - **perf guard** — `.github/workflows/{ci,bench}.yml` + `scripts/bench-compare.sh`;
@@ -23,14 +22,13 @@ Shipped through **v1.13.0** (`--no-focus`).
 
 ## Done (recent)
 
+- **v1.14.0 (2026-10-20)** — merman 0.9.1 without ELK; `diagram-look` classic
+  (default, Mermaid 11 colours + sizing) | neo; a `.git` file roots a vault.
+  Bench vs v1.13.0: mermaid +6 %, demo +7 % (merman 0.9; accepted).
 - **v1.13.0 (2026-10-19)** — `--no-focus`: `_NET_WM_USER_TIME` = 0 on realize,
   `set_visible` instead of `present()`; for the jumanji skill's wrapper.
 - **v1.12.1 (2026-09-28)** — classDiagram labels overflow instead of clipping
   (CSS `overflow: visible`); seasoned dependency patch updates.
-- **selection + search colours (2026-09-21, 686b357..d8f2557)** — zathura's
-  `highlight-color`/`highlight-active-color`; search is controller JS painted
-  with CSS highlights (no FindController); selection no longer spans the window.
-  Open: SVG `<text>` matches are found but not painted.
 - **completion, TOC flash, theme (2026-09-21, 6ce0ace..b47bbf1)** — multi-word
   Tab completion + Shift-Tab; TOC is an overlay (no stale graph frame);
   `resources/theme.example.css` (the built-in colours).
@@ -39,9 +37,6 @@ Shipped through **v1.13.0** (`--no-focus`).
 - **pre-release review fixes (2026-09-19, 31f895f, 327269f)** — Astra review
   of v1.9.1..HEAD: reading anchor holds a screen point (bursts, resize, wide
   blocks, jumps); graph counts, races, edges, symlinks, Esc layering.
-- **pointer zoom (2026-09-19, 82594ca)** — document + diagram Ctrl+wheel
-  anchor at the pointer the page tracks itself (the shell's px were off by
-  WebKit's own scale); shell motion wiring removed; e2e red without it.
 - **document graph v2 (2026-09-19, e4aa0b2)** — [interaction model](docs/graph/interaction.md):
   one node, one handle, `Space` folds, peek, route-first framing;
   [docs/graph/](docs/graph/README.md) with screenshots + demo tree.
@@ -53,6 +48,8 @@ Shipped through **v1.13.0** (`--no-focus`).
 2. Trim the e2e suite toward what needs a real engine (unit tests now cover
    the flows in ms).
 3. Delete `.flash-investigation/` (gitignored).
+4. Report upstream to merman: per-mindmap config clone (cose-bilkent vs elk).
+5. Search: SVG `<text>` matches are found but not painted.
 
 ## Open questions
 
