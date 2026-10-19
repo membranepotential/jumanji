@@ -176,9 +176,9 @@ pipeline can later feed an export path (PDF/HTML) or a different front end.
 - **Highlight: syntect 5.3 + two-face** (bat's extended syntax/theme set).
   Proven, themeable, no JS. (tree-sitter-highlight: DIY per-language quality,
   no theme format.)
-- **Mermaid: merman 0.8** — pure-Rust reimplementation of Mermaid.js (native
+- **Mermaid: merman 0.9** — pure-Rust reimplementation of Mermaid.js (native
   parser, Rust ports of Dagre/fCoSE layout, 23+ diagram types, golden-snapshot
-  parity tests against Mermaid 11.16). Adopted by Zed for the same purpose.
+  parity tests against Mermaid 12.1). Adopted by Zed for the same purpose.
   Pre-1.0: parity gaps are possible, so diagram rendering errors must degrade
   gracefully (show the fence as a highlighted code block + error note).
   - Rejected: mmdc (needs Puppeteer + ~200 MB Chromium), QuickJS/boa + resvg
@@ -199,6 +199,22 @@ pipeline can later feed an export path (PDF/HTML) or a different front end.
     have no diagram, so the eager construction (0.7's too) was a fixed tax on
     every render — visible as +4.6 % on the `prose_10k` bench and proportionally
     less on larger ones ([D13](#d13-performance-regressions-are-judged-in-instructions-felt-in-milliseconds-2026-09-02)). Lazily, that bench sits 4.3 % *under* v1.8.0.
+    Since merman 0.9 it is also built **once per process** (one per
+    `diagram-look`), not once per document: the classic look's site config
+    makes construction cost ~3 M instructions, more than a small diagram costs
+    to render. Sharing is sound because the renderer holds only immutable
+    config and `render` takes `&self`.
+  - **The Mermaid 11 look by default (2026-10-20).** Mermaid 12 gives ten
+    diagram families their own default theme `redux-color` and look `neo`
+    (black outlines, drop shadows, a new palette); merman 0.9 follows it. The
+    option `diagram-look` keeps `classic` — theme `default`, look `classic`
+    for every family, set as merman site config — as the default, and `neo`
+    opts in to Mermaid 12's defaults. Two reasons: a reader should not
+    restyle every diagram a user already has, and `neo` costs +91 % on the
+    mermaid bench (merman deep-clones its config on each parse whose resolved
+    appearance differs from the config's, then recomputes the theme, and the
+    neo SVG is bigger). Layout stays on Dagre: merman's default features
+    compile ELK, Mermaid 12's new default layout, and jumanji turns them off.
   - **Parse failures are reported as `line:col`, not a byte offset.** merman
     says `Unexpected character at 964`; nobody counts bytes. 0.8's
     `RenderError::Parse` carries a structured `SourceSpan`, so `describe`

@@ -7,11 +7,111 @@
 //! a highlighted code block plus a small styled error note — never a panic,
 //! never blank output.
 
+use std::sync::OnceLock;
+
 use comrak::nodes::{AstNode, NodeHtmlBlock, NodeValue};
 use merman::svg::{SvgRenderOptions, sanitize_svg_id};
-use merman::{OperationControl, RenderError, RenderOutput, RenderRequest, Renderer, SvgRequest};
+use merman::{
+    Engine, MermaidConfig, OperationControl, RenderError, RenderOutput, RenderRequest, Renderer,
+    SvgRequest,
+};
+use serde_json::{Map, Value};
 
 use super::highlight::{escape_html, highlight_block};
+
+/// How diagrams look (option `diagram-look`).
+///
+/// Mermaid 12 gave ten diagram families (flowchart, sequence, class, state,
+/// ER, …) their own defaults, theme `redux-color` and look `neo`, while the
+/// global defaults stayed theme `default` and look `classic`. merman 0.9
+/// follows it. The two variants pick between those.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DiagramLook {
+    /// Mermaid 11's look, the one jumanji had before merman 0.9: theme
+    /// `default`, look `classic`, for every family.
+    #[default]
+    Classic,
+    /// Mermaid 12's defaults, unchanged.
+    Neo,
+}
+
+impl DiagramLook {
+    /// The option spelling, which [`DiagramLook::parse`] round-trips.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Classic => "classic",
+            Self::Neo => "neo",
+        }
+    }
+
+    /// Parse the option value, case-insensitively.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "classic" => Ok(Self::Classic),
+            "neo" => Ok(Self::Neo),
+            other => Err(format!(
+                "unknown diagram look {other:?}: expected \"classic\" or \"neo\""
+            )),
+        }
+    }
+
+    /// The renderer that draws in this look, built on first use and then
+    /// shared by every render in the process.
+    ///
+    /// Shared because building one is not cheap: the classic site config
+    /// makes merman re-derive its whole effective config and theme, about
+    /// 3 M instructions — more than a small diagram costs to render. The
+    /// renderer holds only immutable engine and parse config (`render` takes
+    /// `&self`, and per-fence state rides in the [`SvgRequest`]), so sharing
+    /// it is sound. Lazy, so a process that never meets a diagram never pays.
+    fn renderer(self) -> &'static Renderer {
+        static CLASSIC: OnceLock<Renderer> = OnceLock::new();
+        static NEO: OnceLock<Renderer> = OnceLock::new();
+        match self {
+            Self::Classic => CLASSIC.get_or_init(|| {
+                Renderer::new().with_engine(Engine::new().with_site_config(classic_site_config()))
+            }),
+            Self::Neo => NEO.get_or_init(Renderer::new),
+        }
+    }
+}
+
+/// The site config behind [`DiagramLook::Classic`]: theme `default` and look
+/// `classic` at the top level and in every section whose Mermaid default sets
+/// its own. The sections come from merman's defaults, so a family that gains
+/// its own look in a later Mermaid is covered without a list to maintain.
+///
+/// Every section is overridden, not just the top level, because merman
+/// resolves a section's appearance before the global one: a top-level
+/// override alone would leave the sections on `neo`. Matching values also keep
+/// merman off its slow path — when the resolved appearance differs from the
+/// config's, it rewrites the shared config, deep-cloning it on every parse.
+fn classic_site_config() -> MermaidConfig {
+    const CLASSIC: [(&str, &str); 2] = [("theme", "default"), ("look", "classic")];
+    let appearance = |defaults: &Map<String, Value>| -> Map<String, Value> {
+        CLASSIC
+            .iter()
+            .filter(|(key, _)| defaults.contains_key(*key))
+            .map(|(key, value)| (key.to_string(), Value::from(*value)))
+            .collect()
+    };
+    let defaults = merman::generated::default_site_config();
+    let mut config: Map<String, Value> = CLASSIC
+        .iter()
+        .map(|(key, value)| (key.to_string(), Value::from(*value)))
+        .collect();
+    if let Some(sections) = defaults.as_value().as_object() {
+        for (name, section) in sections {
+            if let Some(section) = section.as_object() {
+                let overrides = appearance(section);
+                if !overrides.is_empty() {
+                    config.insert(name.clone(), Value::Object(overrides));
+                }
+            }
+        }
+    }
+    MermaidConfig::from_value(Value::Object(config))
+}
 
 /// True if a fence info string selects the mermaid renderer (first token,
 /// case-insensitive), e.g. `mermaid` or `mermaid title="x"`.
@@ -160,19 +260,9 @@ fn degrade(source: &str, reason: &str) -> String {
 /// block). Diagram ids are made unique per document so multiple inlined SVGs
 /// do not collide on internal marker/id references.
 ///
-/// At most one [`Renderer`] is built per document, on the first mermaid fence,
-/// and reused across all the rest: `render` takes `&self` and the renderer holds
-/// only immutable engine/parse config (no per-render caching), so reuse is sound
-/// — it just skips re-building those registries for every fence. Per-fence state
-/// (the diagram id) rides in the [`SvgRequest`] instead, which is where merman
-/// 0.8 puts operation-scoped options.
-///
-/// Lazily, because building the renderer costs ~70k instructions and most
-/// documents have no diagram at all: constructing it eagerly put that on every
-/// render, which the pipeline benches see as a fixed cost — +4.6 % on
-/// `prose_10k`, and proportionally less on larger ones (DESIGN D13).
-pub fn transform_mermaid<'a>(root: &'a AstNode<'a>) {
-    let mut renderer: Option<Renderer> = None;
+/// `look` picks the diagrams' look and with it the process-wide renderer; see
+/// [`DiagramLook::renderer`].
+pub fn transform_mermaid<'a>(root: &'a AstNode<'a>, look: DiagramLook) {
     let mut index = 0usize;
     for node in root.descendants() {
         let html = {
@@ -181,8 +271,7 @@ pub fn transform_mermaid<'a>(root: &'a AstNode<'a>) {
                 NodeValue::CodeBlock(block) if block.fenced && is_mermaid_fence(&block.info) => {
                     let id = format!("jumanji-diagram-{index}");
                     index += 1;
-                    let renderer = renderer.get_or_insert_with(Renderer::new);
-                    Some(match render(renderer, &block.literal, &id) {
+                    Some(match render(look.renderer(), &block.literal, &id) {
                         Rendered::Svg(svg) => svg,
                         Rendered::Failed(reason) => degrade(&block.literal, &reason),
                     })
@@ -242,7 +331,7 @@ mod tests {
         let mut files = Vec::new();
         markdown_files(root, &mut files);
         files.sort();
-        let renderer = Renderer::new();
+        let renderer = DiagramLook::default().renderer();
         let (mut checked, mut problems) = (0, Vec::new());
         for file in &files {
             let md = std::fs::read_to_string(file).expect("read markdown");
@@ -264,7 +353,7 @@ mod tests {
                     "{}:{line}",
                     file.strip_prefix(root).unwrap_or(file).display()
                 );
-                match (render(&renderer, &block.literal, "check"), expected_failure) {
+                match (render(renderer, &block.literal, "check"), expected_failure) {
                     (Rendered::Svg(_), false) | (Rendered::Failed(_), true) => {}
                     (Rendered::Failed(reason), false) => problems.push(format!("{at}: {reason}")),
                     (Rendered::Svg(_), true) => {
@@ -296,8 +385,8 @@ mod tests {
 
     #[test]
     fn valid_flowchart_renders_inline_svg_with_intrinsic_width() {
-        let renderer = Renderer::new();
-        match render(&renderer, "flowchart TD\nA[Start] --> B[Done]", "test-ok") {
+        let renderer = DiagramLook::default().renderer();
+        match render(renderer, "flowchart TD\nA[Start] --> B[Done]", "test-ok") {
             Rendered::Svg(html) => {
                 // Real merman output carries an inline `max-width:<N>px`, so the
                 // wrapper must pin it onto `--dw` for the intrinsic-size model.
@@ -310,6 +399,71 @@ mod tests {
             }
             Rendered::Failed(reason) => panic!("expected SVG, got failure: {reason}"),
         }
+    }
+
+    /// The two looks, told apart by what each one's SVG carries: classic
+    /// nodes are tagged `data-look="classic"` and filled with Mermaid 11's
+    /// `#ECECFF`; neo nodes are tagged `data-look="neo"` and filled from the
+    /// `redux-color` palette. (Both stylesheets carry `[data-look="neo"]`
+    /// selectors, hence the leading space: it matches the attribute only.)
+    fn rendered(look: DiagramLook, source: &str) -> String {
+        match render(look.renderer(), source, "test-look") {
+            Rendered::Svg(svg) => svg,
+            Rendered::Failed(reason) => panic!("expected SVG, got failure: {reason}"),
+        }
+    }
+
+    #[test]
+    fn classic_look_draws_every_family_as_mermaid_11_did() {
+        let flowchart = rendered(
+            DiagramLook::Classic,
+            "flowchart TD
+A[Start] --> B[Done]",
+        );
+        assert!(flowchart.contains(" data-look=\"classic\""), "{flowchart}");
+        assert!(!flowchart.contains(" data-look=\"neo\""), "{flowchart}");
+        assert!(flowchart.contains("fill:#ECECFF"), "{flowchart}");
+        // Sequence diagrams have their own Mermaid 12 default too, so this
+        // proves the per-section override, not just the global one.
+        let sequence = rendered(
+            DiagramLook::Classic,
+            "sequenceDiagram
+A->>B: hi",
+        );
+        assert!(!sequence.contains(" data-look=\"neo\""), "{sequence}");
+        assert!(sequence.contains("fill:#ECECFF"), "{sequence}");
+    }
+
+    #[test]
+    fn neo_look_keeps_mermaid_12s_defaults() {
+        for source in [
+            "flowchart TD
+A[Start] --> B[Done]",
+            "sequenceDiagram
+A->>B: hi",
+        ] {
+            let svg = rendered(DiagramLook::Neo, source);
+            assert!(svg.contains(" data-look=\"neo\""), "{svg}");
+            assert!(!svg.contains("#ECECFF"), "{svg}");
+        }
+    }
+
+    #[test]
+    fn a_diagrams_own_init_directive_outranks_the_look() {
+        let svg = rendered(
+            DiagramLook::Classic,
+            "%%{init: {\"look\": \"neo\"}}%%\nflowchart TD\nA[Start] --> B[Done]",
+        );
+        assert!(svg.contains(" data-look=\"neo\""), "{svg}");
+    }
+
+    #[test]
+    fn diagram_look_parses_its_names() {
+        for look in [DiagramLook::Classic, DiagramLook::Neo] {
+            assert_eq!(DiagramLook::parse(look.name()), Ok(look));
+        }
+        assert_eq!(DiagramLook::parse(" NEO "), Ok(DiagramLook::Neo));
+        assert!(DiagramLook::parse("dark").is_err());
     }
 
     #[test]
@@ -375,10 +529,10 @@ mod tests {
     /// known gap. Red on 0.7.0.
     #[test]
     fn punctuation_in_quoted_subgraph_title_parses() {
-        let renderer = Renderer::new();
+        let renderer = DiagramLook::default().renderer();
         for title in ["one; two", "one] two", "a (b; c) [d]"] {
             let source = format!("graph TD\n  subgraph a[\"{title}\"]\n    A[\"x\"]\n  end");
-            match render(&renderer, &source, "test-punct") {
+            match render(renderer, &source, "test-punct") {
                 Rendered::Svg(html) => assert!(html.contains("<svg")),
                 Rendered::Failed(reason) => {
                     panic!("subgraph title {title:?} should parse: {reason}")
@@ -412,9 +566,9 @@ mod tests {
     /// "Unexpected character at 964" is unactionable in a reader.
     #[test]
     fn parse_failure_reports_line_and_column() {
-        let renderer = Renderer::new();
+        let renderer = DiagramLook::default().renderer();
         let source = "graph TD\n  A --> ]]]";
-        match render(&renderer, source, "test-bad") {
+        match render(renderer, source, "test-bad") {
             Rendered::Svg(_) => panic!("expected a parse failure"),
             Rendered::Failed(reason) => {
                 assert!(

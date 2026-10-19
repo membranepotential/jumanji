@@ -14,6 +14,7 @@ use comrak::nodes::{Ast, AstNode, LineColumn, NodeHtmlBlock, NodeValue};
 use comrak::{Arena, Options as ComrakOptions, format_html, parse_document};
 
 use super::config::{DIAGRAM_FIT_CLASS, Rgba, WIDE_CLASS, WideBlocks};
+use super::diagram::DiagramLook;
 use super::highlight::escape_html;
 use super::vault::Vault;
 use super::{
@@ -87,6 +88,8 @@ pub struct Options {
     /// reason — the runtime toggle is a class flip, so a later re-render must
     /// carry whatever `a` last set.
     pub diagram_fit: bool,
+    /// How mermaid diagrams look (option `diagram-look`).
+    pub diagram_look: DiagramLook,
 }
 
 impl Default for Options {
@@ -104,6 +107,7 @@ impl Default for Options {
             wide: true,
             wide_blocks: WideBlocks::default(),
             diagram_fit: false,
+            diagram_look: DiagramLook::Classic,
         }
     }
 }
@@ -201,7 +205,7 @@ pub fn render(md: &str, opts: &Options, vault: &Vault) -> RenderedDocument {
     textscan::strip_comments(&arena, root);
     callout::transform_callouts(&arena, root);
     fence::transform_fences(root, &opts.renderers, &fence::run_command);
-    diagram::transform_mermaid(root);
+    diagram::transform_mermaid(root, opts.diagram_look);
     highlight::highlight_code_blocks(root);
     let has_math = math::transform_math(root);
     textscan::transform_embeds(&arena, root, vault);

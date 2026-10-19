@@ -547,6 +547,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                 wide: options.wide,
                 wide_blocks: options.wide_blocks.clone(),
                 diagram_fit: options.diagram_fit,
+                diagram_look: options.diagram_look,
             },
             keymap,
             // Empty until the first background scan lands (kicked off below). A
@@ -2367,6 +2368,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                     s.render_opts.wide = o.wide;
                     s.render_opts.wide_blocks = o.wide_blocks.clone();
                     s.render_opts.diagram_fit = o.diagram_fit;
+                    s.render_opts.diagram_look = o.diagram_look;
                     s.wide = o.wide;
                     s.diagram_fit = o.diagram_fit;
                     s.font_base_px = o.font_size_px as f64;

@@ -2,7 +2,73 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-10-19 (latest) — `--no-focus` opens a window without taking focus
+## 2026-10-20 (latest) — merman 0.9, and `diagram-look` keeps the classic look
+
+merman 0.8.0-alpha.6 → 0.9.1 (with comrak 0.56, commit 1a1bf32) brought
+three surprises, all from merman following Mermaid 12.1:
+
+- **ELK by default.** merman's default features compile ELK, which Mermaid
+  12 makes the default layout (`layout: "elk"` at the top of the default
+  config, and for `state`). jumanji builds merman with
+  `default-features = false, features = ["all-diagrams", "complete-svg"]`,
+  so ELK and its EPL-2.0 code stay out and diagrams stay on Dagre.
+- **A new look.** Mermaid 12's default config keeps theme `default` and
+  look `classic` globally, but gives ten families — agentflow, class, ER,
+  flowchart, requirement, sequence, state, swimlane, usecase, venn — their
+  own theme `redux-color` and look `neo`: black outlines, drop shadows, a
+  pink/teal palette. Every diagram a user had changed style.
+- **+91 % on the mermaid bench.** callgrind put most of it in
+  `merman_core::config::appearance::resolve_appearance`. It resolves the
+  diagram family's theme, look and layout and, when the result differs from
+  the effective config's, writes it with `MermaidConfig::set_value`, which
+  deep-clones the shared config (`Arc::make_mut`) on every parse. A changed
+  config then misses the cached theme, so `apply_theme_defaults` runs again.
+  The neo SVG is also bigger to emit.
+
+New option `diagram-look` (DESIGN D3, D5): `classic`, the default, passes
+merman a site config (`Engine::with_site_config`) that sets theme `default`
+and look `classic` at the top level and in every section whose Mermaid
+default has its own; the sections are read from
+`merman::generated::default_site_config()`, so no list to maintain. `neo`
+passes nothing. `:set diagram-look neo` re-renders, like the other options
+that feed the pipeline. A diagram's own `%%{init}%%` still wins.
+
+Classic nodes carry `data-look="classic"` and the `#ECECFF` fill again; the
+SVG bodies match v1.13.0's apart from Mermaid 12's sizing (below). Setting
+the sections, not just the top level, matters twice: merman resolves the
+section first, and matching values never reach `set_value`.
+
+The site config made building a renderer cost ~3 M instructions (merman
+re-derives the effective config and theme), which the per-document renderer
+paid on every render: still +37 % on the mermaid bench. The renderer is now
+built once per process per look (`OnceLock`), which is sound because it holds
+only immutable config and `render` takes `&self`.
+
+Instructions per render, v1.13.0 → this commit (classic) / neo:
+
+| fixture | v1.13.0 | classic | neo |
+|---|---|---|---|
+| mermaid | 10,922,633 | 11,089,946 (+1.5 %) | 20,806,203 (+90 %) |
+| demo | 30,440,733 | 32,381,740 (+6.4 %) | 42,908,104 (+41 %) |
+| prose_10k | 1,456,924 | 1,295,870 (−11 %) | |
+| prose_500k | 68,002,065 | 58,550,096 (−14 %) | |
+| table_heavy | 32,768,675 | 31,083,060 (−5 %) | |
+
+The demo's remaining +6.4 % is its one mindmap, not the look. Mermaid 12
+lays mindmaps out with `cose-bilkent` while the global default layout is
+`elk`, so `resolve_appearance` rewrites the top-level `layout` for every
+mindmap: one deep clone plus a theme recompute, ~2.1 M instructions per
+render, which callgrind shows as the whole merman difference. No site config
+avoids it without changing the mindmap's layout; it is merman's to fix.
+
+Not restored: Mermaid 12 also raised `flowchart.minNodeWidth` to 120 and
+cut `wrappingWidth` from 200 to 120 (`state` likewise). Both apply in
+either look, so a short flowchart label now sits in a 120 px-wide box where
+v1.13.0 fit it to the text. (The SVG root also lost its inline
+`background-color: white`, which shows nowhere: `.mermaid` paints its own
+white canvas.)
+
+## 2026-10-19 — `--no-focus` opens a window without taking focus
 
 An agent that opens a document while the user types elsewhere must not move
 the focus. A new window took it twice: i3 focuses every window it maps, and

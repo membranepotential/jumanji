@@ -281,6 +281,7 @@ page-width = 960        # px, content column width
 wide-blocks = "diagrams,fences,tables"  # kinds that may break out (see below)
 wide = true             # start with the breakout on (`s` toggles it)
 diagram-fit = false     # start with diagrams fit to width (`a` toggles it)
+diagram-look = "classic" # mermaid diagrams: "classic" or "neo" (see below)
 graph-view = "links"    # document graph: "links" or "tree" (`v` toggles it)
 highlight-color = "rgba(159, 251, 0, 0.5)"      # selection and search matches (zathura's default)
 highlight-active-color = "rgba(0, 188, 0, 0.5)" # the current search match (zathura's default)
@@ -341,6 +342,22 @@ breakout:
 
 `diagram-fit` sets the startup state and is a runtime `:set` target
 (`:set diagram-fit true`).
+
+### Diagram look
+
+Mermaid 12 changed how most diagrams look: flowchart, sequence, class, state,
+ER, requirement and a few newer families default to theme `redux-color` and
+look `neo` — black outlines, drop shadows, a new palette. `diagram-look`
+picks the look:
+
+- `classic` (the default) keeps Mermaid 11's look, the one jumanji has always
+  had: theme `default`, look `classic`, for every diagram.
+- `neo` takes Mermaid 12's defaults as they are.
+
+It is a runtime `:set` target (`:set diagram-look neo`), which re-renders the
+document. `classic` is also cheaper: `neo` takes almost twice the work to
+render a page of flowcharts. A diagram's own `%%{init: …}%%` directive still
+wins over either look.
 
 ### Running in the background
 

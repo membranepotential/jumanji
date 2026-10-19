@@ -47,6 +47,12 @@
 # Base body font size in pixels. Also the 100% reference point for text zoom.
 # font-size = 18
 
+# How mermaid diagrams look: "classic" — Mermaid 11's look (theme `default`,
+# look `classic`) for every diagram — or "neo", Mermaid 12's defaults (theme
+# `redux-color`, look `neo` for flowchart, sequence, class, state, ER and a
+# few more). `:set diagram-look neo` re-renders the open document.
+# diagram-look = "classic"
+
 # What a node's children are in the document graph (`t`): "links" — every
 # document it links to, so a node can appear more than once, with nodes off
 # the route starting folded — or "tree", the spanning tree of documents

@@ -50,6 +50,7 @@ Options surface (all optional; defaults in parentheses):
 | `font-body` | string (`""`) | prose font family; empty = stylesheet default serif stack |
 | `font-mono` | string (`""`) | code font family; empty = stylesheet default mono stack |
 | `font-size` | u32 (`18`) | base body font px; also the text-zoom 100% reference |
+| `diagram-look` | `"classic"` \| `"neo"` (`classic`) | how mermaid diagrams look: Mermaid 11's theme `default` + look `classic` for every family, or Mermaid 12's defaults; `:set` re-renders ([D3](../architecture/README.md#d3-content-pipeline--100-rust-no-javascript)) |
 | `highlight-color` | colour (`"rgba(159, 251, 0, 0.5)"`) | colour of a selection and of every `/` match; zathura's option and default. `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(…)`, `rgba(…)` |
 | `highlight-active-color` | colour (`"rgba(0, 188, 0, 0.5)"`) | colour of the current `/` match, the one `n`/`N` step from; zathura's option and default. Same forms as `highlight-color` |
 | `copy-on-select` | bool (`false`) | copy a selection when the mouse is released |

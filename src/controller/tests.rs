@@ -1864,6 +1864,22 @@ fn setting_wide_blocks_re_renders_with_the_new_eligibility() {
 }
 
 #[test]
+fn setting_diagram_look_re_renders_the_diagrams() {
+    // The attribute, not the `[data-look="neo"]` selectors both looks'
+    // stylesheets carry; see `core::diagram`'s look tests.
+    const NEO: &str = " data-look=\"neo\"";
+    let r = Reader::open("```mermaid\nflowchart TD\nA --> B\n```\n");
+    let (classic, _) = r.view.loads().pop().expect("a loaded document");
+    assert!(!classic.contains(NEO), "classic is the default");
+    r.finish_load();
+    r.press(':');
+    r.submit_input("set diagram-look neo");
+    r.land_work();
+    let (neo, _) = r.view.loads().pop().expect("a re-rendered document");
+    assert!(neo.contains(NEO));
+}
+
+#[test]
 fn ctrl_wheel_zooms_the_page_about_the_pages_own_pointer() {
     // The shell's pointer is in toolkit px, which WebKit need not lay the page
     // out in (2:1 under Xvfb); dividing it by the zoom anchored the zoom at

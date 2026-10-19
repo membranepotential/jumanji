@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::diagram::DiagramLook;
 use super::editor::EditorCommand;
 use super::graph::View as GraphView;
 use super::keymap::{CharArgKind, Key, KeyPress, KeySequence, Keymap};
@@ -394,6 +395,9 @@ pub struct Options {
     /// behaviour (a shrunk-to-fit diagram is unreadably small), and the
     /// wide-block breakout already recovers most of the missing width.
     pub diagram_fit: bool,
+    /// How diagrams look: `classic` (Mermaid 11's look, the default) or `neo`
+    /// (Mermaid 12's defaults for most diagram families).
+    pub diagram_look: DiagramLook,
     /// What the document graph shows around its spine (DESIGN D14): the
     /// current note's links (`links`, the default) or the whole spanning tree
     /// (`tree`). What `v` starts out flipping; `:set` applies it to an open
@@ -439,6 +443,7 @@ impl Default for Options {
             wide_blocks: WideBlocks::default(),
             wide: true,
             diagram_fit: false,
+            diagram_look: DiagramLook::Classic,
             graph_view: GraphView::Links,
             highlight_color: Rgba::ZATHURA_HIGHLIGHT,
             highlight_active_color: Rgba::ZATHURA_HIGHLIGHT_ACTIVE,
@@ -512,6 +517,11 @@ impl Options {
                 // the class, so the next render must agree with the live state.
                 // The *toggle* (`a`) is still a class flip with no re-render.
                 self.diagram_fit = parse_scalar::<bool>(value, "diagram-fit")?;
+                Ok(SetEffect::Rerender)
+            }
+            "diagram-look" => {
+                self.diagram_look =
+                    DiagramLook::parse(unquote(value)).map_err(|m| format!("diagram-look: {m}"))?;
                 Ok(SetEffect::Rerender)
             }
             "graph-view" => {
@@ -652,6 +662,13 @@ impl Config {
             })?,
             None => defaults.graph_view,
         };
+        let diagram_look = match raw_opts.diagram_look {
+            Some(s) => DiagramLook::parse(&s).map_err(|message| ConfigError::OptionValue {
+                key: "diagram-look",
+                message,
+            })?,
+            None => defaults.diagram_look,
+        };
         let highlight_color = match raw_opts.highlight_color {
             Some(s) => Rgba::parse(&s).map_err(|message| ConfigError::OptionValue {
                 key: "highlight-color",
@@ -682,6 +699,7 @@ impl Config {
             wide_blocks,
             wide: raw_opts.wide.unwrap_or(defaults.wide),
             diagram_fit: raw_opts.diagram_fit.unwrap_or(defaults.diagram_fit),
+            diagram_look,
             graph_view,
             highlight_color,
             highlight_active_color,
@@ -951,6 +969,7 @@ pub fn option_keys() -> &'static [&'static str] {
         "wide-blocks",
         "wide",
         "diagram-fit",
+        "diagram-look",
         "graph-view",
         "highlight-color",
         "highlight-active-color",
@@ -1051,6 +1070,8 @@ struct RawOptions {
     wide: Option<bool>,
     #[serde(rename = "diagram-fit")]
     diagram_fit: Option<bool>,
+    #[serde(rename = "diagram-look")]
+    diagram_look: Option<String>,
     #[serde(rename = "graph-view")]
     graph_view: Option<String>,
     #[serde(rename = "highlight-color")]
@@ -1539,6 +1560,36 @@ mod tests {
         ] {
             assert!(hl(bad).is_err(), "{bad:?} should be rejected");
         }
+    }
+
+    #[test]
+    fn diagram_look_defaults_to_classic_and_is_settable() {
+        let mut o = Options::default();
+        assert_eq!(o.diagram_look, DiagramLook::Classic);
+        assert_eq!(o.set("diagram-look", "neo").unwrap(), SetEffect::Rerender);
+        assert_eq!(o.diagram_look, DiagramLook::Neo);
+        assert_eq!(
+            o.set("diagram-look", "\"classic\"").unwrap(),
+            SetEffect::Rerender
+        );
+        assert_eq!(o.diagram_look, DiagramLook::Classic);
+        assert!(o.set("diagram-look", "dark").is_err());
+
+        for (value, look) in [("classic", DiagramLook::Classic), ("neo", DiagramLook::Neo)] {
+            let c = Config::parse(&format!("[options]\ndiagram-look = \"{value}\"\n")).unwrap();
+            assert_eq!(c.options.diagram_look, look);
+        }
+        let err = Config::parse("[options]\ndiagram-look = \"dark\"\n").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::OptionValue {
+                    key: "diagram-look",
+                    ..
+                }
+            ),
+            "{err}"
+        );
     }
 
     #[test]
