@@ -125,15 +125,20 @@ pub struct Vault {
     index: VaultIndex,
 }
 
-/// Marker directories that identify a vault root, in precedence order: the
-/// explicit Obsidian marker first, then the one nearly every marker-less notes
-/// tree still has. Both are *directories*; a file of the same name is not a
-/// marker.
-const ROOT_MARKERS: [&str; 2] = [".obsidian", ".git"];
+/// Markers that identify a vault root, in precedence order, each with the test
+/// its path must pass: the explicit Obsidian marker first, then the one nearly
+/// every marker-less notes tree still has. `.obsidian` must be a directory; a
+/// file of that name is not a marker. `.git` may also be a file: a git worktree
+/// or submodule has a `.git` file (`gitdir: …`) and is a repository of its own,
+/// so it roots there rather than at the checkout that contains it.
+const ROOT_MARKERS: [(&str, IsMarker); 2] = [(".obsidian", Path::is_dir), (".git", Path::exists)];
+
+/// Whether a marker's path, joined onto a candidate root, counts as present.
+type IsMarker = fn(&Path) -> bool;
 
 /// The vault root for `document`: the nearest ancestor holding `.obsidian/`,
-/// else the nearest holding `.git/`, else the document's own directory
-/// (DESIGN D11).
+/// else the nearest holding `.git` (a directory, or a worktree's file), else
+/// the document's own directory (DESIGN D11).
 ///
 /// Each marker is searched over the *whole* ancestor chain before the next is
 /// tried, so an Obsidian vault nested inside a git repo roots at the vault, not
@@ -149,8 +154,8 @@ pub fn root_for(document: &Path) -> PathBuf {
         // A bare filename with no parent, or the filesystem root itself.
         _ => Path::new("."),
     };
-    for marker in ROOT_MARKERS {
-        if let Some(root) = start.ancestors().find(|dir| dir.join(marker).is_dir()) {
+    for (marker, is_marker) in ROOT_MARKERS {
+        if let Some(root) = start.ancestors().find(|dir| is_marker(&dir.join(marker))) {
             return root.to_path_buf();
         }
     }
@@ -946,6 +951,25 @@ mod tests {
         // visibly different from the document-directory fallback.
         let doc = tree.write("Notes/Deep.md", "hi\n");
         assert_eq!(root_for(&doc), tree.0.canonicalize().unwrap().join("Notes"));
+    }
+
+    #[test]
+    fn a_git_file_roots_a_worktree_at_its_own_directory() {
+        // A git worktree (or submodule) has a `.git` *file* pointing at the
+        // main repository. Worktrees often live inside the main checkout, so
+        // honouring only a `.git/` directory would root at that checkout, whose
+        // scan skips the worktree's hidden or ignored folder entirely.
+        let tree = TempTree::new("root-worktree");
+        tree.mkdir(".git");
+        tree.write(
+            ".worktrees/feature/.git",
+            "gitdir: ../../.git/worktrees/feature\n",
+        );
+        let doc = tree.write(".worktrees/feature/notes/Deep.md", "hi\n");
+        assert_eq!(
+            root_for(&doc),
+            tree.0.canonicalize().unwrap().join(".worktrees/feature")
+        );
     }
 
     #[test]

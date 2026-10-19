@@ -2,7 +2,23 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-10-20 (latest) — merman 0.9, and `diagram-look` keeps the classic look
+## 2026-10-20 (latest) — a git worktree is its own vault
+
+`vault::root_for` honoured `.git` only as a directory. In a git worktree
+`.git` is a file (`gitdir: …`), so the walk-up passed the worktree and rooted
+at the main checkout. Worktrees usually live inside it (`.worktrees/<name>`,
+`.claude/worktrees/<name>`), and the scan skips hidden and ignored folders,
+so none of the worktree's notes were indexed: wikilinks, embeds and the graph
+resolved to nothing or to the main checkout's copies. Plain markdown links
+were unaffected, because WebKit resolves them against the file.
+
+Decided: a `.git` file is a root marker too; a worktree or submodule is a
+repository of its own. `.obsidian` stays directory-only, and `.obsidian`
+still outranks `.git` over the whole ancestor chain. D11 in
+`docs/obsidian/README.md` and the README's root list say so. New unit test:
+a `.git/` parent with a worktree-shaped child roots at the child.
+
+## 2026-10-20 — merman 0.9, and `diagram-look` keeps the classic look
 
 merman 0.8.0-alpha.6 → 0.9.1 (with comrak 0.56, commit 1a1bf32) brought
 three surprises, all from merman following Mermaid 12.1:

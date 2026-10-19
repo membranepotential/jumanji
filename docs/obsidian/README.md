@@ -87,7 +87,12 @@ proposal, these win.
     manager that most opens actually come through: the same file rendered
     differently depending on which directory the user's shell happened to be in.
     `.git/` as the second marker covers the marker-less notes tree, which is the
-    common case for anyone keeping notes in a repo.
+    common case for anyone keeping notes in a repo. A `.git` *file* counts too
+    (2026-10-20): a git worktree or submodule has one instead of the directory,
+    and is a repository of its own. Honouring only the directory rooted a
+    worktree at the main checkout that usually contains it, whose scan skips
+    the worktree's hidden or ignored folder, so none of its notes resolved.
+    `.obsidian` stays directory-only.
   - **Pinned, not recomputed.** The root is resolved once, from the document
     jumanji was launched with, and held for the process. Recomputing it per load
     would let following a wikilink into a subfolder silently narrow the vault

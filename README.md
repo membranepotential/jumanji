@@ -156,7 +156,8 @@ render. A link that resolves to nothing renders inert rather than broken.
 the file you opened, once, at launch:
 
 1. the nearest ancestor directory containing `.obsidian/`, else
-2. the nearest containing `.git/`, else
+2. the nearest containing `.git` (a directory, or the file a git worktree or
+   submodule has, so a worktree is its own vault), else
 3. the file's own directory.
 
 So an Obsidian vault works as a vault, a git-tracked notes tree works without a
