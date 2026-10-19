@@ -78,7 +78,7 @@ impl DiagramLook {
 
 /// The site config behind [`DiagramLook::Classic`]: theme `default` and look
 /// `classic` at the top level and in every section whose Mermaid default sets
-/// its own. The sections come from merman's defaults, so a family that gains
+/// its own, plus Mermaid 11's flowchart and state node sizing. The sections come from merman's defaults, so a family that gains
 /// its own look in a later Mermaid is covered without a list to maintain.
 ///
 /// Every section is overridden, not just the top level, because merman
@@ -108,6 +108,18 @@ fn classic_site_config() -> MermaidConfig {
                     config.insert(name.clone(), Value::Object(overrides));
                 }
             }
+        }
+    }
+    // Mermaid 12 also grew flowchart and state nodes, in either look: a
+    // minimum node width of 120 and wrapping at 120 instead of 200. Mermaid
+    // 11 had no minimum, so a short label kept a snug box.
+    for section in ["flowchart", "state"] {
+        if let Value::Object(section) = config
+            .entry(section)
+            .or_insert_with(|| Value::Object(Map::new()))
+        {
+            section.insert("minNodeWidth".into(), Value::from(0));
+            section.insert("wrappingWidth".into(), Value::from(200));
         }
     }
     MermaidConfig::from_value(Value::Object(config))
@@ -432,6 +444,24 @@ A->>B: hi",
         );
         assert!(!sequence.contains(" data-look=\"neo\""), "{sequence}");
         assert!(sequence.contains("fill:#ECECFF"), "{sequence}");
+    }
+
+    /// The width of an SVG's `viewBox`.
+    fn view_box_width(svg: &str) -> f64 {
+        let view_box = svg.split("viewBox=\"").nth(1).expect("a viewBox");
+        let width = view_box.split(['"', ' ']).nth(2).expect("a viewBox width");
+        width.parse().expect("a numeric viewBox width")
+    }
+
+    #[test]
+    fn classic_look_keeps_mermaid_11s_snug_nodes() {
+        // Mermaid 12 gives flowchart nodes a minimum width of 120; Mermaid 11
+        // sized a short label's box to the label.
+        let source = "flowchart TD\nA[Start]";
+        let classic = view_box_width(&rendered(DiagramLook::Classic, source));
+        let neo = view_box_width(&rendered(DiagramLook::Neo, source));
+        assert!(classic < 120.0, "classic is {classic} wide");
+        assert!(neo > classic, "neo {neo} vs classic {classic}");
     }
 
     #[test]

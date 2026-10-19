@@ -208,7 +208,9 @@ pipeline can later feed an export path (PDF/HTML) or a different front end.
     diagram families their own default theme `redux-color` and look `neo`
     (black outlines, drop shadows, a new palette); merman 0.9 follows it. The
     option `diagram-look` keeps `classic` — theme `default`, look `classic`
-    for every family, set as merman site config — as the default, and `neo`
+    for every family, plus Mermaid 11's flowchart and state node sizing
+    (`minNodeWidth` 0, `wrappingWidth` 200), set as merman site config — as
+    the default, and `neo`
     opts in to Mermaid 12's defaults. Two reasons: a reader should not
     restyle every diagram a user already has, and `neo` costs +91 % on the
     mermaid bench (merman deep-clones its config on each parse whose resolved

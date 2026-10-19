@@ -352,7 +352,9 @@ look `neo` — black outlines, drop shadows, a new palette. `diagram-look`
 picks the look:
 
 - `classic` (the default) keeps Mermaid 11's look, the one jumanji has always
-  had: theme `default`, look `classic`, for every diagram.
+  had: theme `default`, look `classic`, for every diagram, and Mermaid 11's
+  node sizing (Mermaid 12 makes flowchart and state nodes at least 120 px
+  wide and wraps their labels sooner).
 - `neo` takes Mermaid 12's defaults as they are.
 
 It is a runtime `:set` target (`:set diagram-look neo`), which re-renders the

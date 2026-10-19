@@ -50,7 +50,7 @@ passes nothing. `:set diagram-look neo` re-renders, like the other options
 that feed the pipeline. A diagram's own `%%{init}%%` still wins.
 
 Classic nodes carry `data-look="classic"` and the `#ECECFF` fill again; the
-SVG bodies match v1.13.0's apart from Mermaid 12's sizing (below). Setting
+SVG bodies match v1.13.0's, sizing included (below). Setting
 the sections, not just the top level, matters twice: merman resolves the
 section first, and matching values never reach `set_value`.
 
@@ -77,10 +77,11 @@ mindmap: one deep clone plus a theme recompute, ~2.1 M instructions per
 render, which callgrind shows as the whole merman difference. No site config
 avoids it without changing the mindmap's layout; it is merman's to fix.
 
-Not restored: Mermaid 12 also raised `flowchart.minNodeWidth` to 120 and
-cut `wrappingWidth` from 200 to 120 (`state` likewise). Both apply in
-either look, so a short flowchart label now sits in a 120 px-wide box where
-v1.13.0 fit it to the text. (The SVG root also lost its inline
+Sizing: Mermaid 12 also raised `flowchart.minNodeWidth` to 120 and cut
+`wrappingWidth` from 200 to 120 (`state` likewise), in either look, so a
+short flowchart label sat in a 120 px-wide box where v1.13.0 fit it to the
+text. Decided: `classic` restores Mermaid 11's sizing too (`minNodeWidth`
+0, `wrappingWidth` 200 for flowchart and state); `neo` keeps Mermaid 12's. (The SVG root also lost its inline
 `background-color: white`, which shows nowhere: `.mermaid` paints its own
 white canvas.)
 
