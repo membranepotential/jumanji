@@ -9,6 +9,7 @@ use gtk::glib;
 use jumanji::core::config::{self, Config};
 use jumanji::core::source::Source;
 use jumanji::shell;
+use jumanji::shell::gtk::OpenFocus;
 
 /// A zathura-inspired markdown reader.
 #[derive(Debug, Parser)]
@@ -35,6 +36,12 @@ struct Cli {
     /// Overrides the `background` config option.
     #[arg(long, overrides_with = "background")]
     foreground: bool,
+
+    /// Open the window without taking keyboard focus: focus stays in the
+    /// window you are working in. For scripts and agents that open a document
+    /// in the background.
+    #[arg(long)]
+    no_focus: bool,
 }
 
 impl Cli {
@@ -47,6 +54,14 @@ impl Cli {
             (true, _) => true,
             (_, true) => false,
             _ => configured,
+        }
+    }
+
+    fn open_focus(&self) -> OpenFocus {
+        if self.no_focus {
+            OpenFocus::Leave
+        } else {
+            OpenFocus::Take
         }
     }
 }
@@ -215,7 +230,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let exit = shell::gtk::run(source, config, cli.forward);
+    let exit = shell::gtk::run(source, config, cli.forward, cli.open_focus());
     if exit == glib::ExitCode::SUCCESS {
         ExitCode::SUCCESS
     } else {
@@ -247,5 +262,20 @@ mod tests {
         // `--background` instead of erroring out as a conflict.
         assert!(!parse(&["--background", "a.md", "--foreground"]).should_background(true));
         assert!(parse(&["--foreground", "a.md", "--background"]).should_background(false));
+    }
+
+    #[test]
+    fn no_focus_leaves_focus_and_survives_the_background_re_exec() {
+        assert_eq!(parse(&["a.md"]).open_focus(), OpenFocus::Take);
+        assert_eq!(
+            parse(&["--no-focus", "a.md"]).open_focus(),
+            OpenFocus::Leave
+        );
+        // The re-exec passes the original argv through and appends
+        // `--foreground`; the flag must still be set in that child.
+        assert_eq!(
+            parse(&["--background", "--no-focus", "a.md", "--foreground"]).open_focus(),
+            OpenFocus::Leave
+        );
     }
 }

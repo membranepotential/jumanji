@@ -5,6 +5,7 @@
 
 use std::rc::Rc;
 
+use gdk4_x11::X11Surface;
 use gtk::gdk::{Key as GdkKey, ModifierType};
 use gtk::gio;
 use gtk::glib;
@@ -41,10 +42,27 @@ impl Toolkit for Gtk {
     type Host = GlibHost;
 }
 
+/// Whether the new window takes keyboard focus when it opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenFocus {
+    /// Present the window: the window manager activates and focuses it.
+    Take,
+    /// Leave focus where it is (`--no-focus`): map the window without an
+    /// activation request, and on X11 also ask the window manager not to
+    /// focus it on map.
+    Leave,
+}
+
 /// Launch the application for `source` with the resolved `config`. `forward` is
 /// an optional `--forward <line>` to jump to once the initial load finishes
-/// (file sources only; rejected for stdin before we get here).
-pub fn run(source: Source, config: Config, forward: Option<u32>) -> glib::ExitCode {
+/// (file sources only; rejected for stdin before we get here). `focus` decides
+/// whether the window takes focus when it opens.
+pub fn run(
+    source: Source,
+    config: Config,
+    forward: Option<u32>,
+    focus: OpenFocus,
+) -> glib::ExitCode {
     // NON_UNIQUE: every `jumanji <file>` is its own independent process, like
     // zathura. Without it, GApplication's single-instance negotiation makes a
     // second launch forward *activation* to the first process (which then
@@ -67,6 +85,7 @@ pub fn run(source: Source, config: Config, forward: Option<u32>) -> glib::ExitCo
             options.clone(),
             keymap.clone(),
             forward,
+            focus,
         );
     });
 
@@ -82,6 +101,7 @@ fn build_ui(
     options: Options,
     keymap: Keymap,
     forward: Option<u32>,
+    focus: OpenFocus,
 ) {
     let view = View::new();
     let chrome = GtkChrome::new(view.widget());
@@ -116,8 +136,38 @@ fn build_ui(
     connect_close(&controller, &window);
     serve_dbus(&controller);
 
-    window.present();
+    match focus {
+        OpenFocus::Take => window.present(),
+        OpenFocus::Leave => {
+            decline_focus_on_map(&window);
+            // Shows the window like `present()` does, minus the activation
+            // request (`_NET_ACTIVE_WINDOW` on X11) that `present()` sends after.
+            window.set_visible(true);
+        }
+    }
+    // Focus inside the window only: which widget gets the keys once the user
+    // focuses it. No request to the window manager.
     view.focus();
+}
+
+/// Ask an X11 window manager not to focus `window` when it maps it, by setting
+/// `_NET_WM_USER_TIME` to 0 (EWMH; i3 honours it in `manage.c`).
+///
+/// The property must be written after the surface exists and before the
+/// window maps, so this runs on `realize`. It also has to run after
+/// `GtkWindow`'s own realize handler, which may write a startup timestamp
+/// there; a plain `connect_realize` handler does, because the signal runs its
+/// class handler first. GDK leaves a 0 alone when it maps the window.
+///
+/// `gdk_x11_surface_set_user_time` is deprecated since GTK 4.18, but GTK4 has
+/// no other way to say this (`gtk_window_set_focus_on_map` is gone). Other
+/// backends have no such hint, so there the window only skips `present()`.
+fn decline_focus_on_map(window: &ApplicationWindow) {
+    window.connect_realize(|window| {
+        if let Some(surface) = window.surface().and_downcast::<X11Surface>() {
+            surface.set_user_time(0);
+        }
+    });
 }
 
 /// Wire the view's controller-supplied callbacks: the in-page message channel

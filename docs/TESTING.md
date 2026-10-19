@@ -103,7 +103,9 @@ The file is also gated `#![cfg(unix)]`.
 
 One test, `search_leaves_the_primary_selection_alone`, also needs `xclip`
 (`sudo pacman -S xclip`) to read the PRIMARY selection; without it that test
-alone skips. CI installs it and fails on any skip.
+alone skips. Likewise `no_focus_asks_the_window_manager_not_to_focus_the_window`
+needs `xprop` (`sudo pacman -S xorg-xprop`) to read a window property. CI
+installs both and fails on any skip.
 
 ## What it covers
 

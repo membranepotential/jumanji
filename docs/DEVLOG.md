@@ -2,7 +2,36 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-09-28 (latest) — class diagram labels no longer clipped
+## 2026-10-19 (latest) — `--no-focus` opens a window without taking focus
+
+An agent that opens a document while the user types elsewhere must not move
+the focus. A new window took it twice: i3 focuses every window it maps, and
+`window.present()` then sent `_NET_ACTIVE_WINDOW`, which i3's default
+`focus_on_window_activation smart` answers by focusing the window again (and
+warping the pointer), even after a script has moved it to another workspace.
+
+`--no-focus` closes both paths. On `realize`, after `GtkWindow`'s own realize
+handler and before the map, the shell sets `_NET_WM_USER_TIME` to 0 through
+`gdk4_x11::X11Surface::set_user_time`; i3 (`manage.c`) does not focus a
+window that maps with that value, and GDK's map path leaves a 0 alone. The
+window is then shown with `set_visible(true)` instead of `present()`, which
+is the same show minus the activation request. On a non-X11 backend only the
+second half applies. The flag is shell-only (`shell::gtk::OpenFocus`); the
+controller never decides about focus. It survives the `--background`
+re-exec because that passes argv through verbatim.
+
+Decided: use `gdk_x11_surface_set_user_time` although GTK deprecated it in
+4.18. GTK4 dropped `gtk_window_set_focus_on_map`, so it is the only GTK way
+to send the hint; the alternative is writing the property through Xlib
+ourselves. New dependency: `gdk4-x11` 0.11.5 (the gtk4 0.11 line, released
+2026-09-20).
+
+The e2e test cannot watch focus: a bare Xvfb has no window manager. It
+asserts the hint instead (`xprop` reads `_NET_WM_USER_TIME = 0`); CI now
+installs `xorg-xprop`. The e2e harness's `launch_in_forward` became
+`launch_with`, which takes arbitrary extra arguments.
+
+## 2026-09-28 — class diagram labels no longer clipped
 
 Every Mermaid `classDiagram` lost the last one to three characters of each
 title, stereotype and member. merman sizes each HTML label's `foreignObject`

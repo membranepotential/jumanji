@@ -360,6 +360,22 @@ its output goes nowhere — so startup diagnostics (a missing file, a broken
 config, a `--forward` handoff) are all reported *before* it detaches. Reading
 from a pipe never detaches: the shell is still feeding that stdin.
 
+### Opening without focus
+
+`--no-focus` opens the window without taking keyboard focus, so you keep typing
+where you were. It is meant for scripts and agents that open a document while
+you work in another window:
+
+```sh
+jumanji --background --no-focus report.md
+```
+
+On X11 jumanji asks the window manager not to focus the window when it maps it
+(`_NET_WM_USER_TIME` = 0, which i3 honours) and sends no activation request
+afterwards, so i3's `focus_on_window_activation` never fires either. On other
+backends only the activation request is skipped. The flag applies to a new
+window; a `--forward` handoff to a running instance never changes focus anyway.
+
 ## Installation
 
 Requires GTK4 and webkitgtk-6.0 (Arch: `pacman -S gtk4 webkitgtk-6.0`).

@@ -308,23 +308,23 @@ impl Harness {
         let id = next_display();
         let config_home = std::env::temp_dir().join(format!("jumanji-e2e-xdg-{id}"));
         let data_home = std::env::temp_dir().join(format!("jumanji-e2e-data-{id}"));
-        Self::launch_in_forward(file, config_home, data_home, None, cwd)
+        Self::launch_with(file, config_home, data_home, &[], cwd)
     }
 
     /// Launch on `file` with explicit private `config_home`/`data_home` dirs. The
     /// data home holds `history.toml`, so a relaunch on the same data home
     /// exercises window-state persistence.
     fn launch_in(file: PathBuf, config_home: PathBuf, data_home: PathBuf) -> Self {
-        Self::launch_in_forward(file, config_home, data_home, None, None)
+        Self::launch_with(file, config_home, data_home, &[], None)
     }
 
-    /// As [`launch_in`](Self::launch_in), but optionally passing `--forward
-    /// <line>` (DESIGN D7 forward sync on a fresh launch).
-    fn launch_in_forward(
+    /// As [`launch_in`](Self::launch_in), but passing extra command-line
+    /// `args` after the file.
+    fn launch_with(
         file: PathBuf,
         config_home: PathBuf,
         data_home: PathBuf,
-        forward: Option<u32>,
+        args: &[&str],
         cwd: Option<PathBuf>,
     ) -> Self {
         let display = next_display();
@@ -351,10 +351,7 @@ impl Harness {
         let _ = fs::create_dir_all(&data_home);
 
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_jumanji"));
-        cmd.arg(&file);
-        if let Some(line) = forward {
-            cmd.args(["--forward", &line.to_string()]);
-        }
+        cmd.arg(&file).args(args);
         // The vault index is rooted at the child's working directory (D11).
         if let Some(cwd) = &cwd {
             cmd.current_dir(cwd);
@@ -407,7 +404,7 @@ impl Harness {
 
     /// Launch `jumanji -` with a piped stdin, returning the harness and the
     /// child's stdin handle so the test can stream markdown in (and drop it to
-    /// signal EOF). Mirrors [`launch_in_forward`](Self::launch_in_forward) but
+    /// signal EOF). Mirrors [`launch_with`](Self::launch_with) but
     /// passes `-` and pipes stdin instead of a file argument. Blocks until the
     /// initial load finishes (an empty stream still renders and reports loaded).
     fn launch_stdin() -> (Self, std::process::ChildStdin) {
@@ -3089,7 +3086,8 @@ fn forward_flag_jumps_after_load_on_fresh_launch() {
     let config_home = std::env::temp_dir().join(format!("jumanji-e2e-fwd-cfg-{id}"));
     let data_home = std::env::temp_dir().join(format!("jumanji-e2e-fwd-data-{id}"));
 
-    let h = Harness::launch_in_forward(demo, config_home, data_home, Some(FORWARD_LINE), None);
+    let line = FORWARD_LINE.to_string();
+    let h = Harness::launch_with(demo, config_home, data_home, &["--forward", &line], None);
     let s = h.wait_for_state("fresh --forward jumps after load", SETTLE, |s| {
         s.scroll_y > 0.0
     });
@@ -3097,6 +3095,36 @@ fn forward_flag_jumps_after_load_on_fresh_launch() {
         s.scroll_y > 100.0,
         "a fresh --forward launch should land deep in the document, got {}",
         s.scroll_y
+    );
+}
+
+#[test]
+fn no_focus_asks_the_window_manager_not_to_focus_the_window() {
+    // A bare Xvfb has no window manager, so nothing here focuses or activates
+    // windows and focus itself cannot be observed. What can be observed is the
+    // hint a window manager reads when it maps the window: `_NET_WM_USER_TIME`
+    // = 0 means "do not focus on map" (EWMH; i3 honours it).
+    let Some(_g) = setup_guard() else { return };
+    if which("xprop").is_none() {
+        eprintln!("e2e: skipping no-focus check — need xprop (Arch: pacman -S xorg-xprop)");
+        return;
+    }
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let demo = Path::new(manifest).join("demo").join("demo.md");
+    let id = std::process::id();
+    let config_home = std::env::temp_dir().join(format!("jumanji-e2e-nofocus-cfg-{id}"));
+    let data_home = std::env::temp_dir().join(format!("jumanji-e2e-nofocus-data-{id}"));
+
+    let h = Harness::launch_with(demo, config_home, data_home, &["--no-focus"], None);
+    let out = Command::new("xprop")
+        .args(["-display", &format!(":{}", h.display)])
+        .args(["-id", &h.window_id, "_NET_WM_USER_TIME"])
+        .output()
+        .expect("run xprop");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "_NET_WM_USER_TIME(CARDINAL) = 0",
+        "--no-focus should set _NET_WM_USER_TIME to 0 before the window maps"
     );
 }
 

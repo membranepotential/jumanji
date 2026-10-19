@@ -13,4 +13,4 @@ mod host;
 mod toc;
 mod view;
 
-pub use app::run;
+pub use app::{OpenFocus, run};
