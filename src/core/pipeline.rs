@@ -7,6 +7,7 @@
 //! assemble a complete, offline, CSP-locked page with embedded CSS and inline
 //! SVG. The ordering rationale lives on [`render`] itself.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -20,8 +21,8 @@ use super::highlight::escape_html;
 use super::obsidian;
 use super::vault::{self, Vault};
 use super::{
-    Heading, RenderedDocument, callout, diagram, fence, frontmatter, highlight, math, textscan,
-    toc, wikilink,
+    Heading, RenderedDocument, callout, diagram, fence, frontmatter, highlight, math, sitelink,
+    textscan, toc, wikilink,
 };
 
 /// The stylesheet is embedded at compile time; nothing is fetched at runtime.
@@ -33,6 +34,16 @@ pub(crate) const BASE_CSS: &str = include_str!("assets/style.css");
 /// data:` is harmless when a document has no math (nothing references a font).
 const CSP: &str =
     "default-src 'none'; img-src file: data:; style-src 'unsafe-inline'; font-src data:";
+
+/// The same lock for a published page (DESIGN D15): images, media and fonts
+/// come from the site itself (`'self'`) in place of `file:`, so a page loads
+/// its figures and the bundled fonts and nothing from anywhere else. Still no
+/// scripts.
+const SITE_CSP: &str = "default-src 'none'; img-src 'self' data:; media-src 'self' data:; \
+                        style-src 'unsafe-inline'; font-src 'self' data:";
+
+/// What `prefers-color-scheme` media query applies the dark theme on a site.
+const PREFERS_DARK: &str = "(prefers-color-scheme: dark)";
 
 /// The opening `<html>` tag as [`assemble`] emits it, up to and including the
 /// quote that opens its class list. The attribute is always present (possibly
@@ -135,6 +146,37 @@ pub enum LinkStyle {
 }
 
 impl LinkStyle {
+    fn csp(&self) -> &'static str {
+        match self {
+            Self::File => CSP,
+            Self::Site { .. } => SITE_CSP,
+        }
+    }
+
+    /// The light and dark colour blocks for the page head. The reader scopes
+    /// them to the `dark` class its shell toggles; a site has no script to
+    /// toggle anything, so it follows the viewer's system setting instead,
+    /// with the very same rules: the dark colour table is read out of
+    /// `style.css` ([`dark_vars`]), not restated.
+    fn theme_css(&self) -> (Cow<'static, str>, Cow<'static, str>) {
+        match self {
+            Self::File => (highlight::light_css().into(), highlight::dark_css().into()),
+            Self::Site { .. } => (
+                format!(
+                    "@media not all and {PREFERS_DARK} {{\n{}}}\n",
+                    highlight::light_css()
+                )
+                .into(),
+                format!(
+                    "@media {PREFERS_DARK} {{\n:root {{{}}}\nhtml {{\n{}\n}}\n}}\n",
+                    dark_vars(),
+                    highlight::dark_theme_css()
+                )
+                .into(),
+            ),
+        }
+    }
+
     /// The href for `target`, written in the document `from`. Both are
     /// absolute paths.
     pub fn href(&self, target: &Path, from: &Path) -> String {
@@ -147,6 +189,16 @@ impl LinkStyle {
             }
         }
     }
+}
+
+/// The body of `style.css`'s `html.dark { … }` block: the dark colour table.
+/// Empty only if the stylesheet lost the block, which a test rules out.
+fn dark_vars() -> &'static str {
+    const OPEN: &str = "\nhtml.dark {";
+    BASE_CSS
+        .split_once(OPEN)
+        .and_then(|(_, rest)| rest.split_once("\n}"))
+        .map_or("", |(vars, _)| vars)
 }
 
 /// Where a vault file lands in a published site: a note's extension becomes
@@ -281,6 +333,9 @@ pub fn render(md: &str, opts: &Options, vault: &Vault) -> RenderedDocument {
     //   same text.
     // - Block ids after wikilinks, so an `^id` inside a link label is not
     //   mistaken for a trailing block id.
+    // - A site's markdown-link pass (D15) touches only `Link` / `Image` nodes,
+    //   which no other pass makes or reads, so its place is free; it sits with
+    //   the other link passes.
     // - Tables are wrapped last; none of these add or reorder headings, so the
     //   TOC's anchors still match the emitted ids.
     textscan::strip_comments(&arena, root);
@@ -291,6 +346,9 @@ pub fn render(md: &str, opts: &Options, vault: &Vault) -> RenderedDocument {
     let has_math = math::transform_math(root);
     textscan::transform_embeds(&arena, root, vault, &opts.links);
     wikilink::transform_wikilinks(&arena, root, vault, &opts.links);
+    if let LinkStyle::Site { root: site } = &opts.links {
+        sitelink::transform_links(&arena, root, vault, site);
+    }
     textscan::extract_block_ids(&arena, root);
     mark_task_symbols(&arena, root);
     wrap_tables(&arena, root);
@@ -553,6 +611,7 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options, has_math: bool) -> Stri
     // User themes come last so their rules win the cascade over the built-in
     // and generated styles. Each source keeps its own `<style>` block, so one
     // malformed theme cannot break the parsing of another.
+    let (light, dark) = opts.links.theme_css();
     let user_css: String = opts
         .extra_css
         .iter()
@@ -583,12 +642,12 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options, has_math: bool) -> Stri
         html_open = HTML_OPEN,
         class_open = HTML_CLASS_OPEN,
         classes = html_classes(opts),
-        csp = CSP,
+        csp = opts.links.csp(),
         title = title,
         base = BASE_CSS,
         root_vars = root_vars_css(opts),
-        light = highlight::light_css(),
-        dark = highlight::dark_css(),
+        light = light,
+        dark = dark,
         math_css = math_css,
         user_css = user_css,
         body = body,
@@ -655,6 +714,46 @@ mod tests {
         );
         assert_eq!(page_path(Path::new("Notes.MD")), Path::new("Notes.html"));
         assert_eq!(page_path(Path::new("fig.svg")), Path::new("fig.svg"));
+    }
+
+    fn site() -> Options {
+        Options {
+            links: LinkStyle::Site {
+                root: PathBuf::from("/jumanji-pipeline-tests-have-no-vault"),
+            },
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn the_csp_allows_the_sites_own_files_in_place_of_file_urls() {
+        let reader = render_str("# x\n");
+        assert!(reader.contains("img-src file: data:"), "{reader}");
+        let site = render("# x\n", &site(), &test_vault()).html;
+        assert!(site.contains(&format!("content=\"{SITE_CSP}\"")), "{site}");
+        assert!(SITE_CSP.contains("img-src 'self' data:"));
+        assert!(SITE_CSP.contains("font-src 'self' data:"));
+        assert!(SITE_CSP.starts_with("default-src 'none';"));
+        assert!(!SITE_CSP.contains("script") && !SITE_CSP.contains("file:"));
+    }
+
+    #[test]
+    fn a_site_follows_the_system_colour_scheme_with_the_readers_dark_colours() {
+        // The dark table is read from the stylesheet, so it cannot drift.
+        assert!(dark_vars().contains("--bg: #1a1a1a;"), "{}", dark_vars());
+        assert!(dark_vars().contains("--alert-caution:"), "{}", dark_vars());
+
+        let html = render("# x\n", &site(), &test_vault()).html;
+        let dark = format!("@media {PREFERS_DARK} {{\n:root {{{}}}", dark_vars());
+        assert!(html.contains(&dark), "{html}");
+        assert!(html.contains(highlight::dark_theme_css()));
+        assert!(html.contains(&format!(
+            "@media not all and {PREFERS_DARK} {{\nhtml:not(.dark)"
+        )));
+        // The reader keeps its class-scoped blocks and no media query.
+        let reader = render_str("# x\n");
+        assert!(!reader.contains("prefers-color-scheme"));
+        assert!(reader.contains(highlight::dark_css()));
     }
 
     #[test]

@@ -94,7 +94,14 @@ pub fn light_css() -> &'static str {
 /// so it only applies when the shell has toggled dark mode.
 pub fn dark_css() -> &'static str {
     static CSS: OnceLock<String> = OnceLock::new();
-    CSS.get_or_init(|| format!("html.dark {{\n{}\n}}\n", theme_css(DARK_THEME)))
+    CSS.get_or_init(|| format!("html.dark {{\n{}\n}}\n", dark_theme_css()))
+}
+
+/// The dark syntax theme's rules, unscoped: a published site applies them
+/// under a `prefers-color-scheme` media query instead of the `dark` class.
+pub fn dark_theme_css() -> &'static str {
+    static CSS: OnceLock<String> = OnceLock::new();
+    CSS.get_or_init(|| theme_css(DARK_THEME))
 }
 
 fn theme_css(name: EmbeddedThemeName) -> String {

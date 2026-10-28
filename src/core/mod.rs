@@ -22,6 +22,7 @@ mod diagram;
 mod fence;
 mod highlight;
 mod math;
+mod sitelink;
 mod textscan;
 mod wikilink;
 

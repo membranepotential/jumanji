@@ -294,6 +294,17 @@ impl VaultIndex {
         self.files
     }
 
+    /// The indexed file at vault-relative path `rel`, matched as a path is
+    /// (case-insensitive, like every lookup here) and never by note name: a
+    /// markdown link names a file, so `a` does not find `a.md`.
+    pub fn file(&self, rel: &Path) -> Option<&Path> {
+        let name = |path: &Path| path.file_name().map(|n| key(&n.to_string_lossy()));
+        self.by_path
+            .get(&key(&rel.to_string_lossy()))
+            .filter(|path| name(path) == name(rel))
+            .map(PathBuf::as_path)
+    }
+
     /// Resolve `r` against the index; `source` breaks a filename tie. Lookup
     /// order is exact vault-relative path, then bare filename, then alias.
     pub fn resolve(&self, r: &WikiRef, source: &Path) -> Target {

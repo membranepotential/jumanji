@@ -143,7 +143,7 @@ fn markdown_target(url: &str, dir: &Path) -> Option<PathBuf> {
 /// Whether `url` starts with a URI scheme (`https:`, `mailto:`). A single
 /// letter before the colon is not one — that is a Windows drive, never a
 /// scheme anyone links with.
-fn has_scheme(url: &str) -> bool {
+pub(crate) fn has_scheme(url: &str) -> bool {
     url.split_once(':').is_some_and(|(scheme, _)| {
         scheme.len() > 1
             && scheme
@@ -156,7 +156,7 @@ fn has_scheme(url: &str) -> bool {
 /// filesystem: `/v/docs/../b.md` is `/v/b.md` even when `docs` is a symlink.
 /// That is how the page resolves a relative link, so it is the spelling the
 /// reader opens.
-fn lexical(path: &Path) -> PathBuf {
+pub(crate) fn lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {
