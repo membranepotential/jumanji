@@ -9,7 +9,7 @@ content pipeline, modal vim/zathura keys, Obsidian dialect. Linux-first.
 
 ## Now
 
-Shipped through **v1.14.0** (merman 0.9.1, `diagram-look`, worktree vaults).
+Shipped through **v1.15.0** (`jumanji publish`, `font-ui`).
 
 - **macOS port (issue #1)** — [05-macos-port.md](docs/research/05-macos-port.md);
   tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
@@ -21,7 +21,7 @@ Shipped through **v1.14.0** (merman 0.9.1, `diagram-look`, worktree vaults).
 
 ## Done (recent)
 
-- **publishing (2026-10-28, 4119c73..6953998)** — `jumanji publish DIR --name N`
+- **v1.15.0 / publishing (2026-10-28, 4119c73..6953998)** — `jumanji publish DIR --name N`
   builds + deploys via wrangler, password Worker ([D15](docs/publish/README.md));
   reviewed twice; thesis wiki live on workers.dev.
 - **v1.14.0 (2026-10-20)** — merman 0.9.1 without ELK; `diagram-look` classic
