@@ -2,6 +2,7 @@
 name = "jumanji"
 version = "1.14.0"
 edition = "2024"
+default-run = "jumanji"
 
 [dependencies]
 anyhow = "1.0.103"

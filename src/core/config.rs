@@ -727,6 +727,28 @@ impl Config {
     }
 }
 
+/// The user's CSS themes, `<config_dir>/jumanji/themes/*.css`, in filename
+/// order, for `pipeline::Options::extra_css`. A missing directory or an
+/// unreadable file contributes nothing.
+pub fn load_themes(config_dir: Option<&Path>) -> Vec<String> {
+    let Some(dir) = config_dir.map(|d| d.join("jumanji").join("themes")) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("css")))
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    files.sort();
+    files
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect()
+}
+
 /// The XDG config base directory (`$XDG_CONFIG_HOME` or `$HOME/.config`).
 pub fn xdg_config_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_CONFIG_HOME")

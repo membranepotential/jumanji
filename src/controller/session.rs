@@ -884,7 +884,7 @@ impl<T: Toolkit + 'static> Controller<T> {
         // being built belongs to the document being left.
         s.close_graph();
         // User CSS themes are reloaded on every render so edits hot-swap in.
-        s.render_opts.extra_css = load_themes(&s.config_dir);
+        s.render_opts.extra_css = config::load_themes(s.config_dir.as_deref());
         let path = s.file.clone();
         // Content comes from the stdin buffer for a stream, else from the file. A
         // chunk boundary may split a multibyte char; `from_utf8_lossy` renders it as
@@ -2923,31 +2923,6 @@ fn load_history(dir: &Option<PathBuf>) -> History {
 fn write_history(dir: &Path, history: &History) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join("history.toml"), history.to_toml())
-}
-
-/// Load `<config>/jumanji/themes/*.css`, sorted by filename. Missing dir → empty.
-fn load_themes(config_dir: &Option<PathBuf>) -> Vec<String> {
-    let Some(cd) = config_dir else {
-        return Vec::new();
-    };
-    let dir = cd.join("jumanji").join("themes");
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension()
-                    .map(|e| e.eq_ignore_ascii_case("css"))
-                    .unwrap_or(false)
-            })
-            .collect(),
-        Err(_) => return Vec::new(),
-    };
-    files.sort();
-    files
-        .iter()
-        .filter_map(|p| std::fs::read_to_string(p).ok())
-        .collect()
 }
 
 /// Expand a whole-token environment reference (`$EDITOR` → its value); any other
