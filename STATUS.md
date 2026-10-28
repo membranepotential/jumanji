@@ -15,13 +15,14 @@ Shipped through **v1.14.0** (merman 0.9.1, `diagram-look`, worktree vaults).
   tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
 - **perf guard** — `.github/workflows/{ci,bench}.yml` + `scripts/bench-compare.sh`;
   e2e green in CI, trail is a workflow-artifact chain. Next: confirm the trail.
-- **diagram text measurer** — merman's only measurer uses fixed per-character
-  widths, 10–30 % short of real fonts (DEVLOG 2026-09-28). Decided: bundle an
-  open font + its width table, a `TextMeasurer` over it, diagram CSS on it.
-  State: not started.
+- **diagram text measurer** — merman measures fixed per-char widths, 10–30 %
+  short (DEVLOG 2026-09-28). Decided: bundled font + width table + a
+  `TextMeasurer`. State: not started.
 
 ## Done (recent)
 
+- **publishing (2026-10-28, 4119c73..1fe538b)** — `jumanji-publish` + password
+  Worker ([D15](docs/publish/README.md)); thesis wiki live on workers.dev.
 - **v1.14.0 (2026-10-20)** — merman 0.9.1 without ELK; `diagram-look` classic
   (default, Mermaid 11 colours + sizing) | neo; a `.git` file roots a vault.
   Bench vs v1.13.0: mermaid +6 %, demo +7 % (merman 0.9; accepted).
@@ -34,9 +35,6 @@ Shipped through **v1.14.0** (merman 0.9.1, `diagram-look`, worktree vaults).
   `resources/theme.example.css` (the built-in colours).
 - **v1.10.0 (2026-09-19)** — the document graph; after it: zoom clamp, peek
   drawn as scene nodes, arrow keys + Tab, view line, mermaid docs test.
-- **pre-release review fixes (2026-09-19, 31f895f, 327269f)** — Astra review
-  of v1.9.1..HEAD: reading anchor holds a screen point (bursts, resize, wide
-  blocks, jumps); graph counts, races, edges, symlinks, Esc layering.
 - **document graph v2 (2026-09-19, e4aa0b2)** — [interaction model](docs/graph/interaction.md):
   one node, one handle, `Space` folds, peek, route-first framing;
   [docs/graph/](docs/graph/README.md) with screenshots + demo tree.
