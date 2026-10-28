@@ -268,6 +268,34 @@ A ```` ```dot ```` fence then renders as a diagram. Details:
 - A configured `mermaid` renderer **overrides** the built-in one.
 - Live reload re-runs the whole pipeline, so edits re-render for free.
 
+## Publishing a vault as a website
+
+`jumanji-publish` turns a folder of notes into a static website that looks
+like the reader: the same rendering, colours, code highlighting, callouts,
+math and diagrams, the configured fonts bundled, light or dark after the
+viewer's system setting, and no JavaScript in the pages.
+
+```sh
+cargo build --release --bin jumanji-publish
+target/release/jumanji-publish ~/notes/wiki -o ~/notes/wiki-site
+```
+
+- The folder's `index.md` (else `README.md`) is the home page. Every note it
+  reaches by links, transitively, is published, and every file those notes
+  link or embed. Nothing else is: a note nothing links to stays private.
+- Each note becomes its path with `.html`; all links are relative, so the
+  site works from any URL prefix or from the folder itself.
+- A link the site cannot serve (outside the folder, missing, `file://`)
+  renders dead, and the publisher prints it with its file and line.
+- Each page gets a contents sidebar (on wide windows), a breadcrumb, and the
+  notes that link to it.
+
+`scripts/publish-site.sh VAULT_DIR` builds the site and deploys it to
+Cloudflare Workers behind a shared password, with no indexing by crawlers.
+The one-time setup and the reasoning are in
+[docs/publish/](docs/publish/README.md)
+([D15](docs/publish/README.md#d15-publishing--a-static-site-from-the-core-pipeline-served-behind-a-password-2026-10-28)).
+
 ## Configuration
 
 `~/.config/jumanji/config.toml`:

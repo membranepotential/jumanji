@@ -91,6 +91,10 @@ Moved to [architecture/README.md](architecture/README.md#d13-performance-regress
 
 Moved to [graph/design.md](graph/design.md#d14-the-document-graph--a-route-spine-with-its-links-fanned-out-2026-09-18).
 
+### D15: Publishing — a static site from the core pipeline, served behind a password (2026-10-28)
+
+Lives in [publish/README.md](publish/README.md#d15-publishing--a-static-site-from-the-core-pipeline-served-behind-a-password-2026-10-28).
+
 ## Non-goals
 
 Moved to [architecture/README.md](architecture/README.md#non-goals).

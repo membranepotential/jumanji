@@ -1,0 +1,15 @@
+// The password-protected site (docs/publish/README.md, D15). Deploy with
+// scripts/publish-site.sh, which builds the site into ../../target/site first.
+{
+  "name": "jumanji-site",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-20",
+  // The *.workers.dev hostname; preview URLs follow it (wrangler >= 4.44).
+  "workers_dev": true,
+  "assets": {
+    "directory": "../../target/site",
+    "binding": "ASSETS",
+    // Every request meets the password check before any file is served.
+    "run_worker_first": true
+  }
+}

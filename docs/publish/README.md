@@ -9,7 +9,10 @@ password to can read it, and no crawler can index it.
 First site: the thesis wiki, `~/Documents/Sandeep/thesis/wiki` (about 20
 notes; relative markdown links, SVG figures, heavy math, some mermaid).
 
-Status: **planned** (2026-10-28). Nothing below is built yet.
+Status: **implemented** (2026-10-28): `jumanji-publish`, the password
+Worker and the deploy script. Not yet deployed; the owner runs the one-time
+setup below. Details that the build settled are in
+[As built](#as-built-2026-10-28).
 
 Decisions on this page:
 
@@ -103,7 +106,9 @@ can be published, and nothing above it.
   never leaves the machine.
 - **Dead links:** a link to anything not published (outside `DIR`, missing,
   or a `file://` URL) renders like an unresolved wikilink: a dead link with
-  no `href`. Its URL never appears in a page. The publisher prints every dead
+  no `href`. A markdown link's URL never appears in a page; a dead image
+  becomes an inert link-card naming its alt text. (An unresolved `[[…]]`
+  keeps the reader's markup, which repeats the written name in `title`.) The publisher prints every dead
   link with its source note and line, so a link that should work is noticed
   before deploying. Example: the thesis wiki's `index.md` links to
   `../papers/Matthaiou 2024 … .pdf`, which lies outside `wiki/` and will be
@@ -123,7 +128,9 @@ also from a local folder opened in a browser. Heading and block anchors are the
 ids the pipeline already emits.
 
 `index.html` at the root is the entry note. A topic folder's `index.md`
-becomes that folder's `index.html`, so `/cdr/` works as a URL as well.
+becomes that folder's `index.html`, so `/cdr/` works as a URL as well. A
+`README.md` entry note is published as `README.html` (where links point) and
+copied to `index.html`.
 
 ### Changes to core
 
@@ -135,24 +142,33 @@ images are left as written, and `CSP` allows only `file:` images.
    `File` (today's behaviour, the default) | `Site { root: PathBuf }`. One
    function, `LinkStyle::href(&self, target: &Path, from: &Path) -> String`,
    replaces the two direct `obsidian::file_uri` calls. `Site` returns a
-   relative URL computed from `from` (the vault binds the source document
-   already).
+   relative URL computed from `from` (`Vault::source()`, the document the
+   vault is bound to). `pipeline::page_path` maps a note to its `.html`.
 2. **Publish set.** A link to a file that is not published must come out
    dead. Rendering runs against a `VaultIndex` built only from the published
    notes and assets (`VaultIndex::build` already takes injected entries).
    Resolution then fails for everything else, and the existing unresolved
    path handles it, with no new branch.
-3. **A markdown-link pass in site mode.** It rewrites a relative `[x](a.md#h)`
-   to `a.html#h`, and a relative image or link to an asset to its site URL. A
-   target outside the vault, or one that was not published, becomes dead.
-   `file://` links become dead as well.
+3. **A markdown-link pass in site mode** (`core::sitelink`). It rewrites a
+   relative `[x](a.md#h)` to `a.html#h`, and a relative image or link to an
+   asset to its site URL. A target outside the vault, or one that was not
+   published, becomes dead. `file://` links become dead as well. Published
+   means "in the render-time index": `VaultIndex::file` looks a vault-relative
+   path up, case-insensitively, and only as a file name (`a` does not find
+   `a.md`). `sitelink::classify` reads a URL for both this pass and the
+   walk, so the page and the dead-link report agree.
 4. **The CSP depends on the link style.** In site mode, `img-src`, `media-src`
-   and `object-src` (for PDF links, if needed) allow `'self' data:` in place
-   of `file:`. `default-src 'none'` and the ban on scripts stay.
+   and `font-src` allow `'self' data:` in place of `file:` (the bundled fonts
+   are `'self'`). `object-src` is not needed: PDFs are linked, not embedded.
+   `default-src 'none'` and the ban on scripts stay.
 5. **Dark mode without a script.** The reader toggles `html.dark` from the
    shell. In site mode, the dark colours are also emitted under
    `@media (prefers-color-scheme: dark)`, so the site follows the system
-   setting.
+   setting. Nothing is restated: the colour table is read out of
+   `style.css`'s `html.dark` block, the dark syntax theme is emitted unscoped
+   inside the query, and the light syntax theme sits under
+   `@media not all and (prefers-color-scheme: dark)`. The configured
+   `default-recolor` does not apply to a site.
 
 Everything here is pure and unit-tested in core, as D2a requires.
 
@@ -160,12 +176,14 @@ Everything here is pure and unit-tested in core, as D2a requires.
 
 `core::site`, new and pure:
 
-- `plan(entry, index, read) -> SitePlan`. It walks the links from the entry
-  note and decides the published notes, the output path of each, the
-  referenced assets, the backlinks and the dead links. It reads notes only
-  through the injected `read` function, as `graph::build` does, so the walk is
-  unit-tested without files. Backlinks follow the same link rules as the
-  document graph (D14).
+- `plan(root, entries, read) -> Result<SitePlan, PlanError>`. It finds the
+  entry note among the scanned `entries`, walks the links from it, and
+  decides the published notes (with titles and backlinks), the referenced
+  assets, the dead links (with source line) and the render-time
+  `VaultIndex`. It reads notes only through the injected `read` function, as
+  `graph::build` does, so the walk is unit-tested without files. Links come
+  from `graph::references`, the AST walk `graph::scan` itself is now built
+  on, so backlinks follow the document graph's link rules (D14).
 - Navigation HTML around each page: a TOC sidebar from
   `RenderedDocument::toc`, a backlinks list at the end, the note's folder path
   as a breadcrumb, and a link to the index.
@@ -176,14 +194,19 @@ Everything here is pure and unit-tested in core, as D2a requires.
 jumanji-publish ~/Documents/Sandeep/thesis/wiki -o ~/Documents/Sandeep/thesis/wiki-site
 ```
 
-1. Load the reader's `config.toml` (`Config::load`). The site then uses the
-   same theme, fonts, `diagram-look` and fence renderers as the reader.
+1. Load the reader's `config.toml` (`Config::load`) and themes
+   (`config::load_themes`). The site then uses the same theme, fonts,
+   `diagram-look` and fence renderers as the reader. Render options come from
+   the config through `From<&config::Options>`, the same path the reader's
+   session takes.
 2. Scan the vault, build the `SitePlan`, render the pages in parallel (rayon,
    already a dependency) and copy the assets.
 3. Print the dead links and a summary (notes, assets, bytes).
 4. Write into a temporary sibling directory, then swap it with the output
-   directory. The publisher refuses to replace a directory that lacks its
-   marker file `.jumanji-site`, so a typo in `-o` cannot delete a real folder.
+   directory. The publisher refuses to replace a non-empty directory that
+   lacks its marker file `.jumanji-site`, so a typo in `-o` cannot delete a
+   real folder. It also refuses an output inside the vault or containing it.
+   It writes an `.assetsignore` so wrangler does not upload the marker.
 
 The publisher performs no network I/O. Deploying is a separate step, which
 keeps the "no network access anywhere" rule intact.
@@ -197,18 +220,24 @@ CI.
 
 `deploy/cloudflare/` in this repo holds the password script (`worker.js`) and
 a `wrangler.jsonc`: `main` points at the script, and the `assets` block names
-the output directory, the `ASSETS` binding and `run_worker_first: true`.
-Wrangler runs through `pnpm dlx wrangler@<pinned version>`. The pinned version
-must be at least 7 days old (the dependency seasoning rule), and at least
-4.44.0 so preview URLs follow the `workers.dev` setting.
+the output directory (`target/site` in this repo), the `ASSETS` binding and
+`run_worker_first: true`. The Worker is named `jumanji-site`; a second site
+passes its own name to the deploy script. Wrangler runs through
+`pnpm dlx wrangler@4.151.3`. The pinned version must be at least 7 days old
+(the dependency seasoning rule), and at least 4.44.0 so preview URLs follow
+the `workers.dev` setting. 4.151.3 was published on 2026-10-20 (checked with
+`pnpm view wrangler time --json`); bump it in `scripts/publish-site.sh` and
+in the steps below together.
 
 Preview URLs serve the same Worker, so the password covers them too.
 
 One-time steps for the owner:
 
-1. Run `pnpm dlx wrangler login`. A browser opens; log in to Cloudflare.
-2. Run `pnpm dlx wrangler secret put SITE_PASSWORD` in `deploy/cloudflare/`.
-   It asks for the password without echoing it.
+1. Run `pnpm dlx wrangler@4.151.3 login`. A browser opens; log in to
+   Cloudflare.
+2. In `deploy/cloudflare/`, run `pnpm dlx wrangler@4.151.3 secret put
+   SITE_PASSWORD`. It asks for the password without echoing it. If the Worker
+   does not exist yet, wrangler offers to create it; accept.
 3. Run `scripts/publish-site.sh ~/Documents/Sandeep/thesis/wiki`. It runs
    `jumanji-publish` and then `wrangler deploy`. The output prints the
    `https://<name>.<account>.workers.dev` URL.
@@ -231,6 +260,47 @@ After that, publishing again is step 3 alone.
   (deferred there too).
 - **Incremental builds.** Every publish renders the whole vault. D13's
   benchmarks will show whether that is slow.
+
+## As built (2026-10-28)
+
+What the build settled that the plan above left open:
+
+- **Fonts.** A viewer's browser does not have the configured `font-body` /
+  `font-mono`, so the site bundles them. The publisher asks fontconfig
+  (`fc-match`) for each face the stylesheet uses (`site::FACES`: regular,
+  italic, bold, bold italic; `strong` is weight 680, which matches the bold
+  face), accepts only an answer from the same family, slant and weight,
+  copies the file to `fonts/` and converts it to WOFF2 when
+  `woff2_compress` is installed (else the original file is kept). Each page
+  declares them with `@font-face`. A family fontconfig does not know is
+  skipped with a warning, and the page falls back to the stylesheet's stack.
+  Headings and other chrome use `system-ui`, as in the reader; that face is
+  the viewer's own and is not bundled.
+- **Navigation** (`site::page`, `site::site_css`, `core/assets/site.css`),
+  spliced around the pipeline's output at `pipeline::MAIN_OPEN` /
+  `MAIN_CLOSE`:
+  - TOC sidebar: the page's headings, fixed in the left margin, shown only
+    when the window is the column plus two sidebar widths (240 px each).
+    From there on, wide blocks use the sidebar width as their gutter, so they
+    never run under it. Below that width it is hidden. A page with fewer than
+    two headings has none.
+  - Breadcrumb: the entry note's title, then each folder above the note,
+    linked by the title of the folder's own published `index.md` where there
+    is one. The entry page has none.
+  - Backlinks: "Linked from" at the end of the column; not on the entry page,
+    which nearly every note links back to.
+- **An image of a note** (`![x](a.md)`) counts as a link to the note.
+- **Page weight.** Each page is self-contained, as in the reader, so a page
+  with math carries the math stylesheet and its base64 fonts (about 0.7 MB).
+  The thesis wiki publishes to about 22 MB: 15 MB of pages, 4.5 MB of
+  fonts (the Nerd Font code faces are 1.1 MB each, fetched only by pages
+  with code), and the figures.
+- **The Worker** compares SHA-256 digests of the given and the stored
+  password with `crypto.subtle.timingSafeEqual` (equal lengths whatever was
+  typed), fails closed when `SITE_PASSWORD` is unset, and marks every served
+  file `Cache-Control: private` (static assets come marked `public`, which a
+  shared cache may keep). `deploy/cloudflare/worker.test.mjs` tests it under
+  plain node: `node --test deploy/cloudflare/`.
 
 ## Implementation plan
 

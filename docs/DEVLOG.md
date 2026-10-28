@@ -2,7 +2,37 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-10-20 (latest) — a git worktree is its own vault
+## 2026-10-28 (latest) — `jumanji-publish`: a vault as a password-protected website
+
+Built D15 ([publish/](publish/README.md)) in six steps. `LinkStyle` in
+`pipeline::Options` spells resolved links as `file://` URIs (the reader,
+unchanged byte for byte: every demo note rendered before and after) or as
+relative site URLs. In site mode a new pass (`core::sitelink`) rewrites
+markdown links and images to the published files or makes them dead, the
+CSP allows `'self'` instead of `file:`, and the dark theme follows
+`prefers-color-scheme`, read from the same `html.dark` block the reader
+toggles. `core::site::plan` walks the links from `index.md` (else
+`README.md`); it reads them through `graph::references`, the AST walk
+`graph::scan` now uses too, so the site and the document graph follow the
+same links. `core::site::page` adds a TOC sidebar, a breadcrumb and
+backlinks. `src/bin/jumanji-publish.rs` is the shell: config and themes,
+parallel render, fonts found with fontconfig and converted to WOFF2, asset
+copy, a marker-guarded swap of the output. `deploy/cloudflare/` holds the
+Basic-Auth Worker (tested with `node --test`) and `wrangler.jsonc`;
+`scripts/publish-site.sh` builds and deploys with wrangler 4.151.3.
+
+Decided on the way: render options come from the config through one
+`From<&config::Options>` (the session uses it too); `config::load_themes`
+moved out of the session; the site bundles the body and code fonts because
+viewers do not have them; the Worker marks responses `Cache-Control:
+private`. Thesis wiki: 21 notes, 18 figures, 19 dead links (the papers PDFs
+outside `wiki/`), 22 MB, about 6 s.
+
+Next: the owner's one-time Cloudflare setup and a look at the pages. Then
+perhaps a shared stylesheet for the math fonts (each math page carries
+0.7 MB of them) and a subset of the code font.
+
+## 2026-10-20 — a git worktree is its own vault
 
 `vault::root_for` honoured `.git` only as a directory. In a git worktree
 `.git` is a file (`gitdir: …`), so the walk-up passed the worktree and rooted
