@@ -165,10 +165,16 @@ images are left as written, and `CSP` allows only `file:` images.
    shell. In site mode, the dark colours are also emitted under
    `@media (prefers-color-scheme: dark)`, so the site follows the system
    setting. Nothing is restated: the colour table is read out of
-   `style.css`'s `html.dark` block, the dark syntax theme is emitted unscoped
-   inside the query, and the light syntax theme sits under
-   `@media not all and (prefers-color-scheme: dark)`. The configured
-   `default-recolor` does not apply to a site.
+   `style.css`'s `html.dark` block, and the light syntax theme sits under
+   `@media not all and (prefers-color-scheme: dark)`. Under the dark query
+   the reader's own dark rules appear with `.dark` written `:root`
+   (`pipeline::site_theme`): `:root` is the `<html>` element that carries
+   the class, with the same specificity, so every rule wins or loses the
+   cascade as it does in the reader. User themes go through the same
+   rewrite: as written for a light scheme, rewritten for a dark one, so a
+   theme's `html.dark` rules apply and its `:root` does not override the
+   dark colours. The configured `default-recolor` does not apply to a
+   site.
 
 Everything here is pure and unit-tested in core, as D2a requires.
 

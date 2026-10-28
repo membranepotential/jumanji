@@ -171,7 +171,8 @@ impl LinkStyle {
     /// them to the `dark` class its shell toggles; a site has no script to
     /// toggle anything, so it follows the viewer's system setting instead,
     /// with the very same rules: the dark colour table is read out of
-    /// `style.css` ([`dark_vars`]), not restated.
+    /// `style.css` ([`dark_vars`]), not restated, and both blocks go through
+    /// [`site_theme`]'s rewrite.
     fn theme_css(&self) -> (Cow<'static, str>, Cow<'static, str>) {
         match self {
             Self::File => (highlight::light_css().into(), highlight::dark_css().into()),
@@ -182,9 +183,12 @@ impl LinkStyle {
                 )
                 .into(),
                 format!(
-                    "@media {PREFERS_DARK} {{\n:root {{{}}}\nhtml {{\n{}\n}}\n}}\n",
-                    dark_vars(),
-                    highlight::dark_theme_css()
+                    "@media {PREFERS_DARK} {{\n{}}}\n",
+                    dark_class_as_root(&format!(
+                        "html.dark {{{}}}\n{}",
+                        dark_vars(),
+                        highlight::dark_css()
+                    ))
                 )
                 .into(),
             ),
@@ -203,6 +207,41 @@ impl LinkStyle {
             }
         }
     }
+}
+
+/// A user theme as a site page emits it: following the viewer's colour
+/// scheme the way the reader follows its `dark` class.
+///
+/// The reader's dark mode is the `dark` class on `<html>`; a site cannot set
+/// it. So the theme appears twice: as written for a light scheme, where no
+/// `.dark` matches (exactly the reader's light mode), and for a dark scheme
+/// with every `.dark` rewritten to `:root`. `:root` is `<html>`, the only
+/// element that ever carries the class, and has the same specificity, so
+/// `html.dark` rules apply, `html:not(.dark)` rules do not, and every rule
+/// wins or loses the cascade exactly as it does in the reader.
+pub fn site_theme(css: &str) -> String {
+    format!(
+        "@media not all and {PREFERS_DARK} {{\n{css}\n}}\n@media {PREFERS_DARK} {{\n{}\n}}\n",
+        dark_class_as_root(css)
+    )
+}
+
+/// `css` with every `.dark` class selector written `:root` (see
+/// [`site_theme`]). A `.dark` followed by a name character is another class
+/// (`.darker`) and stays.
+fn dark_class_as_root(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(at) = rest.find(".dark") {
+        let after = &rest[at + ".dark".len()..];
+        let class_ends =
+            !after.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        out.push_str(&rest[..at]);
+        out.push_str(if class_ends { ":root" } else { ".dark" });
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The body of `style.css`'s `html.dark { … }` block: the dark colour table.
@@ -759,9 +798,10 @@ mod tests {
         assert!(dark_vars().contains("--alert-caution:"), "{}", dark_vars());
 
         let html = render("# x\n", &site(), &test_vault()).html;
-        let dark = format!("@media {PREFERS_DARK} {{\n:root {{{}}}", dark_vars());
+        // The reader's own dark blocks, with `.dark` matched as `:root`.
+        let dark = format!("@media {PREFERS_DARK} {{\nhtml:root {{{}}}\n", dark_vars());
         assert!(html.contains(&dark), "{html}");
-        assert!(html.contains(highlight::dark_theme_css()));
+        assert!(html.contains(&highlight::dark_css().replacen("html.dark", "html:root", 1)));
         assert!(html.contains(&format!(
             "@media not all and {PREFERS_DARK} {{\nhtml:not(.dark)"
         )));
@@ -769,6 +809,20 @@ mod tests {
         let reader = render_str("# x\n");
         assert!(!reader.contains("prefers-color-scheme"));
         assert!(reader.contains(highlight::dark_css()));
+    }
+
+    #[test]
+    fn a_site_theme_follows_the_colour_scheme_as_the_reader_follows_its_class() {
+        let theme = ":root { --bg: #fff; }\nhtml.dark { --bg: #000; }\n\
+                     html:not(.dark) .x, .darker { color: red; }";
+        assert_eq!(
+            site_theme(theme),
+            format!(
+                "@media not all and {PREFERS_DARK} {{\n{theme}\n}}\n@media {PREFERS_DARK} {{\n\
+                 :root {{ --bg: #fff; }}\nhtml:root {{ --bg: #000; }}\n\
+                 html:not(:root) .x, .darker {{ color: red; }}\n}}\n"
+            )
+        );
     }
 
     #[test]

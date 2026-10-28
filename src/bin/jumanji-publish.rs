@@ -169,7 +169,12 @@ fn build(
         },
         ..Options::from(&config.options)
     };
-    let themes = config::load_themes(config_dir);
+    // Each theme follows the viewer's colour scheme as it follows the
+    // reader's `dark` class.
+    let themes: Vec<String> = config::load_themes(config_dir)
+        .iter()
+        .map(|css| pipeline::site_theme(css))
+        .collect();
 
     let pages: Vec<Vec<DeadLink>> = plan
         .notes
