@@ -203,6 +203,11 @@ impl Vault {
         &self.index
     }
 
+    /// The document this vault resolves for.
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+
     /// Resolve a reference against this vault.
     pub fn resolve(&self, r: &WikiRef) -> Target {
         self.index.resolve(r, &self.source)
@@ -445,7 +450,7 @@ pub fn is_indexable(path: &Path) -> bool {
 
 /// A note's extension. `.markdown` is not on Obsidian's list, but jumanji opens
 /// such files, and a document it can open should be one its links can reach.
-fn is_note(path: &Path) -> bool {
+pub fn is_note(path: &Path) -> bool {
     matches!(extension(path).as_str(), "md" | "markdown")
 }
 

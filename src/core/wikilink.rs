@@ -18,16 +18,24 @@
 //! `a[href]`) — dead by construction rather than by a guard in the router.
 //! jumanji is a reader, so a dead link is never a note-creation affordance.
 
+use std::path::Path;
+
 use comrak::Arena;
 use comrak::nodes::{AstNode, NodeValue};
 
 use super::highlight::escape_html;
 use super::obsidian::{self, RefKind, percent_decode};
-use super::pipeline::html_inline;
+use super::pipeline::{LinkStyle, html_inline};
 use super::vault::{Target, Vault};
 
-/// AST pass: resolve every `[[…]]` against `vault` and rewrite it as an anchor.
-pub fn transform_wikilinks<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>, vault: &Vault) {
+/// AST pass: resolve every `[[…]]` against `vault` and rewrite it as an anchor
+/// whose href is spelled in `style`.
+pub fn transform_wikilinks<'a>(
+    arena: &'a Arena<'a>,
+    root: &'a AstNode<'a>,
+    vault: &Vault,
+    style: &LinkStyle,
+) {
     let links: Vec<&'a AstNode<'a>> = root
         .descendants()
         .filter(|n| matches!(n.data.borrow().value, NodeValue::WikiLink(_)))
@@ -57,7 +65,9 @@ pub fn transform_wikilinks<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>, vaul
 
         node.insert_before(html_inline(
             arena,
-            &open_tag(&vault.resolve(&reference), &raw),
+            &open_tag(&vault.resolve(&reference), &raw, |path| {
+                style.href(path, vault.source())
+            }),
         ));
         node.insert_after(html_inline(arena, "</a>"));
         // The node itself *becomes* the label: comrak's default label is the raw
@@ -71,8 +81,9 @@ pub fn transform_wikilinks<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>, vaul
 }
 
 /// The opening `<a …>` for a resolved (or unresolved) target. `raw` is the
-/// decoded target as written, kept for the unresolved form's feedback.
-fn open_tag(target: &Target, raw: &str) -> String {
+/// decoded target as written, kept for the unresolved form's feedback; `href`
+/// spells a resolved path.
+fn open_tag(target: &Target, raw: &str, href: impl Fn(&Path) -> String) -> String {
     match target {
         Target::Note { path, anchor } => {
             let fragment = anchor
@@ -81,15 +92,14 @@ fn open_tag(target: &Target, raw: &str) -> String {
                 .unwrap_or_default();
             format!(
                 "<a class=\"internal-link\" href=\"{}{fragment}\">",
-                obsidian::file_uri(path)
+                href(path)
             )
         }
         // A non-markdown target is still an ordinary link; the shell hands it
         // to the system opener.
-        Target::Asset { path, .. } => format!(
-            "<a class=\"internal-link\" href=\"{}\">",
-            obsidian::file_uri(path)
-        ),
+        Target::Asset { path, .. } => {
+            format!("<a class=\"internal-link\" href=\"{}\">", href(path))
+        }
         Target::Unresolved => {
             let raw = escape_html(raw);
             format!(
@@ -121,7 +131,7 @@ mod tests {
         let opts = options();
         let arena = Arena::new();
         let root = parse_document(&arena, md, &opts);
-        transform_wikilinks(&arena, root, vault);
+        transform_wikilinks(&arena, root, vault, &LinkStyle::File);
         let mut out = String::new();
         format_html(root, &opts, &mut out).unwrap();
         out
@@ -208,6 +218,37 @@ mod tests {
     }
 
     #[test]
+    fn a_site_link_is_relative_and_keeps_its_fragment() {
+        let tree = TempTree::new("wl-site");
+        let source = tree.write("sub dir/doc.md", "x\n");
+        tree.write("My Note.md", "# Getting Started\n");
+        let vault = Vault::rooted(&tree.0, &source);
+        let site = LinkStyle::Site {
+            root: tree.0.clone(),
+        };
+        let opts = options();
+        let arena = Arena::new();
+        let root = parse_document(
+            &arena,
+            "[[My Note#Getting Started]] [[My Note#^abc123]] [[#Local]]\n",
+            &opts,
+        );
+        transform_wikilinks(&arena, root, &vault, &site);
+        let mut html = String::new();
+        format_html(root, &opts, &mut html).unwrap();
+        assert!(
+            html.contains("href=\"../My%20Note.html#getting-started\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("href=\"../My%20Note.html#%5Eabc123\""),
+            "{html}"
+        );
+        assert!(html.contains("href=\"doc.html#local\""), "{html}");
+        assert!(!html.contains("file:"), "{html}");
+    }
+
+    #[test]
     fn a_wikilink_in_a_heading_keeps_the_toc_anchor_in_agreement() {
         // The reason the label is a real `Text` node: `collect_text` skips
         // `HtmlInline`, so folding it into the raw HTML would truncate the
@@ -216,7 +257,7 @@ mod tests {
         let opts = options();
         let arena = Arena::new();
         let root = parse_document(&arena, "## See [[Note|the note]] now\n", &opts);
-        transform_wikilinks(&arena, root, &vault);
+        transform_wikilinks(&arena, root, &vault, &LinkStyle::File);
         let headings = toc::extract(root);
         let mut html = String::new();
         format_html(root, &opts, &mut html).unwrap();

@@ -24,13 +24,14 @@
 //! (Obsidian does not support block refs into tables either).
 
 use std::ops::Range;
+use std::path::Path;
 
 use comrak::Arena;
 use comrak::nodes::{AstNode, NodeValue};
 
 use super::highlight::escape_html;
 use super::obsidian::{self, RefKind, WikiRef};
-use super::pipeline::{html_block, html_inline, text_inline};
+use super::pipeline::{LinkStyle, html_block, html_inline, text_inline};
 use super::vault::{AssetKind, Target, Vault};
 
 /// A construct found in a text run, with its byte range in that run.
@@ -262,9 +263,14 @@ fn is_comment_marker<'a>(node: &'a AstNode<'a>) -> bool {
 // --- embeds ----------------------------------------------------------------
 
 /// AST pass: resolve `![[…]]` against `vault` and splice in an image or a
-/// link-card. Runs before the wikilink pass, because `!` consumes the `[` and
-/// the two must not race on the same text.
-pub fn transform_embeds<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>, vault: &Vault) {
+/// link-card, its URL spelled in `style`. Runs before the wikilink pass,
+/// because `!` consumes the `[` and the two must not race on the same text.
+pub fn transform_embeds<'a>(
+    arena: &'a Arena<'a>,
+    root: &'a AstNode<'a>,
+    vault: &Vault,
+    style: &LinkStyle,
+) {
     splice_runs(arena, root, &|run| {
         rewrite(
             &run.text,
@@ -273,7 +279,9 @@ pub fn transform_embeds<'a>(arena: &'a Arena<'a>, root: &'a AstNode<'a>, vault: 
                 .filter_map(|(range, construct)| match construct {
                     Construct::Embed(reference) => Some((
                         range,
-                        Some(embed_html(&vault.resolve(&reference), &reference)),
+                        Some(embed_html(&vault.resolve(&reference), &reference, |path| {
+                            style.href(path, vault.source())
+                        })),
                     )),
                     _ => None,
                 }),
@@ -313,7 +321,7 @@ pub fn embeds_at<'a>(node: &'a AstNode<'a>) -> Vec<WikiRef> {
 /// with cycle detection), and a card is the honest degradation: a real link, so
 /// click, `f` hints and the jumplist all work, and it reads as a door rather
 /// than as the content.
-fn embed_html(target: &Target, reference: &WikiRef) -> String {
+fn embed_html(target: &Target, reference: &WikiRef, href: impl Fn(&Path) -> String) -> String {
     let label = escape_html(&obsidian::display_label(reference));
     match target {
         Target::Asset {
@@ -333,15 +341,10 @@ fn embed_html(target: &Target, reference: &WikiRef) -> String {
                 .unwrap_or_default();
             format!(
                 "<img class=\"internal-embed\" src=\"{}\"{size} alt=\"{label}\">",
-                obsidian::file_uri(path)
+                href(path)
             )
         }
-        Target::Asset { path, kind } => card(
-            kind.token(),
-            Some(&obsidian::file_uri(path)),
-            &label,
-            reference,
-        ),
+        Target::Asset { path, kind } => card(kind.token(), Some(&href(path)), &label, reference),
         Target::Note { path, anchor } => {
             let fragment = anchor
                 .as_deref()
@@ -349,7 +352,7 @@ fn embed_html(target: &Target, reference: &WikiRef) -> String {
                 .unwrap_or_default();
             card(
                 "note",
-                Some(&format!("{}{fragment}", obsidian::file_uri(path))),
+                Some(&format!("{}{fragment}", href(path))),
                 &label,
                 reference,
             )
@@ -572,7 +575,7 @@ mod tests {
         let opts = options();
         let arena = Arena::new();
         let root = parse_document(&arena, md, &opts);
-        transform_embeds(&arena, root, vault);
+        transform_embeds(&arena, root, vault, &LinkStyle::File);
         let mut out = String::new();
         format_html(root, &opts, &mut out).unwrap();
         out
@@ -624,6 +627,23 @@ mod tests {
         let width_only = embeds("![[diagram.png|320]]\n", &vault);
         assert!(width_only.contains("width=\"320\""));
         assert!(!width_only.contains("height="));
+    }
+
+    #[test]
+    fn a_site_embed_points_at_the_published_files() {
+        let (tree, vault) = fixture("ts-site");
+        let site = LinkStyle::Site {
+            root: tree.0.clone(),
+        };
+        let opts = options();
+        let arena = Arena::new();
+        let root = parse_document(&arena, "![[diagram.png]] ![[Note#H]]\n", &opts);
+        transform_embeds(&arena, root, &vault, &site);
+        let mut html = String::new();
+        format_html(root, &opts, &mut html).unwrap();
+        assert!(html.contains("src=\"diagram.png\""), "{html}");
+        assert!(html.contains("href=\"Note.html#h\""), "{html}");
+        assert!(!html.contains("file:"), "{html}");
     }
 
     #[test]

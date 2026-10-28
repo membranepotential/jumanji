@@ -530,25 +530,8 @@ impl<T: Toolkit + 'static> Controller<T> {
             file: file.clone(),
             stdin_buffer: None,
             options: options.clone(),
-            render_opts: RenderOptions {
-                page_width_px: options.page_width_px,
-                show_frontmatter: options.show_frontmatter,
-                font_body: options.font_body.clone(),
-                font_mono: options.font_mono.clone(),
-                font_size_px: options.font_size_px,
-                highlight_color: options.highlight_color,
-                highlight_active_color: options.highlight_active_color,
-                // Populated per-render from `<config>/jumanji/themes/*.css`.
-                extra_css: Vec::new(),
-                // External fence renderers are config-only (no runtime `:set`), so
-                // copy them once here; live reload re-runs the pipeline (and thus
-                // the renderers) for free.
-                renderers: options.renderers.clone(),
-                wide: options.wide,
-                wide_blocks: options.wide_blocks.clone(),
-                diagram_fit: options.diagram_fit,
-                diagram_look: options.diagram_look,
-            },
+            // Themes are read per render, from `<config>/jumanji/themes/*.css`.
+            render_opts: RenderOptions::from(&options),
             keymap,
             // Empty until the first background scan lands (kicked off below). A
             // launch never blocks on the walk: the window and the web engine's

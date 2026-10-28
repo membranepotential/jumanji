@@ -9,14 +9,16 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 
 use comrak::nodes::{Ast, AstNode, LineColumn, NodeHtmlBlock, NodeValue};
 use comrak::{Arena, Options as ComrakOptions, format_html, parse_document};
 
-use super::config::{DIAGRAM_FIT_CLASS, Rgba, WIDE_CLASS, WideBlocks};
+use super::config::{self, DIAGRAM_FIT_CLASS, Rgba, WIDE_CLASS, WideBlocks};
 use super::diagram::DiagramLook;
 use super::highlight::escape_html;
-use super::vault::Vault;
+use super::obsidian;
+use super::vault::{self, Vault};
 use super::{
     Heading, RenderedDocument, callout, diagram, fence, frontmatter, highlight, math, textscan,
     toc, wikilink,
@@ -90,6 +92,84 @@ pub struct Options {
     pub diagram_fit: bool,
     /// How mermaid diagrams look (option `diagram-look`).
     pub diagram_look: DiagramLook,
+    /// How a resolved link is spelled: a `file://` URI for the reader, a
+    /// relative URL for a published site (DESIGN D15).
+    pub links: LinkStyle,
+}
+
+impl From<&config::Options> for Options {
+    /// The render options a configuration asks for: the reader's link style,
+    /// and no user themes (the shell reads those itself). External fence
+    /// renderers are config-only (no runtime `:set`), so they are copied once
+    /// here; a live reload re-runs the pipeline, and thus the renderers.
+    fn from(o: &config::Options) -> Self {
+        Self {
+            page_width_px: o.page_width_px,
+            show_frontmatter: o.show_frontmatter,
+            font_body: o.font_body.clone(),
+            font_mono: o.font_mono.clone(),
+            font_size_px: o.font_size_px,
+            highlight_color: o.highlight_color,
+            highlight_active_color: o.highlight_active_color,
+            extra_css: Vec::new(),
+            renderers: o.renderers.clone(),
+            wide: o.wide,
+            wide_blocks: o.wide_blocks.clone(),
+            diagram_fit: o.diagram_fit,
+            diagram_look: o.diagram_look,
+            links: LinkStyle::File,
+        }
+    }
+}
+
+/// How the output spells a link to a file the vault resolved (DESIGN D15).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LinkStyle {
+    /// An absolute `file://` URI: the reader opens files, wherever they are.
+    #[default]
+    File,
+    /// A relative URL into a static site whose top is the vault folder `root`:
+    /// a note becomes its `.html` page ([`page_path`]), an asset keeps its
+    /// path. Relative, so the site works at any URL prefix and from a folder.
+    Site { root: PathBuf },
+}
+
+impl LinkStyle {
+    /// The href for `target`, written in the document `from`. Both are
+    /// absolute paths.
+    pub fn href(&self, target: &Path, from: &Path) -> String {
+        match self {
+            Self::File => obsidian::file_uri(target),
+            Self::Site { .. } => {
+                let dir = from.parent().unwrap_or(Path::new("/"));
+                let url = page_path(&relative(dir, target));
+                obsidian::percent_encode(&url.to_string_lossy())
+            }
+        }
+    }
+}
+
+/// Where a vault file lands in a published site: a note's extension becomes
+/// `.html`, so `cdr/index.md` is `cdr/index.html`; any other file keeps its
+/// path.
+pub fn page_path(path: &Path) -> PathBuf {
+    if vault::is_note(path) {
+        path.with_extension("html")
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// The path from directory `from` to `to`, both absolute, through their
+/// deepest common ancestor: `/v/a` to `/v/b/c.md` is `../b/c.md`. Lexical,
+/// as a browser resolves the result.
+fn relative(from: &Path, to: &Path) -> PathBuf {
+    let from: Vec<Component> = from.components().collect();
+    let to: Vec<Component> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    std::iter::repeat_n(Component::ParentDir, from.len() - common)
+        .chain(to[common..].iter().copied())
+        .collect()
 }
 
 impl Default for Options {
@@ -108,6 +188,7 @@ impl Default for Options {
             wide_blocks: WideBlocks::default(),
             diagram_fit: false,
             diagram_look: DiagramLook::Classic,
+            links: LinkStyle::File,
         }
     }
 }
@@ -208,8 +289,8 @@ pub fn render(md: &str, opts: &Options, vault: &Vault) -> RenderedDocument {
     diagram::transform_mermaid(root, opts.diagram_look);
     highlight::highlight_code_blocks(root);
     let has_math = math::transform_math(root);
-    textscan::transform_embeds(&arena, root, vault);
-    wikilink::transform_wikilinks(&arena, root, vault);
+    textscan::transform_embeds(&arena, root, vault, &opts.links);
+    wikilink::transform_wikilinks(&arena, root, vault, &opts.links);
     textscan::extract_block_ids(&arena, root);
     mark_task_symbols(&arena, root);
     wrap_tables(&arena, root);
@@ -545,6 +626,35 @@ mod tests {
         assert!(html.contains("default-src 'none'"));
         assert!(html.contains("id=\"content\""));
         assert!(html.contains("<h1"));
+    }
+
+    #[test]
+    fn a_site_href_is_relative_to_the_linking_document_and_percent_encoded() {
+        let site = LinkStyle::Site {
+            root: PathBuf::from("/v"),
+        };
+        let from = Path::new("/v/a/doc.md");
+        let href = |target: &str| site.href(Path::new(target), from);
+        assert_eq!(href("/v/a/b.md"), "b.html");
+        assert_eq!(href("/v/a/doc.md"), "doc.html");
+        assert_eq!(href("/v/My Note.md"), "../My%20Note.html");
+        assert_eq!(href("/v/x/y/C#1.markdown"), "../x/y/C%231.html");
+        assert_eq!(href("/v/a/deep/fig 1.png"), "deep/fig%201.png");
+        // The reader keeps its absolute file URIs.
+        assert_eq!(
+            LinkStyle::File.href(Path::new("/v/My Note.md"), from),
+            "file:///v/My%20Note.md"
+        );
+    }
+
+    #[test]
+    fn a_note_is_published_as_html_and_an_asset_keeps_its_path() {
+        assert_eq!(
+            page_path(Path::new("cdr/index.md")),
+            Path::new("cdr/index.html")
+        );
+        assert_eq!(page_path(Path::new("Notes.MD")), Path::new("Notes.html"));
+        assert_eq!(page_path(Path::new("fig.svg")), Path::new("fig.svg"));
     }
 
     #[test]
