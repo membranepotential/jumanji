@@ -80,6 +80,9 @@ core, never back.
   design; search is controller JS, the same on every toolkit. A second
   shell is a sibling directory under `cfg(target_os = …)`, never a branch
   in the controller.
+- `src/publish/` — `jumanji publish` (D15): a second front end over core,
+  no window. Same import ban as the controller; `main` dispatches to it
+  before any GTK init, so it runs without a display.
 - New features start with types in core, then a controller flow, then (only
   if a native capability is needed) a trait method — which every shell and
   the fake must then implement.
@@ -96,8 +99,10 @@ core, never back.
 - Zathura semantics are the spec for UX questions: check
   `docs/research/02-zathura.md` before inventing behavior.
 - Keep count-prefix handling generic in the dispatcher — never per-binding.
-- No network access anywhere. CSP locks the webview; nothing else may do I/O
-  beyond the local filesystem.
+- The reader never touches the network: CSP locks the webview, and nothing
+  else may do I/O beyond the local filesystem. The one exception is
+  `jumanji publish --name`, which hands the built site to wrangler as a
+  subprocess; jumanji itself opens no sockets ([D15](docs/publish/README.md#d15-publishing--a-static-site-from-the-core-pipeline-served-behind-a-password-2026-10-28)).
 
 ## Committing
 

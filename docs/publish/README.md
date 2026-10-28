@@ -1,6 +1,6 @@
 # Publishing a vault as a website
 
-`jumanji-publish` renders a folder of markdown notes (a vault) into a static
+`jumanji publish` renders a folder of markdown notes (a vault) into a static
 website: one HTML page per note, styled like the reader, with wikilinks,
 embeds, diagrams and math working as they do in jumanji. The site is hosted on
 Cloudflare behind a shared password, so only people the owner gives the
@@ -9,10 +9,10 @@ password to can read it, and no crawler can index it.
 First site: the thesis wiki, `~/Documents/Sandeep/thesis/wiki` (about 20
 notes; relative markdown links, SVG figures, heavy math, some mermaid).
 
-Status: **implemented** (2026-10-28): `jumanji-publish`, the password
-Worker and the deploy script. Not yet deployed; the owner runs the one-time
-setup below. Details that the build settled are in
-[As built](#as-built-2026-10-28).
+Status: **implemented** (2026-10-28): `jumanji publish`, which builds the
+site and deploys it with the password Worker. The thesis wiki is live,
+deployed with the earlier script as the Worker `jumanji-site`. Details that
+the build settled are in [As built](#as-built-2026-10-28).
 
 Decisions on this page:
 
@@ -83,7 +83,7 @@ response headers are set.
 
 ### The vault root is the folder you name
 
-`jumanji-publish DIR` roots the vault at `DIR` (`Vault::rooted`), not at
+`jumanji publish DIR` roots the vault at `DIR` (`Vault::rooted`), not at
 `vault::root_for`. The reader's rule climbs to the nearest `.obsidian/` or
 `.git/`. For the thesis wiki that is `thesis/`, which would put the code,
 the papers and the whole repository inside the vault. What you name is what
@@ -197,10 +197,11 @@ Everything here is pure and unit-tested in core, as D2a requires.
   `RenderedDocument::toc`, a backlinks list at the end, the note's folder path
   as a breadcrumb, and a link to the index.
 
-`src/bin/jumanji-publish.rs`, the imperative shell:
+`src/publish/`, the imperative shell, run as `jumanji publish`:
 
 ```sh
-jumanji-publish ~/Documents/Sandeep/thesis/wiki -o ~/Documents/Sandeep/thesis/wiki-site
+jumanji publish ~/Documents/Sandeep/thesis/wiki --name jumanji-site   # build and deploy
+jumanji publish ~/Documents/Sandeep/thesis/wiki --out /tmp/wiki-site  # build only
 ```
 
 1. Load the reader's `config.toml` (`Config::load`) and themes
@@ -218,44 +219,54 @@ jumanji-publish ~/Documents/Sandeep/thesis/wiki -o ~/Documents/Sandeep/thesis/wi
    judged after resolving the output's `..` and symlinks.
    It writes an `.assetsignore` so wrangler does not upload the marker.
 
-The publisher performs no network I/O. Deploying is a separate step, which
-keeps the "no network access anywhere" rule intact.
+**The network rule.** The reader never touches the network. The one
+exception is `jumanji publish --name`, which hands the built site to
+wrangler as a subprocess; jumanji itself opens no sockets. Before, the
+deploy was a separate script, so the rule held literally, but the owner then
+had to run three tools in order and keep a repository checkout for the
+script and the wrangler config. Folding the deploy in keeps the boundary
+where it matters: the reader and the build stay offline (`--out` alone never
+starts wrangler), and the one command whose purpose is to upload says so in
+its flag.
 
-It ships as a **second binary in the same crate**: it runs on the owner's
-machine, where GTK and WebKit are installed anyway. Splitting the code into a
-toolkit-free `jumanji-core` crate is deferred until publishing has to run in
-CI.
+It ships as a **subcommand of the `jumanji` binary** (it began as a second
+binary, `jumanji-publish`). `src/publish/` is a front end over `core`, a
+sibling of `shell/gtk/` in D2a's terms. It imports no `gtk` / `glib` / `gio`
+/ `webkit6`, and `main` dispatches to it right after parsing the arguments,
+before anything initialises GTK, so it runs with no display (over ssh). The
+binary still links GTK, which is installed wherever jumanji is. Splitting
+the code into a toolkit-free `jumanji-core` crate is deferred until
+publishing has to run in CI.
 
-### Deployment (one-time setup, then one command)
+### Deployment: one command
 
-`deploy/cloudflare/` in this repo holds the password script (`worker.js`) and
-a `wrangler.jsonc`: `main` points at the script, and the `assets` block names
-the output directory (`target/site` in this repo), the `ASSETS` binding and
-`run_worker_first: true`. The Worker is named `jumanji-site`; a second site
-passes its own name to the deploy script. Wrangler runs through
-`pnpm dlx wrangler@4.151.3`. The pinned version must be at least 7 days old
-(the dependency seasoning rule), and at least 4.44.0 so preview URLs follow
-the `workers.dev` setting. 4.151.3 was published on 2026-10-20 (checked with
-`pnpm view wrangler time --json`); bump it in `scripts/publish-site.sh` and
-in the steps below together.
+`jumanji publish DIR --name NAME` builds the site and deploys it as the
+Worker `NAME`, served at `https://NAME.<account subdomain>.workers.dev`.
+Each name is its own site with its own password. Wrangler does the
+uploading; it runs as `pnpm --silent dlx wrangler@4.151.3`. The pinned
+version must be at least 7 days old (the dependency seasoning rule), and at
+least 4.44.0 so preview URLs follow the `workers.dev` setting. 4.151.3 was
+published on 2026-10-20 (checked with `pnpm view wrangler time --json`);
+bump `publish::wrangler::VERSION`.
 
 Preview URLs serve the same Worker, so the password covers them too.
 
-One-time steps for the owner:
+What a first deploy does, and asks:
 
-1. Run `pnpm dlx wrangler@4.151.3 login`. A browser opens; log in to
-   Cloudflare.
-2. In `deploy/cloudflare/`, run `pnpm dlx wrangler@4.151.3 secret put
-   SITE_PASSWORD`. It asks for the password without echoing it. If the Worker
-   does not exist yet, wrangler offers to create it; accept.
-3. Run `scripts/publish-site.sh ~/Documents/Sandeep/thesis/wiki`. It runs
-   `jumanji-publish` and then `wrangler deploy`. The output prints the
-   `https://<name>.<account>.workers.dev` URL.
-4. Open the URL in a private window. The browser asks for a user name and
-   password; any user name and the password from step 2 open the wiki.
-5. Give the reader the URL and the password, ideally by different channels.
+1. If wrangler is not logged in, it logs in: a browser opens, or, with no
+   display, wrangler prints a URL and a code to enter on any device.
+2. It builds the site into `$XDG_CACHE_HOME/jumanji/sites/NAME`.
+3. It deploys. A Cloudflare account without a `workers.dev` subdomain is
+   asked by wrangler to register one.
+4. The Worker has no password yet, so jumanji says
+   "Set the password readers will need for <URL>:" and wrangler asks for it
+   without echoing it.
+5. It prints the dead links, the summary and the site's URL.
 
-After that, publishing again is step 3 alone.
+Then open the URL in a private window: any user name and the password open
+the wiki. Give a reader the URL and the password, ideally by different
+channels. Publishing again is the same command and asks nothing;
+`--password` asks for a new password.
 
 ### Out of scope for the first version
 
@@ -338,10 +349,61 @@ What the build settled that the plan above left open:
   file `Cache-Control: private` (static assets come marked `public`, which a
   shared cache may keep). `deploy/cloudflare/worker.test.mjs` tests it under
   plain node: `node --test deploy/cloudflare/`.
+- **`jumanji publish`** (2026-10-28) replaced the `jumanji-publish` binary
+  and `scripts/publish-site.sh`:
+  - *Command line.* `publish` is a clap subcommand beside the optional FILE
+    (`args_conflicts_with_subcommands`), so `jumanji FILE`, `jumanji -`,
+    piped stdin and every flag parse as before. There is no `help`
+    subcommand: `jumanji help` opens a file named `help`. A file named
+    `publish` opens as `./publish`. `--name` or `--out` is required:
+    `--out` alone builds only and never starts wrangler; `--name` deploys,
+    from `--out` if given, else from `$XDG_CACHE_HOME/jumanji/sites/NAME`
+    (`~/.cache/…` without it), which keeps the `.jumanji-site` marker and
+    the swap. `--password` requires `--name`. A name is checked as
+    Cloudflare checks it (1–63 lowercase letters, digits and dashes, no
+    dash at either end), so it is also a safe directory name.
+  - *Embedded Worker.* An installed binary has no checkout, so it embeds
+    `deploy/cloudflare/worker.js` (`include_str!`) and generates the wrangler
+    config: name, `main`, compatibility date 2026-10-20, `workers_dev`, and
+    `assets` with the absolute site directory, the `ASSETS` binding and
+    `run_worker_first`. Both go into a fresh temporary directory per deploy,
+    where every wrangler run happens (`deploy --config`), so a stray
+    wrangler config in the caller's directory cannot interfere.
+    `worker.js` and `worker.test.mjs` stay the source; the static
+    `wrangler.jsonc` is gone.
+  - *The sequence.* `whoami --json` (wrangler: "Exits with a non-zero
+    status if not authenticated"; it never starts a login itself) →
+    `login` if that failed, `login --device` when neither `DISPLAY` nor
+    `WAYLAND_DISPLAY` is set, since a browser elsewhere cannot reach
+    wrangler's callback on `localhost` → the build → `deploy` →
+    `secret list --name NAME --format json` (a JSON array of `{name,
+    type}`) → `secret put SITE_PASSWORD --name NAME` when that list lacks
+    `SITE_PASSWORD` or `--password` was given. Login comes before the build,
+    so a missing pnpm or a login surfaces before the wait. The secret is
+    listed after the deploy, so the Worker exists and a failure is a real
+    one, never a new Worker mistaken for one without a password; the site
+    goes up before the password, which exposes nothing, as the Worker fails
+    closed. The login, the deploy and `secret put` inherit the terminal, so
+    wrangler's own prompts work; jumanji never sees the password.
+  - *The URL.* `deploy` runs with `WRANGLER_OUTPUT_FILE_PATH` set; wrangler
+    appends one JSON object per line there, and its `deploy` entry lists the
+    `targets`, among them `https://NAME.<subdomain>.workers.dev`. Parsing
+    that, rather than capturing the deploy's output, keeps the deploy on the
+    terminal for its prompts. Without the entry, jumanji points at wrangler's
+    output instead.
+  - *Pure and tested.* `publish::wrangler` describes every run as data
+    (arguments, environment, how it meets the terminal) and decides login
+    and password from the facts; `publish::deploy` runs it. An integration
+    test drives the whole sequence against a fake `pnpm`; no test touches
+    the network.
+  - The thesis wiki went live before this, as the Worker `jumanji-site`
+    (the old config's name). `--name jumanji-site` keeps its URL and its
+    password; another name makes a second site.
 
 ## Implementation plan
 
-Each step lands as its own commit with tests; `cargo test`, `cargo clippy -D
+The plan as it was built; steps 5 and 6 have since become `jumanji publish`
+(see [As built](#as-built-2026-10-28)). Each step lands as its own commit with tests; `cargo test`, `cargo clippy -D
 warnings` and `cargo fmt` stay green throughout.
 
 | # | Step | Touches | Done when |
@@ -376,3 +438,7 @@ warnings` and `cargo fmt` stay green throughout.
 - Pages bare `pages.dev` hostname and Access (third-party guide):
   <https://dev.classmethod.jp/articles/cloudflare-pages-access/>
 - GitHub Pages limits: <https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits>
+- Wrangler's `WRANGLER_OUTPUT_FILE_PATH` (ND-JSON output file):
+  <https://developers.cloudflare.com/workers/wrangler/system-environment-variables/>;
+  the `deploy` entry's `targets` read from the wrangler 4.151.3 source
+  (`writeOutput`, `triggersDeploy`).

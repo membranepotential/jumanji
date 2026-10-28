@@ -312,7 +312,9 @@ are for, and nothing about this project should publish anywhere.
 - Windows in v1. macOS is not a goal of the owner either, but the layering
   ([D2a](#d2a-three-layers--core-controller-toolkit-shell-2026-09-02)) leaves a contributor a clean, cfg-gated place to build it.
 - Pixel-perfect mermaid.js parity (graceful degradation instead).
-- Network access of any kind.
+- Network access of any kind in the reader. The one exception is `jumanji
+  publish --name`, which hands a built site to wrangler as a subprocess to
+  deploy it; jumanji itself opens no sockets ([D15](../publish/README.md#d15-publishing--a-static-site-from-the-core-pipeline-served-behind-a-password-2026-10-28)).
 
 ## Milestones
 

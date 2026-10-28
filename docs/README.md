@@ -60,7 +60,7 @@ anchor to the new home.
 | [jumplist/](jumplist/README.md) | The cross-document jumplist and back navigation | [D10](jumplist/README.md#d10-cross-document-jumplist-navigation-post-10) |
 | [obsidian/](obsidian/README.md) | The Obsidian dialect and vault resolution | [D11](obsidian/README.md#d11-obsidian-dialect--vault-resolution-post-10-implemented) |
 | [graph/](graph/README.md) | The document graph (`t`): [README](graph/README.md) (the feature), [interaction model](graph/interaction.md), [design](graph/design.md), [visual reference](graph/mockup.html) | [D14](graph/design.md#d14-the-document-graph--a-route-spine-with-its-links-fanned-out-2026-09-18) |
-| [publish/](publish/README.md) | Publishing a vault as a website: `jumanji-publish` and the password Worker | [D15](publish/README.md#d15-publishing--a-static-site-from-the-core-pipeline-served-behind-a-password-2026-10-28) |
+| [publish/](publish/README.md) | Publishing a vault as a website: `jumanji publish`, the deploy and the password Worker | [D15](publish/README.md#d15-publishing--a-static-site-from-the-core-pipeline-served-behind-a-password-2026-10-28) |
 
 ## Research
 

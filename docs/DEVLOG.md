@@ -2,7 +2,32 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-10-28 (latest) — publish review fixes
+## 2026-10-28 (latest) — `jumanji publish`: build and deploy in one command
+
+`jumanji-publish` and `scripts/publish-site.sh` are now one subcommand,
+`jumanji publish DIR --name NAME` (deploy) or `--out SITE` (build only).
+The code moved to `src/publish/`, a toolkit-free front end over the core;
+`main` dispatches to it before any GTK init, so it works over ssh. The
+reader's argument parsing is unchanged (unit-tested), and the thesis wiki
+builds byte-identical to the old binary.
+
+The deploy runs wrangler through `pnpm --silent dlx wrangler@4.151.3` in a
+fresh temp directory with the embedded `worker.js` and a generated config.
+Login is checked with `whoami --json`; the site goes up, then
+`secret list` decides whether wrangler's own prompt asks for the password
+(first deploy, or `--password`). The URL comes from wrangler's
+`WRANGLER_OUTPUT_FILE_PATH` record, so the deploy keeps the terminal for
+its prompts. `publish::wrangler` holds all of it as data, unit-tested; an
+integration test runs the sequence against a fake `pnpm`.
+
+Decided: the no-network rule now reads "the reader never touches the
+network"; `jumanji publish --name` is the one exception, and jumanji itself
+still opens no sockets (CLAUDE.md, architecture non-goals, D15).
+
+Next: the owner's first real run. `--name jumanji-site` keeps the live
+thesis wiki's URL and password.
+
+## 2026-10-28 — publish review fixes
 
 An independent review of the publisher (2dabd82..3683b93) found, and
 reproduced, five problems; each is fixed in its own commit:

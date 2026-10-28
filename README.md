@@ -270,14 +270,16 @@ A ```` ```dot ```` fence then renders as a diagram. Details:
 
 ## Publishing a vault as a website
 
-`jumanji-publish` turns a folder of notes into a static website that looks
+`jumanji publish` turns a folder of notes into a static website that looks
 like the reader: the same rendering, colours, code highlighting, callouts,
 math and diagrams, the configured fonts bundled, light or dark after the
-viewer's system setting, and no JavaScript in the pages.
+viewer's system setting, and no JavaScript in the pages. Given a name, it
+also puts the site on Cloudflare behind a shared password, where no crawler
+can index it.
 
 ```sh
-cargo build --release --bin jumanji-publish
-target/release/jumanji-publish ~/notes/wiki -o ~/notes/wiki-site
+jumanji publish ~/notes/wiki --name my-wiki    # build, deploy to https://my-wiki.<you>.workers.dev
+jumanji publish ~/notes/wiki --out /tmp/site   # build only, to look at locally
 ```
 
 - The folder's `index.md` (else `README.md`) is the home page. Every note it
@@ -290,9 +292,27 @@ target/release/jumanji-publish ~/notes/wiki -o ~/notes/wiki-site
 - Each page gets a contents sidebar (on wide windows), a breadcrumb, and the
   notes that link to it.
 
-`scripts/publish-site.sh VAULT_DIR` builds the site and deploys it to
-Cloudflare Workers behind a shared password, with no indexing by crawlers.
-The one-time setup and the reasoning are in
+First deploy:
+
+1. Install pnpm, which runs Cloudflare's `wrangler` for jumanji:
+   `pacman -S pnpm nodejs`.
+2. Run `jumanji publish DIR --name NAME`. NAME is the site's name, in
+   lowercase letters, digits and dashes.
+3. If wrangler is not logged in, a browser opens to log in to Cloudflare
+   (with no display, wrangler prints a URL and a code instead). Log in.
+4. When asked "Set the password readers will need for …", type the
+   password. Wrangler asks for it without echoing it; jumanji never sees it.
+5. The last line prints the site's URL. Open it in a private window; any
+   user name and the password open the site.
+
+Publishing again is the same command and asks nothing. To change the
+password, add `--password`; every reader then needs the new one. The site is
+built into `~/.cache/jumanji/sites/NAME` unless `--out` names a directory.
+jumanji itself opens no network connection: only wrangler, run as a
+subprocess, uploads.
+
+`publish` is a subcommand, so a file named `publish` opens as
+`jumanji ./publish`. The reasoning and details are in
 [docs/publish/](docs/publish/README.md)
 ([D15](docs/publish/README.md#d15-publishing--a-static-site-from-the-core-pipeline-served-behind-a-password-2026-10-28)).
 
