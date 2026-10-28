@@ -3,9 +3,9 @@
 //!
 //! Pure. [`plan`] reads notes only through the closure it is given, as
 //! `graph::build` does, so the whole selection is tested over a map; [`page`]
-//! and [`site_css`] dress a rendered note in the site's navigation; the
-//! `jumanji-publish` binary is the imperative shell that reads, renders and
-//! writes.
+//! and [`site_css`] dress a rendered note in the site's navigation;
+//! `jumanji publish` (`crate::publish`) is the imperative shell that reads,
+//! renders and writes.
 //!
 //! **One rule decides what is published: whatever the entry note reaches by
 //! links.** The walk follows the links the document graph follows

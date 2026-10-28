@@ -1,10 +1,12 @@
-//! `jumanji-publish` end to end (DESIGN D15): publish a vault into a temp
-//! directory, then check the site as a browser would see it. Every `href`,
-//! `src` and CSS `url()` in every page must name a file that exists, or a
-//! fragment present in that page, and no `file:` URL may appear anywhere.
+//! `jumanji publish --out` end to end (DESIGN D15): publish a vault into a
+//! temp directory, then check the site as a browser would see it. Every
+//! `href`, `src` and CSS `url()` in every page must name a file that exists,
+//! or a fragment present in that page, and no `file:` URL may appear anywhere.
 //!
 //! The publisher runs with an empty config directory, so the developer's own
-//! configuration (fonts, themes, fence renderers) cannot change the result.
+//! configuration (fonts, themes, fence renderers) cannot change the result,
+//! and with no display, as over ssh: publishing must never need GTK. Nothing
+//! here deploys: without `--name` there is no network.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -39,13 +41,16 @@ impl Drop for Temp {
 }
 
 fn publish(vault: &Path, out: &Path, config: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_jumanji-publish"))
+    Command::new(env!("CARGO_BIN_EXE_jumanji"))
+        .arg("publish")
         .arg(vault)
-        .arg("-o")
+        .arg("--out")
         .arg(out)
         .env("XDG_CONFIG_HOME", config)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
         .output()
-        .expect("run jumanji-publish")
+        .expect("run jumanji publish")
 }
 
 /// Every file under `dir`, relative to it.

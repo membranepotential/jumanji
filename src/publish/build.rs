@@ -1,26 +1,24 @@
-//! `jumanji-publish`: render a vault into a static website that looks like the
+//! Build the site: render a vault into a static website that looks like the
 //! reader (DESIGN D15).
 //!
 //! The imperative shell around `core::site`: it reads the configuration and
 //! the vault, renders every published note in parallel, bundles the
 //! configured fonts (found through fontconfig), copies the assets and swaps
 //! the result into place. Deciding what is published, and every byte of every
-//! page, is the core's. No toolkit, and no network: deploying is a separate
-//! step (`scripts/publish-site.sh`).
+//! page, is the core's. No network: deploying is `deploy`'s.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
 use rayon::prelude::*;
 
-use jumanji::core::config::{self, Config};
-use jumanji::core::pipeline::{self, LinkStyle, Options, page_path};
-use jumanji::core::site::{self, Dead, DeadLink, FACES, FontFace, FontWeight, SitePlan};
-use jumanji::core::vault::{self, Vault};
+use crate::core::config::{self, Config};
+use crate::core::pipeline::{self, LinkStyle, Options, page_path};
+use crate::core::site::{self, Dead, DeadLink, FACES, FontFace, FontWeight, SitePlan};
+use crate::core::vault::{self, Vault};
 
 /// Marks a directory as this tool's output, so it may be replaced.
 const MARKER: &str = ".jumanji-site";
@@ -31,38 +29,13 @@ const ASSETS_IGNORE: &str = ".assetsignore";
 /// Where the bundled fonts go, relative to the site root.
 const FONTS_DIR: &str = "fonts";
 
-/// Publish a folder of markdown notes as a static website that looks like
-/// jumanji.
-#[derive(Debug, Parser)]
-#[command(name = "jumanji-publish", version, about)]
-struct Cli {
-    /// The vault folder. Its index.md (else README.md) becomes the home page;
-    /// every note it reaches by links, and every file those notes reference,
-    /// is published. Nothing else is.
-    vault: PathBuf,
-
-    /// The output directory. It is replaced as a whole, so it must be missing,
-    /// empty, or an earlier output (which carries a `.jumanji-site` marker).
-    #[arg(short, long)]
-    output: PathBuf,
-}
-
-fn main() -> ExitCode {
-    match run(&Cli::parse()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("jumanji-publish: {err:#}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn run(cli: &Cli) -> Result<()> {
-    let root = cli
-        .vault
+/// Build the site for the vault at `vault` into `out`, replacing an earlier
+/// build there. What was published, for the report.
+pub fn site(vault: &Path, out: &Path) -> Result<Report> {
+    let root = vault
         .canonicalize()
-        .with_context(|| format!("cannot open the vault {}", cli.vault.display()))?;
-    let out = real_path(&cli.output)?;
+        .with_context(|| format!("cannot open the vault {}", vault.display()))?;
+    let out = real_path(out)?;
     check_output(&out, &root)?;
 
     let config_dir = config::xdg_config_dir();
@@ -95,8 +68,14 @@ fn run(cli: &Cli) -> Result<()> {
         let _ = fs::remove_dir_all(&staging);
         return Err(err);
     }
-    report(&plan, &built, &out);
-    Ok(())
+    Ok(Report {
+        dead: plan.dead.into_iter().chain(built.dead).collect(),
+        notes: plan.notes.len(),
+        assets: plan.assets.len(),
+        fonts: built.fonts.len(),
+        bytes: size(&out),
+        out,
+    })
 }
 
 /// Where `path` really is: absolute, every `..` and symlink of its existing
@@ -143,7 +122,7 @@ fn check_output(out: &Path, root: &Path) -> Result<()> {
     if !empty && !out.join(MARKER).exists() {
         bail!(
             "refusing to replace {}: it is not empty and has no {MARKER} marker, \
-             so it is not an earlier jumanji-publish output",
+             so it is not an earlier jumanji publish output",
             out.display()
         );
     }
@@ -463,33 +442,44 @@ fn write(path: &Path, contents: String) -> Result<()> {
     fs::write(path, contents).with_context(|| format!("cannot write {}", path.display()))
 }
 
-/// Print every dead link and a summary on stdout.
-fn report(plan: &SitePlan, built: &Built, out: &Path) {
-    let dead: Vec<&DeadLink> = plan.dead.iter().chain(&built.dead).collect();
-    if !dead.is_empty() {
-        println!("dead links ({}):", dead.len());
-        for dead in dead {
-            let why = match dead.reason {
-                Dead::Outside => "outside the vault",
-                Dead::NotFound => "not in the vault",
-                Dead::Unpublished => "raw HTML or a diagram naming no published file",
-            };
-            println!(
-                "  {}:{}: {} ({why})",
-                dead.source.display(),
-                dead.line,
-                dead.written
-            );
+/// What a build published: the dead links and a summary.
+pub struct Report {
+    dead: Vec<DeadLink>,
+    notes: usize,
+    assets: usize,
+    fonts: usize,
+    bytes: u64,
+    out: PathBuf,
+}
+
+impl Report {
+    /// Print every dead link and the summary on stdout.
+    pub fn print(&self) {
+        if !self.dead.is_empty() {
+            println!("dead links ({}):", self.dead.len());
+            for dead in &self.dead {
+                let why = match dead.reason {
+                    Dead::Outside => "outside the vault",
+                    Dead::NotFound => "not in the vault",
+                    Dead::Unpublished => "raw HTML or a diagram naming no published file",
+                };
+                println!(
+                    "  {}:{}: {} ({why})",
+                    dead.source.display(),
+                    dead.line,
+                    dead.written
+                );
+            }
         }
+        println!(
+            "published {} notes, {} assets and {} font files ({:.1} MB) to {}",
+            self.notes,
+            self.assets,
+            self.fonts,
+            self.bytes as f64 / 1_000_000.0,
+            self.out.display()
+        );
     }
-    println!(
-        "published {} notes, {} assets and {} font files ({:.1} MB) to {}",
-        plan.notes.len(),
-        plan.assets.len(),
-        built.fonts.len(),
-        size(out) as f64 / 1_000_000.0,
-        out.display()
-    );
 }
 
 /// The total size of the files under `dir`, in bytes.

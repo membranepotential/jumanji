@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish a vault as the password-protected website (docs/publish/README.md,
-# D15): build it with jumanji-publish into target/site, then deploy that
+# D15): build it with `jumanji publish` into target/site, then deploy that
 # folder and the password Worker (deploy/cloudflare/) with wrangler.
 #
 # The one-time setup (wrangler login, the SITE_PASSWORD secret) is in the doc.
@@ -25,8 +25,8 @@ name=${2:-}
 repo=$(cd "$(dirname "$0")/.." && pwd)
 site="$repo/target/site"
 
-cargo build --release --bin jumanji-publish --manifest-path "$repo/Cargo.toml"
-"$repo/target/release/jumanji-publish" "$vault" -o "$site"
+cargo build --release --manifest-path "$repo/Cargo.toml"
+"$repo/target/release/jumanji" publish "$vault" --out "$site"
 
 cd "$repo/deploy/cloudflare"
 pnpm dlx "$WRANGLER" deploy ${name:+--name "$name"}

@@ -3,18 +3,33 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, Parser, Subcommand};
 use gtk::glib;
 
 use jumanji::core::config::{self, Config};
 use jumanji::core::source::Source;
+use jumanji::publish;
 use jumanji::shell;
 use jumanji::shell::gtk::OpenFocus;
 
 /// A zathura-inspired markdown reader.
+///
+/// A subcommand name is never read as a file: open a file named `publish` as
+/// `./publish`.
+// No `help` subcommand: `jumanji help` opens a file named `help`, as it did
+// before there were subcommands.
 #[derive(Debug, Parser)]
-#[command(name = "jumanji", version, about)]
+#[command(
+    name = "jumanji",
+    version,
+    about,
+    args_conflicts_with_subcommands = true,
+    disable_help_subcommand = true
+)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// The markdown file to open. Use `-` to read from standard input; with no
     /// argument at all, a piped stdin is read (`some-tool | jumanji`).
     file: Option<PathBuf>,
@@ -42,6 +57,11 @@ struct Cli {
     /// in the background.
     #[arg(long)]
     no_focus: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    Publish(publish::Args),
 }
 
 impl Cli {
@@ -141,6 +161,13 @@ fn main() -> ExitCode {
     }
 
     let cli = Cli::parse();
+
+    // A subcommand runs without a window, so it returns here, before anything
+    // below can touch GTK, WebKit or D-Bus: `jumanji publish` works with no
+    // display (over ssh).
+    if let Some(Commands::Publish(args)) = &cli.command {
+        return publish::run(args);
+    }
 
     // Classify the input: a file path, an explicit `-`, or a bare pipe. `None`
     // means no file and stdin is an interactive terminal — nothing to read.
@@ -242,8 +269,54 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    fn try_parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("jumanji").chain(args.iter().copied()))
+    }
+
     fn parse(args: &[&str]) -> Cli {
-        Cli::try_parse_from(std::iter::once("jumanji").chain(args.iter().copied())).unwrap()
+        try_parse(args).unwrap()
+    }
+
+    #[test]
+    fn the_cli_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn a_file_or_stdin_opens_the_reader_as_before() {
+        let none = parse(&[]);
+        assert!(none.command.is_none() && none.file.is_none());
+        assert_eq!(parse(&["-"]).file, Some(PathBuf::from("-")));
+        let file = parse(&["demo/demo.md"]);
+        assert!(file.command.is_none());
+        assert_eq!(file.file, Some(PathBuf::from("demo/demo.md")));
+        let flags = parse(&[
+            "--forward",
+            "12",
+            "--no-focus",
+            "demo/demo.md",
+            "--background",
+        ]);
+        assert_eq!(flags.file, Some(PathBuf::from("demo/demo.md")));
+        assert_eq!(flags.forward, Some(12));
+        assert!(flags.no_focus && flags.background);
+        // A file named like a subcommand opens with a path; `help` is no
+        // subcommand at all.
+        assert_eq!(parse(&["./publish"]).file, Some(PathBuf::from("./publish")));
+        assert_eq!(parse(&["help"]).file, Some(PathBuf::from("help")));
+    }
+
+    #[test]
+    fn publish_is_a_subcommand() {
+        let publish = parse(&["publish", "wiki", "--out", "site"]);
+        assert!(matches!(publish.command, Some(Commands::Publish(_))));
+        assert!(publish.file.is_none());
+        for bad in [
+            &["publish", "wiki"][..],
+            &["--no-focus", "publish", "wiki", "--out", "site"],
+        ] {
+            assert!(try_parse(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
