@@ -2,7 +2,23 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-10-28 (latest) — `jumanji-publish`: a vault as a password-protected website
+## 2026-10-28 (latest) — `font-ui`: the site bundles the interface font
+
+Screenshots of the reader and the site matched except in the interface font:
+everything set in `system-ui` (headings, callout titles, table heads, the
+site's navigation) is the GTK font in the reader (Adwaita Sans) and the
+viewer's own font on the site. New option `font-ui`, symmetric with
+`font-body` / `font-mono` (`--font-ui` root var, `:set`-able); every
+`system-ui` stack in `style.css` and `site.css` is now
+`var(--font-ui, <the same stack>)`, so with it unset nothing renders
+differently. The publisher bundles it like the other two, and declares a
+variable font with its weight range (`fc-scan`), so headings at 650 are not
+matched to a bold face or synthesized; it hints when `font-ui` is unset.
+Mermaid labels are not `system-ui` (merman sets Trebuchet MS) and stay as
+they are. `html_handling` stays at Cloudflare's default: `none` would stop
+serving `/` and `/folder/`.
+
+## 2026-10-28 — `jumanji-publish`: a vault as a password-protected website
 
 Built D15 ([publish/](publish/README.md)) in six steps. `LinkStyle` in
 `pipeline::Options` spells resolved links as `file://` URIs (the reader,

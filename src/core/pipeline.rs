@@ -80,6 +80,9 @@ pub struct Options {
     pub font_body: String,
     /// Monospace/code font family; empty means keep the stylesheet default.
     pub font_mono: String,
+    /// Interface font family (headings, callout titles, table heads); empty
+    /// means keep the stylesheet's `system-ui` stack.
+    pub font_ui: String,
     /// Base body font size in pixels (the text-zoom 100% reference).
     pub font_size_px: u32,
     /// Selection and search-match colour: `--highlight`.
@@ -129,6 +132,7 @@ impl From<&config::Options> for Options {
             show_frontmatter: o.show_frontmatter,
             font_body: o.font_body.clone(),
             font_mono: o.font_mono.clone(),
+            font_ui: o.font_ui.clone(),
             font_size_px: o.font_size_px,
             highlight_color: o.highlight_color,
             highlight_active_color: o.highlight_active_color,
@@ -241,6 +245,7 @@ impl Default for Options {
             show_frontmatter: false,
             font_body: String::new(),
             font_mono: String::new(),
+            font_ui: String::new(),
             font_size_px: 18,
             highlight_color: Rgba::ZATHURA_HIGHLIGHT,
             highlight_active_color: Rgba::ZATHURA_HIGHLIGHT_ACTIVE,
@@ -274,23 +279,21 @@ fn html_classes(opts: &Options) -> String {
 
 /// Emit the `:root` custom-property overrides the stylesheet consumes:
 /// `--content-width`, `--font-size`, `--highlight`, `--highlight-active`, and
-/// — only when the user set them — `--font-body`/`--font-mono`. Font names are CSS-escaped and quoted.
+/// — only when the user set them — `--font-body`/`--font-mono`/`--font-ui`.
+/// Font names are CSS-escaped and quoted.
 fn root_vars_css(opts: &Options) -> String {
     let mut vars = format!(
         "--content-width:{}px;--font-size:{}px;--highlight:{};--highlight-active:{};",
         opts.page_width_px, opts.font_size_px, opts.highlight_color, opts.highlight_active_color
     );
-    if !opts.font_body.trim().is_empty() {
-        vars.push_str(&format!(
-            "--font-body:{};",
-            css_font_family(&opts.font_body)
-        ));
-    }
-    if !opts.font_mono.trim().is_empty() {
-        vars.push_str(&format!(
-            "--font-mono:{};",
-            css_font_family(&opts.font_mono)
-        ));
+    for (var, family) in [
+        ("--font-body", &opts.font_body),
+        ("--font-mono", &opts.font_mono),
+        ("--font-ui", &opts.font_ui),
+    ] {
+        if !family.trim().is_empty() {
+            vars.push_str(&format!("{var}:{};", css_font_family(family)));
+        }
     }
     format!(":root{{{vars}}}")
 }
@@ -803,12 +806,14 @@ mod tests {
         let plain = render_str("# x\n");
         assert!(!plain.contains("--font-body:"));
         assert!(!plain.contains("--font-mono:"));
+        assert!(!plain.contains("--font-ui:"));
 
         let html = render(
             "# x\n",
             &Options {
                 font_body: "Source Serif 4".to_string(),
                 font_mono: "JetBrains Mono".to_string(),
+                font_ui: "Adwaita Sans".to_string(),
                 ..Options::default()
             },
             &test_vault(),
@@ -816,6 +821,7 @@ mod tests {
         .html;
         assert!(html.contains("--font-body:\"Source Serif 4\""));
         assert!(html.contains("--font-mono:\"JetBrains Mono\""));
+        assert!(html.contains("--font-ui:\"Adwaita Sans\""));
     }
 
     #[test]

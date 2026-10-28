@@ -194,13 +194,25 @@ pub fn plan(
 /// the configured fonts without having them installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontFace {
-    /// The family name the configuration uses (`font-body` / `font-mono`).
+    /// The family name the configuration uses (`font-body`, `font-mono`,
+    /// `font-ui`).
     pub family: String,
-    /// CSS weight, 100–900.
-    pub weight: u16,
+    pub weight: FontWeight,
     pub italic: bool,
     /// Where the file lies in the site, relative to its root.
     pub path: PathBuf,
+}
+
+/// The weights one font file covers, in CSS units (100–900).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontWeight {
+    /// A static face: one weight. The browser picks the nearest face for any
+    /// other weight, as fontconfig does for the reader.
+    Single(u16),
+    /// A variable font: every weight in the range, drawn at the weight asked
+    /// for. Declared as a range, so a 650 heading is drawn at 650 instead of
+    /// being matched to a single face (or synthesized bold).
+    Range { min: u16, max: u16 },
 }
 
 /// The faces the stylesheet asks of each configured family, as (CSS weight,
@@ -232,7 +244,10 @@ pub fn site_css(page_width_px: u32, fonts: &[FontFace], note: &Path) -> String {
                  font-weight: {weight}; font-style: {style}; font-display: swap; }}\n",
                 family = css_font_family(&face.family),
                 url = obsidian::percent_encode(&face.path.to_string_lossy()),
-                weight = face.weight,
+                weight = match face.weight {
+                    FontWeight::Single(weight) => weight.to_string(),
+                    FontWeight::Range { min, max } => format!("{min} {max}"),
+                },
                 style = if face.italic { "italic" } else { "normal" },
             )
         })
@@ -531,18 +546,33 @@ mod tests {
 
     #[test]
     fn site_css_declares_the_fonts_relative_to_the_page() {
-        let fonts = [FontFace {
-            family: "Source Serif 4".to_string(),
-            weight: 700,
-            italic: true,
-            path: PathBuf::from("fonts/Serif Bold.woff2"),
-        }];
+        let fonts = [
+            FontFace {
+                family: "Source Serif 4".to_string(),
+                weight: FontWeight::Single(700),
+                italic: true,
+                path: PathBuf::from("fonts/Serif Bold.woff2"),
+            },
+            FontFace {
+                family: "Adwaita Sans".to_string(),
+                weight: FontWeight::Range { min: 100, max: 900 },
+                italic: false,
+                path: PathBuf::from("fonts/AdwaitaSans-Regular.ttf"),
+            },
+        ];
         let css = site_css(840, &fonts, Path::new("topic/n.md"));
         assert!(
             css.contains(
                 "@font-face { font-family: \"Source Serif 4\"; \
              src: url(\"../fonts/Serif%20Bold.woff2\") format(\"woff2\"); \
              font-weight: 700; font-style: italic; font-display: swap; }"
+            ),
+            "{css}"
+        );
+        assert!(
+            css.contains(
+                "src: url(\"../fonts/AdwaitaSans-Regular.ttf\") format(\"truetype\"); \
+             font-weight: 100 900; font-style: normal;"
             ),
             "{css}"
         );

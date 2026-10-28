@@ -377,6 +377,9 @@ pub struct Options {
     pub font_body: String,
     /// Monospace/code font family (empty = the stylesheet's default stack).
     pub font_mono: String,
+    /// Interface font family: headings, callout titles, table heads (empty =
+    /// the stylesheet's `system-ui` stack).
+    pub font_ui: String,
     /// Base body font size in pixels; also the text-zoom 100% reference.
     pub font_size_px: u32,
     /// Which block kinds may break out of the reading column to window width
@@ -438,6 +441,7 @@ impl Default for Options {
             show_frontmatter: false,
             background: false,
             font_body: String::new(),
+            font_ui: String::new(),
             font_mono: String::new(),
             font_size_px: 18,
             wide_blocks: WideBlocks::default(),
@@ -489,6 +493,10 @@ impl Options {
             }
             "font-mono" => {
                 self.font_mono = unquote(value).to_string();
+                Ok(SetEffect::Rerender)
+            }
+            "font-ui" => {
+                self.font_ui = unquote(value).to_string();
                 Ok(SetEffect::Rerender)
             }
             "default-recolor" => {
@@ -695,6 +703,7 @@ impl Config {
             background: raw_opts.background.unwrap_or(defaults.background),
             font_body: raw_opts.font_body.unwrap_or(defaults.font_body),
             font_mono: raw_opts.font_mono.unwrap_or(defaults.font_mono),
+            font_ui: raw_opts.font_ui.unwrap_or(defaults.font_ui),
             font_size_px: raw_opts.font_size.unwrap_or(defaults.font_size_px),
             wide_blocks,
             wide: raw_opts.wide.unwrap_or(defaults.wide),
@@ -987,6 +996,7 @@ pub fn option_keys() -> &'static [&'static str] {
         "show-frontmatter",
         "font-body",
         "font-mono",
+        "font-ui",
         "font-size",
         "wide-blocks",
         "wide",
@@ -1085,6 +1095,8 @@ struct RawOptions {
     font_body: Option<String>,
     #[serde(rename = "font-mono")]
     font_mono: Option<String>,
+    #[serde(rename = "font-ui")]
+    font_ui: Option<String>,
     #[serde(rename = "font-size")]
     font_size: Option<u32>,
     #[serde(rename = "wide-blocks")]
@@ -1303,6 +1315,7 @@ mod tests {
             [options]
             font-body = "Inter"
             font-mono = "Fira Code"
+            font-ui = "Adwaita Sans"
             font-size = 20
             text-zoom-step = 0.2
             "#,
@@ -1310,6 +1323,7 @@ mod tests {
         .unwrap();
         assert_eq!(c.options.font_body, "Inter");
         assert_eq!(c.options.font_mono, "Fira Code");
+        assert_eq!(c.options.font_ui, "Adwaita Sans");
         assert_eq!(c.options.font_size_px, 20);
         assert_eq!(c.options.text_zoom_step, 0.2);
         // Untouched fields keep their defaults.
@@ -1548,6 +1562,11 @@ mod tests {
             o.set("font-mono", "\"JetBrains Mono\"").unwrap(),
             SetEffect::Rerender
         );
+        assert_eq!(
+            o.set("font-ui", "\"Adwaita Sans\"").unwrap(),
+            SetEffect::Rerender
+        );
+        assert_eq!(o.font_ui, "Adwaita Sans");
         assert_eq!(o.font_mono, "JetBrains Mono");
     }
 

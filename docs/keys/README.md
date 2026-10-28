@@ -49,6 +49,7 @@ Options surface (all optional; defaults in parentheses):
 | `default-recolor` | bool (`false`) | start in dark mode |
 | `font-body` | string (`""`) | prose font family; empty = stylesheet default serif stack |
 | `font-mono` | string (`""`) | code font family; empty = stylesheet default mono stack |
+| `font-ui` | string (`""`) | interface font family (headings, callout titles, table heads); empty = the `system-ui` stack |
 | `font-size` | u32 (`18`) | base body font px; also the text-zoom 100% reference |
 | `diagram-look` | `"classic"` \| `"neo"` (`classic`) | how mermaid diagrams look: Mermaid 11's theme `default` + look `classic` for every family, or Mermaid 12's defaults; `:set` re-renders ([D3](../architecture/README.md#d3-content-pipeline--100-rust-no-javascript)) |
 | `highlight-color` | colour (`"rgba(159, 251, 0, 0.5)"`) | colour of a selection and of every `/` match; zathura's option and default. `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb(…)`, `rgba(…)` |
@@ -59,7 +60,7 @@ Options surface (all optional; defaults in parentheses):
 
 Font names are CSS-escaped and quoted before emission into the generated
 `:root{…}` block (the stylesheet already consumes `--font-body`/`--font-mono`/
-`--font-size`). Copy-on-select is opt-in (`copy-on-select`, off by default), a
+`--font-ui`/`--font-size`). Copy-on-select is opt-in (`copy-on-select`, off by default), a
 deliberate deviation from zathura, which always copies: a selection should not
 overwrite your Ctrl-V clipboard unless you ask for it. Two copies happen without
 it, both WebKit's own: Ctrl-C copies to CLIPBOARD (the key is unbound, so it

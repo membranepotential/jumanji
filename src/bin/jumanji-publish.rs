@@ -19,7 +19,7 @@ use rayon::prelude::*;
 
 use jumanji::core::config::{self, Config};
 use jumanji::core::pipeline::{self, LinkStyle, Options, page_path};
-use jumanji::core::site::{self, Dead, FACES, FontFace, SitePlan};
+use jumanji::core::site::{self, Dead, FACES, FontFace, FontWeight, SitePlan};
 use jumanji::core::vault::{self, Vault};
 
 /// Marks a directory as this tool's output, so it may be replaced.
@@ -181,27 +181,38 @@ fn build(
     Ok(fonts)
 }
 
-/// Copy the configured body and code fonts into the site, one file per face
-/// in [`FACES`] that the family really has, converted to WOFF2 when
-/// `woff2_compress` is installed. A family fontconfig does not know is
-/// skipped with a warning: the page then falls back to the stylesheet's
-/// font stack, as the reader would.
+/// Copy the configured body, code and interface fonts into the site: the
+/// files that hold the faces in [`FACES`] the family really has, each once,
+/// converted to WOFF2 when `woff2_compress` is installed. A variable font is
+/// one file for several of those faces and is declared with its weight range.
+/// A family fontconfig does not know is skipped with a warning: the page then
+/// falls back to the stylesheet's font stack, as the reader would.
 fn bundle_fonts(options: &config::Options, dir: &Path) -> Result<Vec<FontFace>> {
+    if options.font_ui.trim().is_empty() {
+        eprintln!(
+            "hint: font-ui is not set, so headings and other interface text use each \
+             viewer's own system font; set it to bundle one"
+        );
+    }
     let mut faces: Vec<(FontFace, PathBuf)> = Vec::new();
     for (option, family) in [
         ("font-body", &options.font_body),
         ("font-mono", &options.font_mono),
+        ("font-ui", &options.font_ui),
     ] {
         let family = family.trim();
         if family.is_empty() {
             continue;
         }
-        let found: Vec<(u16, bool, PathBuf)> = FACES
-            .iter()
-            .filter_map(|&(weight, italic)| {
-                font_file(family, weight, italic).map(|file| (weight, italic, file))
-            })
-            .collect();
+        let mut found: Vec<(u16, bool, PathBuf)> = Vec::new();
+        for &(weight, italic) in &FACES {
+            match font_file(family, weight, italic) {
+                Some(file) if !found.iter().any(|(_, _, f)| *f == file) => {
+                    found.push((weight, italic, file))
+                }
+                _ => {}
+            }
+        }
         if found.is_empty() {
             eprintln!(
                 "warning: {option} \"{family}\" is not installed (fontconfig); \
@@ -212,7 +223,7 @@ fn bundle_fonts(options: &config::Options, dir: &Path) -> Result<Vec<FontFace>> 
             let name = file.file_name().context("a font path without a name")?;
             let face = FontFace {
                 family: family.to_string(),
-                weight,
+                weight: variable_weights(&file).unwrap_or(FontWeight::Single(weight)),
                 italic,
                 path: Path::new(FONTS_DIR).join(name),
             };
@@ -237,6 +248,34 @@ fn bundle_fonts(options: &config::Options, dir: &Path) -> Result<Vec<FontFace>> 
             })
         })
         .collect()
+}
+
+/// The weight range of `file` if it is a variable font, read with `fc-scan`
+/// (fontconfig lists a variable font once with its range, `[0 210]`, besides
+/// its named instances).
+fn variable_weights(file: &Path) -> Option<FontWeight> {
+    let output = Command::new("fc-scan")
+        .arg("--format=%{variable}\t%{weight}\n")
+        .arg(file)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .find_map(|line| fc_weight_range(line.strip_prefix("True\t")?))
+}
+
+/// A fontconfig weight range, `[0 210]`, in CSS weights.
+fn fc_weight_range(range: &str) -> Option<FontWeight> {
+    let (min, max) = range
+        .strip_prefix('[')?
+        .strip_suffix(']')?
+        .split_once(' ')?;
+    Some(FontWeight::Range {
+        min: css_weight_of(min.parse().ok()?),
+        max: css_weight_of(max.parse().ok()?),
+    })
 }
 
 /// The file fontconfig holds for `family` at CSS `weight` and `italic`, if
@@ -281,19 +320,38 @@ fn fc_pattern(family: &str, weight: u16, italic: bool) -> String {
     format!("{escaped}:weight={}:slant={slant}", fc_weight_of(weight))
 }
 
-/// fontconfig's weight scale for a CSS weight (`FC_WEIGHT_*`).
+/// CSS weights and fontconfig's (`FC_WEIGHT_*`), thin to black.
+const WEIGHTS: [(u16, i32); 9] = [
+    (100, 0),
+    (200, 40),
+    (300, 50),
+    (400, 80),
+    (500, 100),
+    (600, 180),
+    (700, 200),
+    (800, 205),
+    (900, 210),
+];
+
+/// fontconfig's weight for a CSS weight: the named weight nearest to it.
 fn fc_weight_of(css: u16) -> i32 {
-    match css {
-        ..=150 => 0,
-        151..=250 => 40,
-        251..=350 => 50,
-        351..=450 => 80,
-        451..=550 => 100,
-        551..=650 => 180,
-        651..=750 => 200,
-        751..=850 => 205,
-        _ => 210,
-    }
+    WEIGHTS
+        .iter()
+        .min_by_key(|(c, _)| c.abs_diff(css))
+        .map_or(80, |&(_, fc)| fc)
+}
+
+/// The CSS weight for a fontconfig weight (which `fc-scan` may print as a
+/// fraction): the named weight nearest to it.
+fn css_weight_of(fc: f64) -> u16 {
+    WEIGHTS
+        .iter()
+        .min_by(|(_, a), (_, b)| {
+            (f64::from(*a) - fc)
+                .abs()
+                .total_cmp(&(f64::from(*b) - fc).abs())
+        })
+        .map_or(400, |&(css, _)| css)
 }
 
 /// Compress `font` to WOFF2 next to it with `woff2_compress`, and remove the
@@ -413,6 +471,19 @@ mod tests {
             fc_pattern("A-B:C", 700, true),
             "A\\-B\\:C:weight=200:slant=100"
         );
+    }
+
+    #[test]
+    fn a_variable_fonts_range_is_read_in_css_weights() {
+        assert_eq!(
+            fc_weight_range("[0 210]"),
+            Some(FontWeight::Range { min: 100, max: 900 })
+        );
+        assert_eq!(
+            fc_weight_range("[50 200]"),
+            Some(FontWeight::Range { min: 300, max: 700 })
+        );
+        assert_eq!(fc_weight_range("80"), None);
     }
 
     #[test]

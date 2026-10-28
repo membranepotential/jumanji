@@ -227,8 +227,16 @@ h3,
 h4,
 h5,
 h6 {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
-    Arial, sans-serif;
+  font-family: var(
+    --font-ui,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif
+  );
   color: var(--heading);
   font-weight: 650;
   line-height: 1.25;
@@ -348,7 +356,7 @@ blockquote > :last-child {
   display: flex;
   align-items: center;
   gap: 0.4em;
-  font-family: system-ui, sans-serif;
+  font-family: var(--font-ui, system-ui, sans-serif);
   font-weight: 650;
   line-height: 1;
   color: var(--alert-accent);
@@ -463,7 +471,7 @@ img.internal-embed {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--table-head-bg);
-  font-family: system-ui, sans-serif;
+  font-family: var(--font-ui, system-ui, sans-serif);
   font-size: 0.8em;
   line-height: 1.5;
 }
@@ -614,7 +622,7 @@ td {
 }
 thead th {
   background: var(--table-head-bg);
-  font-family: system-ui, sans-serif;
+  font-family: var(--font-ui, system-ui, sans-serif);
   font-weight: 650;
 }
 tbody tr:nth-child(even) {
@@ -673,7 +681,7 @@ details {
 }
 summary {
   cursor: pointer;
-  font-family: system-ui, sans-serif;
+  font-family: var(--font-ui, system-ui, sans-serif);
   font-weight: 600;
   color: var(--heading);
 }
@@ -837,7 +845,7 @@ math {
   padding: 0;
 }
 .math-error__note {
-  font-family: system-ui, sans-serif;
+  font-family: var(--font-ui, system-ui, sans-serif);
   font-size: 0.95em;
   font-weight: 600;
 }
@@ -849,7 +857,7 @@ math {
 .diagram-error__note {
   margin: 0 0 0.6em;
   padding: 0.55em 0.9em;
-  font-family: system-ui, sans-serif;
+  font-family: var(--font-ui, system-ui, sans-serif);
   font-size: 0.9em;
   color: var(--note-fg);
   background: var(--note-bg);

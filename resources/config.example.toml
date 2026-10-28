@@ -44,6 +44,12 @@
 # default monospace stack".
 # font-mono = ""
 
+# Interface font family: headings, callout titles, table heads. Empty string
+# means "use the system UI font" (`system-ui`, which WebKitGTK takes from the
+# GTK font, e.g. Adwaita Sans). Set it to that font's name to have
+# jumanji-publish bundle it, so a published site matches the reader.
+# font-ui = ""
+
 # Base body font size in pixels. Also the 100% reference point for text zoom.
 # font-size = 18
 

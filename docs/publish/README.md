@@ -265,17 +265,31 @@ After that, publishing again is step 3 alone.
 
 What the build settled that the plan above left open:
 
-- **Fonts.** A viewer's browser does not have the configured `font-body` /
-  `font-mono`, so the site bundles them. The publisher asks fontconfig
+- **Fonts.** A viewer's browser does not have the configured `font-body`,
+  `font-mono` and `font-ui`, so the site bundles them. The publisher asks fontconfig
   (`fc-match`) for each face the stylesheet uses (`site::FACES`: regular,
   italic, bold, bold italic; `strong` is weight 680, which matches the bold
   face), accepts only an answer from the same family, slant and weight,
-  copies the file to `fonts/` and converts it to WOFF2 when
+  copies each file once to `fonts/` and converts it to WOFF2 when
   `woff2_compress` is installed (else the original file is kept). Each page
-  declares them with `@font-face`. A family fontconfig does not know is
+  declares them with `@font-face`: a static face with its one weight, a
+  variable font (found with `fc-scan`) with its weight range, e.g.
+  `font-weight: 100 900`, so a 650 heading is drawn at 650 rather than
+  matched to one face or synthesized. A family fontconfig does not know is
   skipped with a warning, and the page falls back to the stylesheet's stack.
-  Headings and other chrome use `system-ui`, as in the reader; that face is
-  the viewer's own and is not bundled.
+  - `font-ui` (2026-10-28) names the interface font: headings, callout
+    titles, table heads and the site's navigation, which the stylesheet sets
+    in `var(--font-ui, system-ui, …)`. Unset, the reader keeps using the GTK
+    font through `system-ui` and the site the viewer's system font; the
+    publisher prints a one-line hint. Set it to the GTK font (Adwaita Sans
+    here, a variable font: one file upright, one italic) and the site
+    matches the reader.
+  - Source Serif 4 and SauceCodePro Nerd Font Mono resolve to static files
+    (the variable Source Serif is a separate family, "Source Serif 4
+    Variable"), so they are declared one weight per file.
+  - Mermaid labels keep merman's own stack (`"trebuchet ms", verdana, arial,
+    sans-serif`), in the reader and on the site alike; `font-ui` does not
+    touch them.
 - **Navigation** (`site::page`, `site::site_css`, `core/assets/site.css`),
   spliced around the pipeline's output at `pipeline::MAIN_OPEN` /
   `MAIN_CLOSE`:
@@ -292,9 +306,9 @@ What the build settled that the plan above left open:
 - **An image of a note** (`![x](a.md)`) counts as a link to the note.
 - **Page weight.** Each page is self-contained, as in the reader, so a page
   with math carries the math stylesheet and its base64 fonts (about 0.7 MB).
-  The thesis wiki publishes to about 22 MB: 15 MB of pages, 4.5 MB of
+  The thesis wiki publishes to about 23 MB: 15 MB of pages, 5.2 MB of
   fonts (the Nerd Font code faces are 1.1 MB each, fetched only by pages
-  with code), and the figures.
+  with code; Adwaita Sans is 0.7 MB for both files), and the figures.
 - **The Worker** compares SHA-256 digests of the given and the stored
   password with `crypto.subtle.timingSafeEqual` (equal lengths whatever was
   typed), fails closed when `SITE_PASSWORD` is unset, and marks every served

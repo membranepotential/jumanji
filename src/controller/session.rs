@@ -2345,6 +2345,7 @@ impl<T: Toolkit + 'static> Controller<T> {
                     s.render_opts.show_frontmatter = o.show_frontmatter;
                     s.render_opts.font_body = o.font_body.clone();
                     s.render_opts.font_mono = o.font_mono.clone();
+                    s.render_opts.font_ui = o.font_ui.clone();
                     s.render_opts.font_size_px = o.font_size_px;
                     s.render_opts.highlight_color = o.highlight_color;
                     s.render_opts.highlight_active_color = o.highlight_active_color;
