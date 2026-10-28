@@ -1,0 +1,271 @@
+# Publishing a vault as a website
+
+`jumanji-publish` renders a folder of markdown notes (a vault) into a static
+website: one HTML page per note, styled like the reader, with wikilinks,
+embeds, diagrams and math working as they do in jumanji. The site is hosted on
+Cloudflare behind a shared password, so only people the owner gives the
+password to can read it, and no crawler can index it.
+
+First site: the thesis wiki, `~/Documents/Sandeep/thesis/wiki` (about 20
+notes; relative markdown links, SVG figures, heavy math, some mermaid).
+
+Status: **planned** (2026-10-28). Nothing below is built yet.
+
+Decisions on this page:
+
+- [D15: Publishing — a static site from the core pipeline, served behind a password (2026-10-28)](#d15-publishing--a-static-site-from-the-core-pipeline-served-behind-a-password-2026-10-28)
+
+## D15: Publishing — a static site from the core pipeline, served behind a password (2026-10-28)
+
+### What the owner asked for
+
+- Publish a collection of markdown documents plus their images as an
+  interlinked wiki that looks like jumanji.
+- The site must not be crawled. Access control is the accepted way to get
+  there.
+- A reader gets in with a password the owner hands them.
+- URLs stay close to the file names. Their exact shape does not matter.
+
+### Decision
+
+**A static site generator built on `core::pipeline::render`.** Each note is
+rendered by the same function the reader uses, so the site and the reader
+cannot drift apart: a fix to callouts, mermaid or math reaches both. The output
+is plain HTML and CSS. Reading a page needs no JavaScript (D3 holds on the
+web too), so a server only ever serves files.
+
+**Hosting: Cloudflare Workers Static Assets on the `workers.dev` hostname,
+with a small Worker script in front that asks for a password (HTTP Basic
+Auth).**
+
+- `run_worker_first: true` makes the script see every request before a file
+  is served. Without the right `Authorization` header it answers `401` with
+  `WWW-Authenticate: Basic`, and the browser shows its own login dialog. With
+  it, the script passes the request to the `ASSETS` binding.
+- The password is a Worker secret (`wrangler secret put SITE_PASSWORD`),
+  never in a file or in the repo. The script compares it with
+  `crypto.subtle.timingSafeEqual`. The user name is ignored. Changing the
+  password means putting a new secret; every reader then needs the new one.
+- The script is about 20 lines of JavaScript that run on Cloudflare, not in
+  the page. D3 (no JavaScript in the content pipeline) is unaffected.
+- Cloudflare now points new static sites at Workers Static Assets. Pages is
+  still supported.
+- Static asset limits: 20,000 files per version and 25 MiB per file on the
+  free plan. The thesis wiki is far below both.
+
+**No crawling.** The password is the real guard: a crawler gets `401`, never
+content. The script also adds `X-Robots-Tag: noindex, nofollow` to every
+response, including the `401`, in case the password check is ever switched
+off. No `robots.txt` and no `_headers` file: the script is the one place
+response headers are set.
+
+**Rejected:**
+
+- *Cloudflare Access:* it has no shared-password login. Its closest method
+  is a one-time PIN: the reader types their email address and receives a code.
+  That is stronger (one login per person, revocable per person), but the owner
+  asked for a password to hand over. If per-person access is wanted later,
+  delete the script and switch Access on for `workers.dev` (a one-click
+  toggle, Cloudflare changelog 2025-10-03). Nothing else changes.
+- *Cloudflare Pages:* it runs scripts in front of static files too, but
+  Cloudflare puts its new static-site work into Workers.
+- *GitHub Pages:* it has no access control outside GitHub Enterprise, and
+  its sites are public.
+- *A server that renders on request:* that means running a process and
+  trusting it with the vault. Static files behind a password give the same reading
+  experience with nothing to operate.
+- *An existing generator (Quartz, Obsidian Publish):* the site would no
+  longer look like jumanji, and it would resolve links in its own way. D11
+  already defines link resolution once.
+
+### The vault root is the folder you name
+
+`jumanji-publish DIR` roots the vault at `DIR` (`Vault::rooted`), not at
+`vault::root_for`. The reader's rule climbs to the nearest `.obsidian/` or
+`.git/`. For the thesis wiki that is `thesis/`, which would put the code,
+the papers and the whole repository inside the vault. What you name is what
+can be published, and nothing above it.
+
+### Selection: what gets published
+
+**One rule for notes and files: whatever the entry note reaches by links.**
+
+- The entry note is `DIR/index.md`, else `DIR/README.md`. It becomes
+  `index.html`. If neither exists, the publisher stops with an error.
+- **Notes:** the entry note and every note reachable from it by following
+  wikilinks, note embeds and relative markdown links, transitively. This is
+  the walk the document graph already does (`graph::scan` per note), without
+  its budget cut. A note nothing links to stays private, so files like the
+  wiki's `CLAUDE.md` (agent instructions) or a draft are never published,
+  and no opt-out list is needed.
+- **Assets:** only files that a published note references, through `![[…]]`,
+  `[[…]]` or a relative markdown link or image. An unreferenced attachment
+  never leaves the machine.
+- **Dead links:** a link to anything not published (outside `DIR`, missing,
+  or a `file://` URL) renders like an unresolved wikilink: a dead link with
+  no `href`. Its URL never appears in a page. The publisher prints every dead
+  link with its source note and line, so a link that should work is noticed
+  before deploying. Example: the thesis wiki's `index.md` links to
+  `../papers/Matthaiou 2024 … .pdf`, which lies outside `wiki/` and will be
+  reported.
+
+*Rejected: everything the vault scan indexes, minus notes marked
+`publish: false`.* That publishes by default, so forgetting the marker
+on one note leaks it.
+
+### URLs: the vault path, with `.md` replaced by `.html`
+
+`Projects/My Note.md` → `/Projects/My%20Note.html`, and assets keep their path
+(`attachments/fig 1.png` → `/attachments/fig%201.png`). Every href is
+**relative** (`../Projects/My%20Note.html#heading`) and percent-encoded with
+`obsidian::percent_encode`. The site therefore works at any URL prefix and
+also from a local folder opened in a browser. Heading and block anchors are the
+ids the pipeline already emits.
+
+`index.html` at the root is the entry note. A topic folder's `index.md`
+becomes that folder's `index.html`, so `/cdr/` works as a URL as well.
+
+### Changes to core
+
+Today, resolved links are spelled `file:///abs/path` in two places,
+`wikilink::open_tag` and `textscan::embed_html`. Relative markdown links and
+images are left as written, and `CSP` allows only `file:` images.
+
+1. **`LinkStyle`**, a new enum in `core::pipeline::Options`:
+   `File` (today's behaviour, the default) | `Site { root: PathBuf }`. One
+   function, `LinkStyle::href(&self, target: &Path, from: &Path) -> String`,
+   replaces the two direct `obsidian::file_uri` calls. `Site` returns a
+   relative URL computed from `from` (the vault binds the source document
+   already).
+2. **Publish set.** A link to a file that is not published must come out
+   dead. Rendering runs against a `VaultIndex` built only from the published
+   notes and assets (`VaultIndex::build` already takes injected entries).
+   Resolution then fails for everything else, and the existing unresolved
+   path handles it, with no new branch.
+3. **A markdown-link pass in site mode.** It rewrites a relative `[x](a.md#h)`
+   to `a.html#h`, and a relative image or link to an asset to its site URL. A
+   target outside the vault, or one that was not published, becomes dead.
+   `file://` links become dead as well.
+4. **The CSP depends on the link style.** In site mode, `img-src`, `media-src`
+   and `object-src` (for PDF links, if needed) allow `'self' data:` in place
+   of `file:`. `default-src 'none'` and the ban on scripts stay.
+5. **Dark mode without a script.** The reader toggles `html.dark` from the
+   shell. In site mode, the dark colours are also emitted under
+   `@media (prefers-color-scheme: dark)`, so the site follows the system
+   setting.
+
+Everything here is pure and unit-tested in core, as D2a requires.
+
+### The publisher
+
+`core::site`, new and pure:
+
+- `plan(entry, index, read) -> SitePlan`. It walks the links from the entry
+  note and decides the published notes, the output path of each, the
+  referenced assets, the backlinks and the dead links. It reads notes only
+  through the injected `read` function, as `graph::build` does, so the walk is
+  unit-tested without files. Backlinks follow the same link rules as the
+  document graph (D14).
+- Navigation HTML around each page: a TOC sidebar from
+  `RenderedDocument::toc`, a backlinks list at the end, the note's folder path
+  as a breadcrumb, and a link to the index.
+
+`src/bin/jumanji-publish.rs`, the imperative shell:
+
+```sh
+jumanji-publish ~/Documents/Sandeep/thesis/wiki -o ~/Documents/Sandeep/thesis/wiki-site
+```
+
+1. Load the reader's `config.toml` (`Config::load`). The site then uses the
+   same theme, fonts, `diagram-look` and fence renderers as the reader.
+2. Scan the vault, build the `SitePlan`, render the pages in parallel (rayon,
+   already a dependency) and copy the assets.
+3. Print the dead links and a summary (notes, assets, bytes).
+4. Write into a temporary sibling directory, then swap it with the output
+   directory. The publisher refuses to replace a directory that lacks its
+   marker file `.jumanji-site`, so a typo in `-o` cannot delete a real folder.
+
+The publisher performs no network I/O. Deploying is a separate step, which
+keeps the "no network access anywhere" rule intact.
+
+It ships as a **second binary in the same crate**: it runs on the owner's
+machine, where GTK and WebKit are installed anyway. Splitting the code into a
+toolkit-free `jumanji-core` crate is deferred until publishing has to run in
+CI.
+
+### Deployment (one-time setup, then one command)
+
+`deploy/cloudflare/` in this repo holds the password script (`worker.js`) and
+a `wrangler.jsonc`: `main` points at the script, and the `assets` block names
+the output directory, the `ASSETS` binding and `run_worker_first: true`.
+Wrangler runs through `pnpm dlx wrangler@<pinned version>`. The pinned version
+must be at least 7 days old (the dependency seasoning rule), and at least
+4.44.0 so preview URLs follow the `workers.dev` setting.
+
+Preview URLs serve the same Worker, so the password covers them too.
+
+One-time steps for the owner:
+
+1. Run `pnpm dlx wrangler login`. A browser opens; log in to Cloudflare.
+2. Run `pnpm dlx wrangler secret put SITE_PASSWORD` in `deploy/cloudflare/`.
+   It asks for the password without echoing it.
+3. Run `scripts/publish-site.sh ~/Documents/Sandeep/thesis/wiki`. It runs
+   `jumanji-publish` and then `wrangler deploy`. The output prints the
+   `https://<name>.<account>.workers.dev` URL.
+4. Open the URL in a private window. The browser asks for a user name and
+   password; any user name and the password from step 2 open the wiki.
+5. Give the reader the URL and the password, ideally by different channels.
+
+After that, publishing again is step 3 alone.
+
+### Out of scope for the first version
+
+- **Search across the site.** It needs JavaScript in the page and a prebuilt
+  index. It comes next if the wiki grows big enough to need it.
+- **Keyboard navigation** (`j`/`k`, `gg`/`G`, `f` hints). This could reuse the
+  controller's scripts through a browser shim for `__jmnj_post`. It comes
+  later, if at all.
+- **The document graph on the web.** Its overlay is controller JavaScript.
+  A static per-page "links" view is possible later.
+- **Note transclusion.** `![[note]]` stays a link card, as in the reader
+  (deferred there too).
+- **Incremental builds.** Every publish renders the whole vault. D13's
+  benchmarks will show whether that is slow.
+
+## Implementation plan
+
+Each step lands as its own commit with tests; `cargo test`, `cargo clippy -D
+warnings` and `cargo fmt` stay green throughout.
+
+| # | Step | Touches | Done when |
+|---|---|---|---|
+| 1 | `LinkStyle` in `Options`; `wikilink` and `textscan` call `href` | `core/pipeline.rs`, `core/wikilink.rs`, `core/textscan.rs` | Reader output is byte-identical (existing tests and benches); new tests cover relative site hrefs, including spaces, `#`, `^block` and nested folders |
+| 2 | Site-mode markdown-link pass, CSP and dark media query | `core/pipeline.rs`, new pass module | Unit tests: `.md`→`.html`, assets, outside-vault and unpublished targets dead, CSP per mode |
+| 3 | `core::site::plan`: link walk from the entry note, output paths, referenced assets, backlinks, dead links | new `core/site.rs` | Unit tests over injected entries: an unlinked note and an unreferenced asset stay out, a link outside the root is dead and reported, backlinks match `graph::scan` |
+| 4 | Navigation HTML (TOC sidebar, backlinks, breadcrumb) | `core/site.rs`, CSS in `core/assets/` | Rendered from the thesis wiki; screenshot reviewed by the owner |
+| 5 | `jumanji-publish` binary: explicit root, config, parallel render, asset copy, dead-link report, swap with marker | `src/bin/jumanji-publish.rs` | Integration test: publish `demo/` into a temp dir, then check that every `href`/`src` in every page points at a file that exists or at a fragment present in that page (a link checker, run in `cargo test`). Thesis wiki: no `CLAUDE.md` in the output, the papers PDF reported dead |
+| 6 | Password script, wrangler config, deploy script, docs | `deploy/cloudflare/`, `scripts/publish-site.sh`, this page, top-level README | Owner has run the one-time setup; in a private window the URL asks for a password; `curl -I` without credentials returns `401` with `X-Robots-Tag`, with credentials `200` |
+
+## Open questions
+
+- **The papers PDF.** `index.md` links to a PDF in `thesis/papers/`, outside
+  the wiki. As planned, that link is dead on the site. Publishing it means
+  copying the PDF into `wiki/`. It is someone else's thesis, so that is the
+  owner's call.
+
+## Sources
+
+- `run_worker_first`, a script in front of static assets:
+  <https://developers.cloudflare.com/workers/static-assets/routing/worker-script/>
+- Access login methods, one-time PIN (no shared password):
+  <https://developers.cloudflare.com/cloudflare-one/identity/one-time-pin>
+- Cloudflare changelog, one-click Access for Workers (2025-10-03):
+  <https://developers.cloudflare.com/changelog/post/2025-10-03-one-click-access-for-workers/>
+- Preview URL default behaviour, Wrangler 4.44.0 (2025-10-23):
+  <https://developers.cloudflare.com/changelog/post/2025-10-23-preview-url-default-behavior/>
+- Static asset limits: <https://developers.cloudflare.com/workers/platform/limits>
+- Custom headers for static assets: <https://developers.cloudflare.com/workers/static-assets/headers/>
+- Zero Trust plans (Access free for up to 50 users): <https://www.cloudflare.com/plans/zero-trust-services/>
+- Pages bare `pages.dev` hostname and Access (third-party guide):
+  <https://dev.classmethod.jp/articles/cloudflare-pages-access/>
+- GitHub Pages limits: <https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits>

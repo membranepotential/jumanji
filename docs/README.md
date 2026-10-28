@@ -9,7 +9,7 @@ why jumanji is built the way it is, how to test it, and what changed when.
 
 | Document | Read it for |
 |---|---|
-| [Design decisions](#design-decisions) | The decision records, D1–D14, each kept with its feature. **Binding:** a change that departs from a decision updates it in the same commit, with reasons. |
+| [Design decisions](#design-decisions) | The decision records, D1–D15, each kept with its feature. **Binding:** a change that departs from a decision updates it in the same commit, with reasons. |
 | [architecture/](architecture/README.md) | The cross-cutting decisions: stack, layers, pipeline, extension seams, performance; plus goal, non-goals, milestones, component map and risks. |
 | [DEVLOG.md](DEVLOG.md) | The running log, newest first: what changed, why, what's next. |
 | [TESTING.md](TESTING.md) | The three test layers (unit, controller, end to end under Xvfb), the benchmarks, and how to read CI. |
@@ -46,6 +46,7 @@ anchor to the new home.
 | [D12](reading/README.md#d12-a-document-opens-where-it-is-meant-to-open-post-10-implemented) | A document opens where it is meant to open | [reading/](reading/README.md) |
 | [D13](architecture/README.md#d13-performance-regressions-are-judged-in-instructions-felt-in-milliseconds-2026-09-02) | Performance regressions are judged in instructions, felt in milliseconds | [architecture/](architecture/README.md) |
 | [D14](graph/design.md#d14-the-document-graph--a-route-spine-with-its-links-fanned-out-2026-09-18) | The document graph — a route spine with its links fanned out | [graph/design.md](graph/design.md) |
+| [D15](publish/README.md#d15-publishing--a-static-site-from-the-core-pipeline-served-behind-a-password-2026-10-28) | Publishing — a static site from the core pipeline, served behind a password | [publish/](publish/README.md) |
 
 ## Features with their own docs
 
@@ -59,6 +60,7 @@ anchor to the new home.
 | [jumplist/](jumplist/README.md) | The cross-document jumplist and back navigation | [D10](jumplist/README.md#d10-cross-document-jumplist-navigation-post-10) |
 | [obsidian/](obsidian/README.md) | The Obsidian dialect and vault resolution | [D11](obsidian/README.md#d11-obsidian-dialect--vault-resolution-post-10-implemented) |
 | [graph/](graph/README.md) | The document graph (`t`): [README](graph/README.md) (the feature), [interaction model](graph/interaction.md), [design](graph/design.md), [visual reference](graph/mockup.html) | [D14](graph/design.md#d14-the-document-graph--a-route-spine-with-its-links-fanned-out-2026-09-18) |
+| [publish/](publish/README.md) | Publishing a vault as a website (planned) | [D15](publish/README.md#d15-publishing--a-static-site-from-the-core-pipeline-served-behind-a-password-2026-10-28) |
 
 ## Research
 
