@@ -19,3 +19,4 @@ packaging/aur/*.pkg.tar.zst
 # Local performance A/B (scripts/bench-compare.sh): baseline worktree + its target dir
 /.bench-baseline/
 /target-baseline/
+deploy/cloudflare/.wrangler/
