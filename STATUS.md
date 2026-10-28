@@ -21,8 +21,9 @@ Shipped through **v1.14.0** (merman 0.9.1, `diagram-look`, worktree vaults).
 
 ## Done (recent)
 
-- **publishing (2026-10-28, 4119c73..1fe538b)** — `jumanji-publish` + password
-  Worker ([D15](docs/publish/README.md)); thesis wiki live on workers.dev.
+- **publishing (2026-10-28, 4119c73..6953998)** — `jumanji publish DIR --name N`
+  builds + deploys via wrangler, password Worker ([D15](docs/publish/README.md));
+  reviewed twice; thesis wiki live on workers.dev.
 - **v1.14.0 (2026-10-20)** — merman 0.9.1 without ELK; `diagram-look` classic
   (default, Mermaid 11 colours + sizing) | neo; a `.git` file roots a vault.
   Bench vs v1.13.0: mermaid +6 %, demo +7 % (merman 0.9; accepted).
