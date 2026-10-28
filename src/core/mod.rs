@@ -13,6 +13,7 @@ pub mod keymap;
 pub mod marks;
 pub mod obsidian;
 pub mod pipeline;
+pub mod site;
 pub mod source;
 pub mod toc;
 pub mod vault;

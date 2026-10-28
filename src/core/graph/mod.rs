@@ -63,49 +63,111 @@ pub struct Scan {
 /// `.md` / `.markdown` targets count — a directory, an image or a web page is
 /// not a node.
 pub fn scan(md: &str, source: &Path, index: &VaultIndex) -> Scan {
+    let document = references(md, source, index);
+    let dir = source.parent().unwrap_or(Path::new(""));
+    let mut links: Vec<PathBuf> = Vec::new();
+    for reference in document.references {
+        let target = match reference.link {
+            Link::Markdown { url } => markdown_target(&url, dir),
+            Link::Vault {
+                target: Target::Note { path, .. },
+                ..
+            } => Some(path),
+            Link::Image { .. } | Link::Vault { .. } => None,
+        };
+        if let Some(path) = target.map(|t| lexical(&t))
+            && is_markdown(&path)
+            && !links.contains(&path)
+        {
+            links.push(path);
+        }
+    }
+    Scan {
+        title: document.title,
+        links,
+    }
+}
+
+/// A document's title and every link it makes, in source order: what
+/// [`scan`] reads its links from, and what the site publisher walks (D15).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct References {
+    /// Frontmatter `title`, else the first `# H1`.
+    pub title: Option<String>,
+    pub references: Vec<Reference>,
+}
+
+/// One link as written, and the 1-based source line it is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    pub line: usize,
+    pub link: Link,
+}
+
+/// What a link is, with as much resolved as the vault alone can say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Link {
+    /// A markdown link `[x](url)`, its URL as written.
+    Markdown { url: String },
+    /// A markdown image `![x](url)`, its URL as written.
+    Image { url: String },
+    /// A `[[wikilink]]` or `![[embed]]`: the decoded target as written, and
+    /// what the vault index resolves it to.
+    Vault { written: String, target: Target },
+}
+
+/// Read one document's title and every link it makes, after stripping
+/// `%%comments%%` as the reader does.
+pub fn references(md: &str, source: &Path, index: &VaultIndex) -> References {
     let arena = Arena::new();
     let root = parse_document(&arena, md, &comrak_options());
     textscan::strip_comments(&arena, root);
-    let dir = source.parent().unwrap_or(Path::new(""));
-    let note = |reference: &WikiRef| match index.resolve(reference, source) {
-        Target::Note { path, .. } => Some(path),
-        _ => None,
+    let vault = |reference: WikiRef, written: String| Link::Vault {
+        target: index.resolve(&reference, source),
+        written,
     };
 
     let mut front_title = None;
     let mut h1 = None;
-    let mut links: Vec<PathBuf> = Vec::new();
+    let mut references = Vec::new();
     for node in root.descendants() {
-        let mut targets: Vec<PathBuf> = match &node.data.borrow().value {
+        let line = node.data.borrow().sourcepos.start.line;
+        let link = match &node.data.borrow().value {
             NodeValue::FrontMatter(block) => {
                 front_title = title_property(block);
-                Vec::new()
+                None
             }
             NodeValue::Heading(h) if h.level == 1 && h1.is_none() => {
                 h1 = Some(node.collect_text());
-                Vec::new()
+                None
             }
-            NodeValue::Link(link) => markdown_target(&link.url, dir).into_iter().collect(),
+            NodeValue::Link(link) => Some(Link::Markdown {
+                url: link.url.clone(),
+            }),
+            NodeValue::Image(link) => Some(Link::Image {
+                url: link.url.clone(),
+            }),
             NodeValue::WikiLink(link) => {
-                note(&obsidian::parse(&percent_decode(&link.url), RefKind::Link))
-                    .into_iter()
-                    .collect()
+                let written = percent_decode(&link.url);
+                Some(vault(obsidian::parse(&written, RefKind::Link), written))
             }
-            _ => Vec::new(),
+            _ => None,
         };
+        references.extend(link.map(|link| Reference { line, link }));
         // `![[…]]` stays literal text in the AST: the embeds a text run holds.
-        targets.extend(textscan::embeds_at(node).iter().filter_map(note));
-        for path in targets.iter().map(|t| lexical(t)) {
-            if is_markdown(&path) && !links.contains(&path) {
-                links.push(path);
+        references.extend(textscan::embeds_at(node).into_iter().map(|reference| {
+            let written = reference.note.clone().unwrap_or_default();
+            Reference {
+                line,
+                link: vault(reference, written),
             }
-        }
+        }));
     }
     let title = front_title
         .or(h1)
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-    Scan { title, links }
+    References { title, references }
 }
 
 /// The frontmatter `title`, if it is a plain non-empty value.
