@@ -130,7 +130,9 @@ ids the pipeline already emits.
 `index.html` at the root is the entry note. A topic folder's `index.md`
 becomes that folder's `index.html`, so `/cdr/` works as a URL as well. A
 `README.md` entry note is published as `README.html` (where links point) and
-copied to `index.html`.
+copied to `index.html`. Two published notes that would land on one page (`a.md` and
+`a.markdown`, or that `README.md` and an `index.markdown`) stop the publisher
+with an error naming both.
 
 ### Changes to core
 

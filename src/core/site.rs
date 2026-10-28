@@ -42,6 +42,15 @@ pub const ENTRY_NOTES: [&str; 2] = ["index.md", "README.md"];
 pub enum PlanError {
     #[error("no entry note: the folder has neither index.md nor README.md")]
     NoEntryNote,
+    /// Two published notes map to one page: `a.md` and `a.markdown`, or a
+    /// `README.md` entry note (which is also `index.html`) and an
+    /// `index.markdown`.
+    #[error("{} and {} would both be published as {}", first.display(), second.display(), page.display())]
+    SamePage {
+        first: PathBuf,
+        second: PathBuf,
+        page: PathBuf,
+    },
 }
 
 /// What [`plan`] decided: the published notes and assets, the dead links, and
@@ -175,6 +184,23 @@ pub fn plan(
             }
         }
         at += 1;
+    }
+
+    // The entry note is also the front door, whatever its own page is.
+    let mut pages: HashMap<PathBuf, &Path> =
+        HashMap::from([(PathBuf::from("index.html"), notes[0].rel.as_path())]);
+    for note in &notes {
+        let page = page_path(&note.rel);
+        match pages.insert(page.clone(), &note.rel) {
+            Some(first) if first != note.rel => {
+                return Err(PlanError::SamePage {
+                    first: first.to_path_buf(),
+                    second: note.rel.clone(),
+                    page,
+                });
+            }
+            _ => {}
+        }
     }
 
     let published: Vec<Entry> = entries
@@ -638,6 +664,43 @@ mod tests {
         assert!(site_css(840, &fonts, Path::new("index.md")).contains("url(\"fonts/"));
         assert!(css.contains("@media (min-width: 1320px)"), "{css}");
         assert!(SITE_CSS.contains(&format!("--site-toc-width: {TOC_WIDTH_PX}px;")));
+    }
+
+    #[test]
+    fn two_notes_published_as_one_page_are_an_error() {
+        let same = |files: &[(&str, &str)]| {
+            let rels: Vec<&str> = files.iter().map(|(rel, _)| *rel).collect();
+            let read = |path: &Path| {
+                files
+                    .iter()
+                    .find(|(rel, _)| Path::new(ROOT).join(rel) == path)
+                    .map(|(_, md)| md.to_string())
+            };
+            plan(Path::new(ROOT), entries(&rels), read).unwrap_err()
+        };
+        assert_eq!(
+            same(&[
+                ("index.md", "[a](a.md) [b](a.markdown)\n"),
+                ("a.md", ""),
+                ("a.markdown", "")
+            ]),
+            PlanError::SamePage {
+                first: PathBuf::from("a.md"),
+                second: PathBuf::from("a.markdown"),
+                page: PathBuf::from("a.html"),
+            }
+        );
+        assert_eq!(
+            same(&[
+                ("README.md", "[i](index.markdown)\n"),
+                ("index.markdown", "")
+            ]),
+            PlanError::SamePage {
+                first: PathBuf::from("README.md"),
+                second: PathBuf::from("index.markdown"),
+                page: PathBuf::from("index.html"),
+            }
+        );
     }
 
     #[test]
