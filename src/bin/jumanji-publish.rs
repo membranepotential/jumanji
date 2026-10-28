@@ -19,7 +19,7 @@ use rayon::prelude::*;
 
 use jumanji::core::config::{self, Config};
 use jumanji::core::pipeline::{self, LinkStyle, Options, page_path};
-use jumanji::core::site::{self, Dead, FACES, FontFace, FontWeight, SitePlan};
+use jumanji::core::site::{self, Dead, DeadLink, FACES, FontFace, FontWeight, SitePlan};
 use jumanji::core::vault::{self, Vault};
 
 /// Marks a directory as this tool's output, so it may be replaced.
@@ -84,15 +84,15 @@ fn run(cli: &Cli) -> Result<()> {
     let staging = sibling(&out, "new");
     remove_dir(&staging)?;
     fs::create_dir(&staging)?;
-    let fonts = match build(&plan, &sources, &config, config_dir.as_deref(), &staging) {
-        Ok(fonts) => fonts,
+    let built = match build(&plan, &sources, &config, config_dir.as_deref(), &staging) {
+        Ok(built) => built,
         Err(err) => {
             let _ = fs::remove_dir_all(&staging);
             return Err(err);
         }
     };
     swap(&staging, &out)?;
-    report(&plan, fonts, &out);
+    report(&plan, &built, &out);
     Ok(())
 }
 
@@ -123,14 +123,21 @@ fn check_output(out: &Path, root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Write the whole site into `dir`; return the bundled fonts.
+/// What [`build`] wrote besides the pages, for the report.
+struct Built {
+    fonts: Vec<FontFace>,
+    /// The URLs the pages' scrub removed, page by page.
+    dead: Vec<DeadLink>,
+}
+
+/// Write the whole site into `dir`.
 fn build(
     plan: &SitePlan,
     sources: &HashMap<PathBuf, String>,
     config: &Config,
     config_dir: Option<&Path>,
     dir: &Path,
-) -> Result<Vec<FontFace>> {
+) -> Result<Built> {
     let fonts = bundle_fonts(&config.options, dir)?;
     let options = Options {
         links: LinkStyle::Site {
@@ -140,10 +147,11 @@ fn build(
     };
     let themes = config::load_themes(config_dir);
 
-    plan.notes
+    let pages: Vec<Vec<DeadLink>> = plan
+        .notes
         .par_iter()
         .enumerate()
-        .try_for_each(|(at, note)| -> Result<()> {
+        .map(|(at, note)| -> Result<Vec<DeadLink>> {
             let source = plan.root.join(&note.rel);
             let md = sources.get(&source).map_or("", String::as_str);
             // The site's own CSS goes before the user's themes, so a theme
@@ -159,8 +167,11 @@ fn build(
                 ..options.clone()
             };
             let doc = pipeline::render(md, &options, &Vault::new(plan.index.clone(), &source));
-            write(&dir.join(page_path(&note.rel)), site::page(plan, at, &doc))
-        })?;
+            let page = site::page(plan, at, &doc);
+            write(&dir.join(page_path(&note.rel)), page.html)?;
+            Ok(page.dead)
+        })
+        .collect::<Result<_>>()?;
 
     // A `README.md` entry note is also the site's front door.
     let entry = page_path(&plan.notes[0].rel);
@@ -178,7 +189,10 @@ fn build(
         &dir.join(ASSETS_IGNORE),
         format!("{MARKER}\n{ASSETS_IGNORE}\n"),
     )?;
-    Ok(fonts)
+    Ok(Built {
+        fonts,
+        dead: pages.into_iter().flatten().collect(),
+    })
 }
 
 /// Copy the configured body, code and interface fonts into the site: the
@@ -418,13 +432,15 @@ fn write(path: &Path, contents: String) -> Result<()> {
 }
 
 /// Print every dead link and a summary on stdout.
-fn report(plan: &SitePlan, fonts: Vec<FontFace>, out: &Path) {
-    if !plan.dead.is_empty() {
-        println!("dead links ({}):", plan.dead.len());
-        for dead in &plan.dead {
+fn report(plan: &SitePlan, built: &Built, out: &Path) {
+    let dead: Vec<&DeadLink> = plan.dead.iter().chain(&built.dead).collect();
+    if !dead.is_empty() {
+        println!("dead links ({}):", dead.len());
+        for dead in dead {
             let why = match dead.reason {
                 Dead::Outside => "outside the vault",
                 Dead::NotFound => "not in the vault",
+                Dead::Unpublished => "raw HTML or a diagram naming no published file",
             };
             println!(
                 "  {}:{}: {} ({why})",
@@ -438,7 +454,7 @@ fn report(plan: &SitePlan, fonts: Vec<FontFace>, out: &Path) {
         "published {} notes, {} assets and {} font files ({:.1} MB) to {}",
         plan.notes.len(),
         plan.assets.len(),
-        fonts.len(),
+        built.fonts.len(),
         size(out) as f64 / 1_000_000.0,
         out.display()
     );

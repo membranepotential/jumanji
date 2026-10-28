@@ -304,6 +304,19 @@ What the build settled that the plan above left open:
   - Backlinks: "Linked from" at the end of the column; not on the entry page,
     which nearly every note links back to.
 - **An image of a note** (`![x](a.md)`) counts as a link to the note.
+- **Raw HTML and diagrams** (2026-10-28, review fix). A note's own `<a href>`
+  / `<img src>`, an HTML comment, or a URL inside generated HTML (merman's
+  SVG) is not a markdown node, so neither the walk nor the markdown-link pass
+  sees it. `sitelink::scrub`, called by `site::page`, runs over every page's
+  content after rendering and enforces the invariant for every URL attribute
+  (`href`, `src`, `srcset`, `xlink:href`, `poster`, `data`, `action`,
+  `formaction`, `cite`, `background`): a web URL, a fragment, or a relative
+  URL to a file the site serves. Any other attribute is removed and reported
+  with the nearest source line ("raw HTML or a diagram naming no published
+  file"), and `<!-- … -->` comments are removed. Raw HTML does not publish
+  anything: a raw `<img>` works when a markdown link or embed publishes the
+  same file, and is reported dead otherwise. Not covered: CSS `url()` inside
+  a raw `<style>` or `style` attribute.
 - **Page weight.** Each page is self-contained, as in the reader, so a page
   with math carries the math stylesheet and its base64 fonts (about 0.7 MB).
   The thesis wiki publishes to about 23 MB: 15 MB of pages, 5.2 MB of

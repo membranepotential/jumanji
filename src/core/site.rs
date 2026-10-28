@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use super::graph::{self, Link};
 use super::highlight::escape_html;
 use super::obsidian;
-use super::pipeline::{LinkStyle, MAIN_CLOSE, MAIN_OPEN, css_font_family};
+use super::pipeline::{LinkStyle, MAIN_CLOSE, MAIN_OPEN, css_font_family, page_path};
 use super::sitelink::{self, Url};
 use super::vault::{self, Entry, Target, VaultIndex};
 use super::{Heading, RenderedDocument};
@@ -94,6 +94,10 @@ pub enum Dead {
     Outside,
     /// No note or attachment in the vault answers to it.
     NotFound,
+    /// A URL in raw HTML or in a diagram that names no published file. Only
+    /// markdown links, images and `[[…]]` publish a file; raw HTML is checked
+    /// after rendering, so it can use what they publish but adds nothing.
+    Unpublished,
 }
 
 /// Walk the links from the entry note of the vault at `root` (absolute) and
@@ -259,19 +263,74 @@ pub fn site_css(page_width_px: u32, fonts: &[FontFace], note: &Path) -> String {
     )
 }
 
-/// The published page for note `at`: its rendering `doc` with the site's
-/// navigation spliced in around the content — the TOC sidebar before it, the
-/// breadcrumb at its top, the backlinks at its end.
-pub fn page(plan: &SitePlan, at: usize, doc: &RenderedDocument) -> String {
-    let mut html = doc.html.replacen(
-        MAIN_OPEN,
-        &format!("{}{MAIN_OPEN}{}", toc(&doc.toc), crumbs(plan, at)),
-        1,
-    );
-    if let Some(end) = html.rfind(MAIN_CLOSE) {
-        html.insert_str(end, &backlinks(plan, at));
+/// One published page, and the URLs that had to come out of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page {
+    pub html: String,
+    /// What [`sitelink::scrub`] removed: URLs in raw HTML or diagrams that
+    /// name nothing the site serves. The markdown-level dead links are in
+    /// [`SitePlan::dead`] already.
+    pub dead: Vec<DeadLink>,
+}
+
+/// The published page for note `at`: its rendering `doc`, its content
+/// scrubbed of every URL the site does not serve and of HTML comments
+/// ([`sitelink::scrub`]), with the site's navigation spliced in around the
+/// content — the TOC sidebar before it, the breadcrumb at its top, the
+/// backlinks at its end.
+pub fn page(plan: &SitePlan, at: usize, doc: &RenderedDocument) -> Page {
+    let note = &plan.notes[at];
+    let scrub = |html: &str| {
+        sitelink::scrub(html, &plan.root.join(&note.rel), &plan.root, |rel| {
+            plan.find(rel)
+        })
+    };
+    let anchors = doc.html.find(MAIN_OPEN).zip(doc.html.rfind(MAIN_CLOSE));
+    let (html, removed) = match anchors {
+        Some((open, end)) if open < end => {
+            let (content, removed) = scrub(&doc.html[open + MAIN_OPEN.len()..end]);
+            let html = format!(
+                "{head}{toc}{MAIN_OPEN}{crumbs}{content}{backlinks}{tail}",
+                head = &doc.html[..open],
+                toc = toc(&doc.toc),
+                crumbs = crumbs(plan, at),
+                backlinks = backlinks(plan, at),
+                tail = &doc.html[end..],
+            );
+            (html, removed)
+        }
+        // Not a pipeline rendering: nowhere to put the navigation, but the
+        // URL invariant still holds.
+        _ => scrub(&doc.html),
+    };
+    let dead = removed
+        .into_iter()
+        .map(|r| DeadLink {
+            source: note.rel.clone(),
+            line: r.line,
+            written: r.url,
+            reason: if r.outside {
+                Dead::Outside
+            } else {
+                Dead::Unpublished
+            },
+        })
+        .collect();
+    Page { html, dead }
+}
+
+impl SitePlan {
+    /// The published file at vault-relative `rel`, as an absolute path: a
+    /// page the site writes (`a.html`, the front door `index.html`), a
+    /// published note's source, or a published asset.
+    fn find(&self, rel: &Path) -> Option<PathBuf> {
+        let page =
+            rel == Path::new("index.html") || self.notes.iter().any(|n| page_path(&n.rel) == rel);
+        if page || self.assets.iter().any(|a| a == rel) {
+            return Some(self.root.join(rel));
+        }
+        self.index.file(rel).map(Path::to_path_buf)
     }
-    html
 }
 
 /// The href from note `from` to note `to` (both indices into the plan).
@@ -531,7 +590,7 @@ mod tests {
             html: format!("<body>\n{MAIN_OPEN}<h1>N</h1>\n{MAIN_CLOSE}</body>\n"),
             toc: vec![heading(1, "N"), heading(2, "Part")],
         };
-        let html = page(&plan, at(&plan, "topic/n.md"), &doc);
+        let html = page(&plan, at(&plan, "topic/n.md"), &doc).html;
         let order = [
             "site-toc",
             MAIN_OPEN,

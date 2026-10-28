@@ -183,12 +183,15 @@ fn only_what_the_entry_note_reaches_is_published() {
     tmp.write(
         "wiki/index.md",
         "# Wiki\n\n[Topic](topic/index.md) and [[Lone Note]].\n\n\
-         The [paper](../papers/A%20B.pdf) lives outside.\n",
+         The [paper](../papers/A%20B.pdf) lives outside.\n\n\
+         <a href=\"draft.md\">raw</a> <img src=\"secret.png\" alt=\"s\"> \
+         <img src=\"file:///etc/passwd\"> <img src=\"topic/fig%201.svg\" alt=\"ok\">\n\n\
+         <!-- hush: an aside for the author -->\n",
     );
     tmp.write(
         "wiki/topic/index.md",
         "# Topic\n\n![fig](fig%201.svg) [home](../index.md#wiki) $e^{i\\pi}=-1$\n\n\
-         ```mermaid\nflowchart TD\nA --> B\n```\n\n## Part\n\n[see part](#part)\n",
+         ```mermaid\nflowchart TD\nA --> B\nclick A \"../draft.md\"\n```\n\n## Part\n\n[see part](#part)\n",
     );
     tmp.write(
         "wiki/topic/fig 1.svg",
@@ -199,6 +202,7 @@ fn only_what_the_entry_note_reaches_is_published() {
         "Back to [the topic](topic/index.md#part).\n",
     );
     tmp.write("wiki/CLAUDE.md", "[home](index.md) ![x](secret.png)\n");
+    tmp.write("wiki/draft.md", "# Draft\n");
     tmp.write("wiki/secret.png", "png");
     tmp.write("papers/A B.pdf", "%PDF");
     let out = tmp.0.join("site");
@@ -231,6 +235,26 @@ fn only_what_the_entry_note_reaches_is_published() {
         "{stdout}"
     );
     assert!(stdout.contains("published 3 notes, 1 assets"), "{stdout}");
+    for raw in [
+        "index.md:7: draft.md",
+        "index.md:7: secret.png",
+        "index.md:7: file:///etc/passwd",
+    ] {
+        assert!(stdout.contains(raw), "{raw} not reported: {stdout}");
+    }
+
+    // Nothing unpublished is named anywhere, and no comment survives.
+    for page in files(&out)
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "html"))
+    {
+        let html = fs::read_to_string(out.join(page)).unwrap();
+        for leak in [
+            "draft", "secret", "CLAUDE", "passwd", "papers", "<!--", "hush",
+        ] {
+            assert!(!html.contains(leak), "{} names {leak}", page.display());
+        }
+    }
 
     let topic = fs::read_to_string(out.join("topic/index.html")).unwrap();
     assert!(topic.contains("<math"), "math renders");
