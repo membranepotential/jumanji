@@ -77,8 +77,8 @@ pub enum Io {
     /// Wrangler owns the terminal: it may prompt, open a browser, ask for a
     /// password without echoing it.
     Interactive,
-    /// Nothing in, nothing shown; only the exit status counts.
-    Silent,
+    /// Nothing in; standard output and errors are read, nothing is shown.
+    Captured,
     /// Nothing in; standard output is read, errors still reach the terminal.
     Stdout,
 }
@@ -87,6 +87,8 @@ pub enum Io {
 /// directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
+    /// The step, as error messages name it (`wrangler secret list`).
+    pub step: &'static str,
     pub args: Vec<OsString>,
     /// An environment variable to set for this run.
     pub env: Option<(&'static str, PathBuf)>,
@@ -94,8 +96,9 @@ pub struct Invocation {
 }
 
 impl Invocation {
-    fn new(args: &[&str], io: Io) -> Self {
+    fn new(step: &'static str, args: &[&str], io: Io) -> Self {
         Self {
+            step,
             args: args.iter().map(OsString::from).collect(),
             env: None,
             io,
@@ -103,21 +106,51 @@ impl Invocation {
     }
 }
 
-/// `whoami --json`: exits with a non-zero status when not logged in, and
-/// never starts a login itself.
+/// `whoami --json`. It never starts a login itself.
 pub fn whoami() -> Invocation {
-    Invocation::new(&["whoami", "--json"], Io::Silent)
+    Invocation::new("wrangler whoami", &["whoami", "--json"], Io::Captured)
 }
 
-/// What to run before building, given whether `whoami` succeeded: nothing,
-/// or a login. Without a graphical session (over ssh) the login uses the
-/// device flow, since a browser elsewhere cannot reach wrangler's callback
-/// on `localhost`.
-pub fn login(logged_in: bool, graphical: bool) -> Option<Invocation> {
-    match (logged_in, graphical) {
-        (true, _) => None,
-        (false, true) => Some(Invocation::new(&["login"], Io::Interactive)),
-        (false, false) => Some(Invocation::new(&["login", "--device"], Io::Interactive)),
+/// Whether wrangler is logged in to Cloudflare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Session {
+    LoggedIn,
+    LoggedOut,
+}
+
+/// What `whoami --json` said, from its success and its standard output.
+/// Logged out, it prints `{"loggedIn":false}` and fails; any other failure
+/// (offline, pnpm unable to fetch wrangler) is `None`: no answer.
+pub fn session(succeeded: bool, stdout: &str) -> Option<Session> {
+    #[derive(Deserialize)]
+    struct WhoAmI {
+        #[serde(rename = "loggedIn")]
+        logged_in: bool,
+    }
+    if succeeded {
+        return Some(Session::LoggedIn);
+    }
+    let logged_out =
+        |text: &str| serde_json::from_str::<WhoAmI>(text.trim()).is_ok_and(|w| !w.logged_in);
+    (logged_out(stdout) || stdout.lines().any(logged_out)).then_some(Session::LoggedOut)
+}
+
+/// What to run before building: nothing, or a login. Without a graphical
+/// session (over ssh) the login uses the device flow, since a browser
+/// elsewhere cannot reach wrangler's callback on `localhost`.
+pub fn login(session: Session, graphical: bool) -> Option<Invocation> {
+    match (session, graphical) {
+        (Session::LoggedIn, _) => None,
+        (Session::LoggedOut, true) => Some(Invocation::new(
+            "wrangler login",
+            &["login"],
+            Io::Interactive,
+        )),
+        (Session::LoggedOut, false) => Some(Invocation::new(
+            "wrangler login",
+            &["login", "--device"],
+            Io::Interactive,
+        )),
     }
 }
 
@@ -126,6 +159,7 @@ pub fn login(logged_in: bool, graphical: bool) -> Option<Invocation> {
 /// first deploy may ask to register a `workers.dev` subdomain.
 pub fn deploy(dir: &Path) -> Invocation {
     Invocation {
+        step: "wrangler deploy",
         args: vec![
             "deploy".into(),
             "--config".into(),
@@ -140,31 +174,32 @@ pub fn deploy(dir: &Path) -> Invocation {
 /// Worker exists and a failure is a real one, not a new Worker.
 pub fn list_secrets(name: &WorkerName) -> Invocation {
     Invocation::new(
+        "wrangler secret list",
         &["secret", "list", "--name", &name.0, "--format", "json"],
         Io::Stdout,
     )
 }
 
-/// What to run after the deploy, given `secret list`'s output: nothing, or
-/// `secret put`, whose own hidden prompt asks the user for the password.
-/// jumanji never sees it.
-pub fn put_password(
-    name: &WorkerName,
-    password: Password,
-    secrets: &str,
-) -> Result<Option<Invocation>, serde_json::Error> {
+/// Whether `secret list`'s output names the password secret.
+pub fn has_password(secrets: &str) -> Result<bool, serde_json::Error> {
     #[derive(Deserialize)]
     struct Secret {
         name: String,
     }
     let secrets: Vec<Secret> = serde_json::from_str(secrets)?;
-    let set = secrets.iter().any(|s| s.name == SECRET);
-    Ok((password == Password::Replace || !set).then(|| {
+    Ok(secrets.iter().any(|s| s.name == SECRET))
+}
+
+/// What to run after the deploy: nothing, or `secret put`, whose own hidden
+/// prompt asks the user for the password. jumanji never sees it.
+pub fn put_password(name: &WorkerName, password: Password, has: bool) -> Option<Invocation> {
+    (password == Password::Replace || !has).then(|| {
         Invocation::new(
+            "wrangler secret put",
             &["secret", "put", SECRET, "--name", &name.0],
             Io::Interactive,
         )
-    }))
+    })
 }
 
 /// The wrangler configuration: the script in front of the site in `site`
@@ -249,13 +284,25 @@ mod tests {
     }
 
     #[test]
-    fn login_runs_only_when_whoami_failed() {
-        assert_eq!(login(true, true), None);
-        assert_eq!(args(&login(false, true).unwrap()), ["login"]);
-        let remote = login(false, false).unwrap();
+    fn whoami_tells_logged_out_from_failed() {
+        assert_eq!(session(true, "{}"), Some(Session::LoggedIn));
+        assert_eq!(
+            session(false, "{\"loggedIn\":false}\n"),
+            Some(Session::LoggedOut)
+        );
+        // Offline, or pnpm cannot fetch wrangler: no answer, no login.
+        assert_eq!(session(false, ""), None);
+        assert_eq!(session(false, "ERR_PNPM_FETCH_404"), None);
+        assert_eq!(whoami().io, Io::Captured);
+    }
+
+    #[test]
+    fn login_runs_only_when_logged_out() {
+        assert_eq!(login(Session::LoggedIn, true), None);
+        assert_eq!(args(&login(Session::LoggedOut, true).unwrap()), ["login"]);
+        let remote = login(Session::LoggedOut, false).unwrap();
         assert_eq!(args(&remote), ["login", "--device"]);
         assert_eq!(remote.io, Io::Interactive);
-        assert_eq!(whoami().io, Io::Silent);
     }
 
     #[test]
@@ -275,23 +322,18 @@ mod tests {
     #[test]
     fn the_password_is_asked_on_the_first_deploy_or_on_request() {
         let wiki = name("wiki");
-        let none = "[]";
-        let set = r#"[{"name": "SITE_PASSWORD", "type": "secret_text"}]"#;
-        let put = put_password(&wiki, Password::KeepIfSet, none)
-            .unwrap()
-            .unwrap();
+        assert!(!has_password("[]").unwrap());
+        assert!(has_password(r#"[{"name": "SITE_PASSWORD", "type": "secret_text"}]"#).unwrap());
+        assert!(has_password("not json").is_err());
+        let put = put_password(&wiki, Password::KeepIfSet, false).unwrap();
         assert_eq!(
             args(&put),
             ["secret", "put", "SITE_PASSWORD", "--name", "wiki"]
         );
         assert_eq!(put.io, Io::Interactive);
-        assert_eq!(put_password(&wiki, Password::KeepIfSet, set).unwrap(), None);
-        assert!(
-            put_password(&wiki, Password::Replace, set)
-                .unwrap()
-                .is_some()
-        );
-        assert!(put_password(&wiki, Password::KeepIfSet, "not json").is_err());
+        assert_eq!(put.step, "wrangler secret put");
+        assert_eq!(put_password(&wiki, Password::KeepIfSet, true), None);
+        assert!(put_password(&wiki, Password::Replace, true).is_some());
         assert_eq!(
             args(&list_secrets(&wiki)),
             ["secret", "list", "--name", "wiki", "--format", "json"]

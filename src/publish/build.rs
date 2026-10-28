@@ -32,11 +32,7 @@ const FONTS_DIR: &str = "fonts";
 /// Build the site for the vault at `vault` into `out`, replacing an earlier
 /// build there. What was published, for the report.
 pub fn site(vault: &Path, out: &Path) -> Result<Report> {
-    let root = vault
-        .canonicalize()
-        .with_context(|| format!("cannot open the vault {}", vault.display()))?;
-    let out = real_path(out)?;
-    check_output(&out, &root)?;
+    let (root, out) = check(vault, out)?;
 
     let config_dir = config::xdg_config_dir();
     let config = Config::load(config_dir.as_deref()).unwrap_or_else(|err| {
@@ -76,6 +72,17 @@ pub fn site(vault: &Path, out: &Path) -> Result<Report> {
         bytes: size(&out),
         out,
     })
+}
+
+/// Check that the vault opens and that a build may replace `out`; the
+/// canonical vault root and the real output path.
+pub fn check(vault: &Path, out: &Path) -> Result<(PathBuf, PathBuf)> {
+    let root = vault
+        .canonicalize()
+        .with_context(|| format!("cannot open the vault {}", vault.display()))?;
+    let out = real_path(out)?;
+    check_output(&out, &root)?;
+    Ok((root, out))
 }
 
 /// Where `path` really is: absolute, every `..` and symlink of its existing

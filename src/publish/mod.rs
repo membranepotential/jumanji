@@ -73,7 +73,7 @@ pub fn run(args: &Args) -> ExitCode {
 fn publish(args: &Args) -> Result<()> {
     let (name, out) = match (&args.name, &args.out) {
         (Some(name), Some(out)) => (name, out.clone()),
-        (Some(name), None) => (name, cache_dir()?.join(name.to_string())),
+        (Some(name), None) => (name, cache_dir()?.join("sites").join(name.to_string())),
         (None, Some(out)) => {
             build::site(&args.vault, out)?.print();
             return Ok(());
@@ -85,16 +85,21 @@ fn publish(args: &Args) -> Result<()> {
     } else {
         Password::KeepIfSet
     };
+    let retry = format!(
+        "jumanji publish {} --name {name} --password",
+        args.vault.display()
+    );
 
-    // Log in before the build, so a missing pnpm or a login surfaces before
-    // the wait, not after it.
-    let deploy = deploy::Deploy::prepare(name, &out)?;
+    // Check the paths and log in before the build, so a bad `--out`, a
+    // missing pnpm or a login surfaces before the wait, not after it.
+    build::check(&args.vault, &out)?;
+    let deploy = deploy::Deploy::prepare(name, &out, &cache_dir()?.join("deploy"))?;
     deploy.log_in()?;
     let report = build::site(&args.vault, &out)?;
     // The site goes up before the password: with no password set, the
     // Worker lets nobody in, so nothing is exposed in between.
     let url = deploy.deploy()?;
-    deploy.set_password(password, url.as_deref())?;
+    deploy.set_password(password, url.as_deref(), &retry)?;
     report.print();
     match url {
         Some(url) => println!("the site is at {url}"),
@@ -103,12 +108,13 @@ fn publish(args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// `$XDG_CACHE_HOME/jumanji/sites` (or `$HOME/.cache/jumanji/sites`).
+/// `$XDG_CACHE_HOME/jumanji` (or `$HOME/.cache/jumanji`): the built sites
+/// (`sites/NAME`) and the deploys' working directories (`deploy/`).
 fn cache_dir() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .context("no cache directory (neither XDG_CACHE_HOME nor HOME is set); pass --out")?;
-    Ok(base.join("jumanji").join("sites"))
+        .context("no cache directory (neither XDG_CACHE_HOME nor HOME is set)")?;
+    Ok(base.join("jumanji"))
 }
