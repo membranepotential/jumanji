@@ -2,7 +2,20 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-10-28 (latest) — `jumanji publish`: build and deploy in one command
+## 2026-10-28 (latest) — `jumanji publish` review fixes
+
+An independent review found the deploy directory guessable and shared:
+`$TMPDIR/jumanji-deploy-<pid>` was reused if it existed, and pnpm and
+wrangler search its parent directories. It now lives in
+`$XDG_CACHE_HOME/jumanji/deploy/`, mode 0700, created exclusively; the next
+deploy removes directories left by interrupted runs. Also: errors name the
+failed step and, after the upload, say whether the site is locked; a
+`whoami` that fails without saying "logged out" is an error, not a login;
+a bad `--out` fails before the login. The fake-pnpm tests now run with
+PATH holding only the fake, after a probe proves it is found, and cover a
+failed deploy, a failed `secret list`, `--password` and a broken `whoami`.
+
+## 2026-10-28 — `jumanji publish`: build and deploy in one command
 
 `jumanji-publish` and `scripts/publish-site.sh` are now one subcommand,
 `jumanji publish DIR --name NAME` (deploy) or `--out SITE` (build only).
@@ -12,7 +25,7 @@ reader's argument parsing is unchanged (unit-tested), and the thesis wiki
 builds byte-identical to the old binary.
 
 The deploy runs wrangler through `pnpm --silent dlx wrangler@4.151.3` in a
-fresh temp directory with the embedded `worker.js` and a generated config.
+directory of its own with the embedded `worker.js` and a generated config.
 Login is checked with `whoami --json`; the site goes up, then
 `secret list` decides whether wrangler's own prompt asks for the password
 (first deploy, or `--password`). The URL comes from wrangler's

@@ -366,25 +366,46 @@ What the build settled that the plan above left open:
     `deploy/cloudflare/worker.js` (`include_str!`) and generates the wrangler
     config: name, `main`, compatibility date 2026-10-20, `workers_dev`, and
     `assets` with the absolute site directory, the `ASSETS` binding and
-    `run_worker_first`. Both go into a fresh temporary directory per deploy,
-    where every wrangler run happens (`deploy --config`), so a stray
-    wrangler config in the caller's directory cannot interfere.
+    `run_worker_first`. Both go into a directory of the deploy's own, where
+    every wrangler run happens (`deploy --config`), so a stray wrangler
+    config in the caller's directory cannot interfere.
+  - *The deploy directory* is `$XDG_CACHE_HOME/jumanji/deploy/<pid>-<ns>`
+    (`~/.cache/…` without it), not under the shared `/tmp`. There, another
+    local user could create the guessable directory first and swap
+    `worker.js` or plant `output.ndjson`, and pnpm and wrangler search the
+    parent directories (a `/tmp/pnpm-workspace.yaml` redirected the
+    registry in the review). Every directory from the cache up belongs to
+    the user or root. `deploy/` is kept at mode 0700; each run's directory
+    is created mode 0700 and exclusively, so an existing one is an error.
+    Ctrl-C at a wrangler prompt kills the whole process group, so the
+    run's own cleanup does not happen; the next deploy removes every
+    directory whose pid no longer runs (`/proc/<pid>`). The built site
+    (`sites/NAME` or `--out`) and wrangler's output file live in the user's
+    own directories too.
     `worker.js` and `worker.test.mjs` stay the source; the static
     `wrangler.jsonc` is gone.
   - *The sequence.* `whoami --json` (wrangler: "Exits with a non-zero
-    status if not authenticated"; it never starts a login itself) →
-    `login` if that failed, `login --device` when neither `DISPLAY` nor
+    status if not authenticated"; it never starts a login itself; logged
+    out, it prints `{"loggedIn":false}`) → `login` if it said so,
+    `login --device` when neither `DISPLAY` nor
     `WAYLAND_DISPLAY` is set, since a browser elsewhere cannot reach
     wrangler's callback on `localhost` → the build → `deploy` →
     `secret list --name NAME --format json` (a JSON array of `{name,
     type}`) → `secret put SITE_PASSWORD --name NAME` when that list lacks
-    `SITE_PASSWORD` or `--password` was given. Login comes before the build,
-    so a missing pnpm or a login surfaces before the wait. The secret is
+    `SITE_PASSWORD` or `--password` was given. A `whoami` that fails
+    without that answer (offline, pnpm unable to fetch wrangler) is an
+    error showing wrangler's message, not a login. The `--out` check and
+    the login come before the build, so a bad output directory, a missing
+    pnpm or a login surfaces before the wait. The secret is
     listed after the deploy, so the Worker exists and a failure is a real
     one, never a new Worker mistaken for one without a password; the site
     goes up before the password, which exposes nothing, as the Worker fails
     closed. The login, the deploy and `secret put` inherit the terminal, so
     wrangler's own prompts work; jumanji never sees the password.
+  - *Errors* name the failed step (`wrangler secret list failed (…)`). One
+    after the upload says where the site stands: deployed but locked (no
+    password set), or its old password still holds, or, when listing the
+    secrets failed, unknown; each with the command that sets the password.
   - *The URL.* `deploy` runs with `WRANGLER_OUTPUT_FILE_PATH` set; wrangler
     appends one JSON object per line there, and its `deploy` entry lists the
     `targets`, among them `https://NAME.<subdomain>.workers.dev`. Parsing
@@ -393,9 +414,12 @@ What the build settled that the plan above left open:
     output instead.
   - *Pure and tested.* `publish::wrangler` describes every run as data
     (arguments, environment, how it meets the terminal) and decides login
-    and password from the facts; `publish::deploy` runs it. An integration
-    test drives the whole sequence against a fake `pnpm`; no test touches
-    the network.
+    and password from the facts; `publish::deploy` runs it. Integration
+    tests drive the sequence against a fake `pnpm`: first deploy,
+    re-deploy, `--password`, logged out, a broken `whoami`, a failed deploy
+    and a failed `secret list`. PATH holds only the fake's directory, and a
+    probe run checks the fake is what gets found, so no test can reach a
+    real wrangler or the network.
   - The thesis wiki went live before this, as the Worker `jumanji-site`
     (the old config's name). `--name jumanji-site` keeps its URL and its
     password; another name makes a second site.
