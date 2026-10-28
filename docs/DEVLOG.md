@@ -2,7 +2,28 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-10-28 (latest) — `font-ui`: the site bundles the interface font
+## 2026-10-28 (latest) — publish review fixes
+
+An independent review of the publisher (2dabd82..3683b93) found, and
+reproduced, five problems; each is fixed in its own commit:
+
+- **Raw HTML leaked** unpublished names, `file:` URLs and comments into the
+  pages. `sitelink::scrub` now runs over every page's content and keeps only
+  web URLs, fragments and URLs to files the site serves, in every URL
+  attribute; comments go. Removed URLs are reported.
+- **Variable fonts** raced when one file served several faces: fixed with
+  `font-ui` (one file, one `@font-face` with a weight range).
+- **The output guard** compared a non-canonical output path with the
+  canonical vault: `real_path` resolves `..` and symlinks first.
+- **Themes on a site** now follow the colour scheme the way they follow
+  `.dark` in the reader: `.dark` is rewritten to `:root` (same element, same
+  specificity) under the dark media query, for the built-in blocks too.
+- **Two notes on one page** (`a.md` + `a.markdown`) are a `PlanError`.
+
+Nits: dead wikilinks show no target on a site, staging is removed on a
+failed swap. D15's "As built" says all of this.
+
+## 2026-10-28 — `font-ui`: the site bundles the interface font
 
 Screenshots of the reader and the site matched except in the interface font:
 everything set in `system-ui` (headings, callout titles, table heads, the
