@@ -2,7 +2,8 @@
 //! the navigation around each page.
 //!
 //! Pure. [`plan`] reads notes only through the closure it is given, as
-//! `graph::build` does, so the whole selection is tested over a map; the
+//! `graph::build` does, so the whole selection is tested over a map; [`page`]
+//! and [`site_css`] dress a rendered note in the site's navigation; the
 //! `jumanji-publish` binary is the imperative shell that reads, renders and
 //! writes.
 //!
@@ -18,8 +19,19 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use super::graph::{self, Link};
+use super::highlight::escape_html;
+use super::obsidian;
+use super::pipeline::{LinkStyle, MAIN_CLOSE, MAIN_OPEN, css_font_family};
 use super::sitelink::{self, Url};
 use super::vault::{self, Entry, Target, VaultIndex};
+use super::{Heading, RenderedDocument};
+
+/// The navigation's stylesheet; [`site_css`] adds what must be generated.
+const SITE_CSS: &str = include_str!("assets/site.css");
+
+/// The TOC sidebar's width in px: `--site-toc-width` in `site.css`, which a
+/// test keeps equal.
+const TOC_WIDTH_PX: u32 = 240;
 
 /// The entry note's possible names, in precedence order. It is published as
 /// the site's `index.html`.
@@ -36,6 +48,8 @@ pub enum PlanError {
 /// the index the pages are rendered against.
 #[derive(Debug, Clone)]
 pub struct SitePlan {
+    /// The vault root, absolute: the top of the site.
+    pub root: PathBuf,
     /// The published notes in walk order; the entry note is first.
     pub notes: Vec<Note>,
     /// The published assets, vault-relative, sorted.
@@ -164,11 +178,180 @@ pub fn plan(
         .filter(|e| placed.contains_key(&e.rel_path) || assets.contains(&e.rel_path))
         .collect();
     Ok(SitePlan {
+        root: root.to_path_buf(),
         notes,
         assets: assets.into_iter().collect(),
         dead,
         index: VaultIndex::build(root.to_path_buf(), published),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Pages
+// ---------------------------------------------------------------------------
+
+/// A font file the site bundles, declared with `@font-face` so a viewer sees
+/// the configured fonts without having them installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontFace {
+    /// The family name the configuration uses (`font-body` / `font-mono`).
+    pub family: String,
+    /// CSS weight, 100–900.
+    pub weight: u16,
+    pub italic: bool,
+    /// Where the file lies in the site, relative to its root.
+    pub path: PathBuf,
+}
+
+/// The faces the stylesheet asks of each configured family, as (CSS weight,
+/// italic): regular, italic, bold and bold italic. `strong` is 680, which
+/// the browser matches to the 700 face, as fontconfig does for the reader.
+pub const FACES: [(u16, bool); 4] = [(400, false), (400, true), (700, false), (700, true)];
+
+/// The CSS a site page adds after the pipeline's own: an `@font-face` per
+/// bundled font, the navigation's stylesheet, and the media query that shows
+/// the TOC sidebar. The sidebar needs the margin beside the reading column,
+/// so it appears only once the window is the column plus two sidebar widths;
+/// from there on, wide blocks keep the sidebar's width from both window
+/// edges, which is their gutter mechanism working unchanged (style.css D5a).
+///
+/// `note` is the page's vault-relative path: font URLs are relative to it.
+pub fn site_css(page_width_px: u32, fonts: &[FontFace], note: &Path) -> String {
+    let to_root = "../".repeat(note.components().count().saturating_sub(1));
+    let faces: String = fonts
+        .iter()
+        .map(|face| {
+            let format = match face.path.extension().and_then(|e| e.to_str()) {
+                Some("woff2") => " format(\"woff2\")",
+                Some("otf") => " format(\"opentype\")",
+                Some("ttf") => " format(\"truetype\")",
+                _ => "",
+            };
+            format!(
+                "@font-face {{ font-family: {family}; src: url(\"{to_root}{url}\"){format}; \
+                 font-weight: {weight}; font-style: {style}; font-display: swap; }}\n",
+                family = css_font_family(&face.family),
+                url = obsidian::percent_encode(&face.path.to_string_lossy()),
+                weight = face.weight,
+                style = if face.italic { "italic" } else { "normal" },
+            )
+        })
+        .collect();
+    let breakpoint = page_width_px + 2 * TOC_WIDTH_PX;
+    format!(
+        "{faces}{SITE_CSS}\n@media (min-width: {breakpoint}px) {{\n  .site-toc {{ display: block; }}\n  \
+         :root {{ --wide-gutter: calc(var(--site-toc-width) + var(--main-pad-x)); }}\n}}\n"
+    )
+}
+
+/// The published page for note `at`: its rendering `doc` with the site's
+/// navigation spliced in around the content — the TOC sidebar before it, the
+/// breadcrumb at its top, the backlinks at its end.
+pub fn page(plan: &SitePlan, at: usize, doc: &RenderedDocument) -> String {
+    let mut html = doc.html.replacen(
+        MAIN_OPEN,
+        &format!("{}{MAIN_OPEN}{}", toc(&doc.toc), crumbs(plan, at)),
+        1,
+    );
+    if let Some(end) = html.rfind(MAIN_CLOSE) {
+        html.insert_str(end, &backlinks(plan, at));
+    }
+    html
+}
+
+/// The href from note `from` to note `to` (both indices into the plan).
+fn href(plan: &SitePlan, from: usize, to: usize) -> String {
+    LinkStyle::Site {
+        root: plan.root.clone(),
+    }
+    .href(
+        &plan.root.join(&plan.notes[to].rel),
+        &plan.root.join(&plan.notes[from].rel),
+    )
+}
+
+/// The TOC sidebar: the page's headings, indented by level below the
+/// shallowest. Nothing for a page with fewer than two headings, where a
+/// contents list would only repeat the title.
+fn toc(headings: &[Heading]) -> String {
+    if headings.len() < 2 {
+        return String::new();
+    }
+    let top = headings.iter().map(|h| h.level).min().unwrap_or(1);
+    let items: String = headings
+        .iter()
+        .map(|h| {
+            format!(
+                "<li class=\"site-toc-{}\"><a href=\"{}\">{}</a></li>\n",
+                (h.level - top + 1).min(4),
+                escape_html(&h.anchor),
+                escape_html(&h.text)
+            )
+        })
+        .collect();
+    format!("<nav class=\"site-toc\" aria-label=\"Contents\">\n<ol>\n{items}</ol>\n</nav>\n")
+}
+
+/// The breadcrumb: the entry note, then each folder above the note, linked to
+/// the folder's own published `index.md` (by its title) where there is one.
+/// A folder's index note does not list its own folder, and the entry page
+/// has no breadcrumb at all — it would only name itself.
+fn crumbs(plan: &SitePlan, at: usize) -> String {
+    if at == 0 {
+        return String::new();
+    }
+    let placed = |rel: &Path| plan.notes.iter().position(|n| n.rel == rel);
+    let link = |to: usize| {
+        format!(
+            "<a href=\"{}\">{}</a>",
+            href(plan, at, to),
+            escape_html(&plan.notes[to].title)
+        )
+    };
+    let rel = &plan.notes[at].rel;
+    let own_index = rel.file_name().is_some_and(|n| n == "index.md");
+    let mut folders: Vec<&Path> = rel
+        .ancestors()
+        .skip(if own_index { 2 } else { 1 })
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect();
+    folders.reverse();
+    let mut parts = vec![link(0)];
+    parts.extend(
+        folders
+            .into_iter()
+            .map(|dir| match placed(&dir.join("index.md")) {
+                Some(index) if index != 0 => link(index),
+                _ => escape_html(&dir.file_name().unwrap_or_default().to_string_lossy()),
+            }),
+    );
+    format!(
+        "<nav class=\"site-crumbs\" aria-label=\"Breadcrumb\">{}</nav>\n",
+        parts.join("<span class=\"site-sep\">/</span>")
+    )
+}
+
+/// The notes linking here. Not on the entry page, which every note tends to
+/// link back to.
+fn backlinks(plan: &SitePlan, at: usize) -> String {
+    let from = &plan.notes[at].backlinks;
+    if at == 0 || from.is_empty() {
+        return String::new();
+    }
+    let items: String = from
+        .iter()
+        .map(|&i| {
+            format!(
+                "<li><a href=\"{}\">{}</a></li>",
+                href(plan, at, i),
+                escape_html(&plan.notes[i].title)
+            )
+        })
+        .collect();
+    format!(
+        "<nav class=\"site-backlinks\" aria-label=\"Backlinks\">\n\
+         <p class=\"site-label\">Linked from</p>\n<ul>{items}</ul>\n</nav>\n"
+    )
 }
 
 impl Note {
@@ -247,6 +430,125 @@ mod tests {
         assert!(matches!(resolve("a"), Target::Note { .. }));
         assert_eq!(resolve("CLAUDE"), Target::Unresolved);
         assert_eq!(resolve("secret.png"), Target::Unresolved);
+    }
+
+    // --- pages ---------------------------------------------------------------
+
+    /// A small wiki: a home page, a topic folder with its own index, a note
+    /// in it, and a note in a folder without one.
+    fn wiki() -> SitePlan {
+        plan_of(
+            &[
+                (
+                    "index.md",
+                    "# Home\n[t](topic/index.md) [d](deep/er/x.md)\n",
+                ),
+                ("topic/index.md", "# Topic & co\n[n](n.md)\n"),
+                ("topic/n.md", "# N\n[home](../index.md)\n"),
+                ("deep/er/x.md", "# X\n[n](../../topic/n.md)\n"),
+            ],
+            &[],
+        )
+    }
+
+    fn at(plan: &SitePlan, rel: &str) -> usize {
+        rels(plan).iter().position(|r| *r == rel).unwrap()
+    }
+
+    fn heading(level: u8, text: &str) -> Heading {
+        Heading {
+            level,
+            text: text.to_string(),
+            anchor: format!("#{}", text.to_lowercase()),
+        }
+    }
+
+    #[test]
+    fn the_breadcrumb_names_the_home_page_and_each_folder_above_the_note() {
+        let plan = wiki();
+        assert_eq!(crumbs(&plan, 0), "", "the home page names only itself");
+        assert_eq!(
+            crumbs(&plan, at(&plan, "topic/n.md")),
+            "<nav class=\"site-crumbs\" aria-label=\"Breadcrumb\"><a href=\"../index.html\">Home</a>\
+             <span class=\"site-sep\">/</span><a href=\"index.html\">Topic &amp; co</a></nav>\n"
+        );
+        // A folder's index does not list its own folder.
+        assert!(!crumbs(&plan, at(&plan, "topic/index.md")).contains("Topic"));
+        // A folder without a published index is named, not linked.
+        let deep = crumbs(&plan, at(&plan, "deep/er/x.md"));
+        assert!(
+            deep.contains("<a href=\"../../index.html\">Home</a>"),
+            "{deep}"
+        );
+        assert!(
+            deep.ends_with(">deep<span class=\"site-sep\">/</span>er</nav>\n"),
+            "{deep}"
+        );
+    }
+
+    #[test]
+    fn backlinks_list_the_linking_notes_except_on_the_home_page() {
+        let plan = wiki();
+        let n = backlinks(&plan, at(&plan, "topic/n.md"));
+        assert!(
+            n.contains("<li><a href=\"index.html\">Topic &amp; co</a></li>"),
+            "{n}"
+        );
+        assert!(
+            n.contains("<li><a href=\"../deep/er/x.html\">X</a></li>"),
+            "{n}"
+        );
+        assert_eq!(backlinks(&plan, 0), "");
+    }
+
+    #[test]
+    fn the_toc_sidebar_indents_by_level_and_needs_two_headings() {
+        assert_eq!(toc(&[heading(1, "Only")]), "");
+        let html = toc(&[heading(1, "Title"), heading(2, "A"), heading(3, "B<")]);
+        assert!(html.contains("<li class=\"site-toc-1\"><a href=\"#title\">Title</a></li>"));
+        assert!(html.contains("<li class=\"site-toc-3\"><a href=\"#b&lt;\">B&lt;</a></li>"));
+    }
+
+    #[test]
+    fn the_navigation_goes_around_the_content() {
+        let plan = wiki();
+        let doc = RenderedDocument {
+            html: format!("<body>\n{MAIN_OPEN}<h1>N</h1>\n{MAIN_CLOSE}</body>\n"),
+            toc: vec![heading(1, "N"), heading(2, "Part")],
+        };
+        let html = page(&plan, at(&plan, "topic/n.md"), &doc);
+        let order = [
+            "site-toc",
+            MAIN_OPEN,
+            "site-crumbs",
+            "<h1>N</h1>",
+            "site-backlinks",
+            MAIN_CLOSE,
+        ];
+        let positions: Vec<usize> = order.iter().map(|s| html.find(s).unwrap()).collect();
+        assert!(positions.is_sorted(), "{html}");
+    }
+
+    #[test]
+    fn site_css_declares_the_fonts_relative_to_the_page() {
+        let fonts = [FontFace {
+            family: "Source Serif 4".to_string(),
+            weight: 700,
+            italic: true,
+            path: PathBuf::from("fonts/Serif Bold.woff2"),
+        }];
+        let css = site_css(840, &fonts, Path::new("topic/n.md"));
+        assert!(
+            css.contains(
+                "@font-face { font-family: \"Source Serif 4\"; \
+             src: url(\"../fonts/Serif%20Bold.woff2\") format(\"woff2\"); \
+             font-weight: 700; font-style: italic; font-display: swap; }"
+            ),
+            "{css}"
+        );
+        assert!(site_css(840, &fonts, Path::new("index.md")).contains("url(\"fonts/"));
+        assert!(css.contains("@media (min-width: 1320px)"), "{css}");
+        assert!(SITE_CSS.contains(&format!("--site-toc-width: {TOC_WIDTH_PX}px;")));
     }
 
     #[test]

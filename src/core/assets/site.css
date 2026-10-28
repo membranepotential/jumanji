@@ -1,0 +1,112 @@
+/* jumanji-publish: the navigation around a published page (DESIGN D15).
+ *
+ * Emitted after style.css, in the same visual language: muted text, the
+ * accent on hover, the reader's sans for chrome and its serif for prose, plain
+ * backgrounds. The breakpoint at which the TOC sidebar appears is generated
+ * (`core::site::site_css`), because a media query cannot read the
+ * `--content-width` variable it depends on. */
+
+:root {
+  --site-toc-width: 240px;
+}
+
+.site-toc,
+.site-crumbs,
+.site-backlinks {
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  color: var(--fg-muted);
+}
+
+.site-toc a,
+.site-crumbs a,
+.site-backlinks a {
+  color: inherit;
+}
+
+.site-toc a:hover,
+.site-crumbs a:hover,
+.site-backlinks a:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* ---- TOC sidebar ----------------------------------------------------------
+ *
+ * Fixed in the left margin, and only where the margin is wide enough to hold
+ * it beside the reading column (the generated media query). On a narrower
+ * window it is gone rather than squeezed: the column keeps its full measure. */
+.site-toc {
+  display: none;
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--site-toc-width);
+  overflow-y: auto;
+  padding: 3.5rem 1.25rem 2rem 1.5rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+.site-toc ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.site-toc li {
+  margin: 0 0 0.55em;
+}
+
+.site-toc .site-toc-2 {
+  padding-left: 0.9em;
+}
+
+.site-toc .site-toc-3 {
+  padding-left: 1.8em;
+}
+
+.site-toc .site-toc-4 {
+  padding-left: 2.7em;
+}
+
+/* ---- Breadcrumb ---------------------------------------------------------- */
+.site-crumbs {
+  margin: -1.5rem 0 2rem;
+  font-size: 0.8rem;
+}
+
+.site-crumbs .site-sep {
+  margin: 0 0.45em;
+  opacity: 0.6;
+}
+
+/* ---- Backlinks ----------------------------------------------------------- */
+.site-backlinks {
+  margin-top: 4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.site-backlinks .site-label {
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.site-backlinks ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 1.4rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.site-backlinks li {
+  margin: 0;
+}

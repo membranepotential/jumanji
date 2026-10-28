@@ -57,6 +57,16 @@ pub const HTML_OPEN: &str = "<html lang=\"en\"";
 /// either.
 pub const HTML_CLASS_OPEN: &str = " class=\"";
 
+/// The tag that opens the document's content, as [`assemble`] emits it once,
+/// right after `<body>`. Like [`HTML_OPEN`], an anchor for a single splice: a
+/// published site puts its navigation around the content here
+/// (`core::site::page`).
+pub const MAIN_OPEN: &str = "<main id=\"content\" class=\"markdown-body\">\n";
+
+/// The tag that closes the content: the *last* occurrence in the page, since a
+/// document's own raw HTML may contain one too.
+pub const MAIN_CLOSE: &str = "</main>\n";
+
 /// Rendering options, constructed by the shell from [`super::config`].
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -289,7 +299,7 @@ fn root_vars_css(opts: &Options) -> String {
 /// A CSS string literal cannot contain a raw newline or its own quote unescaped;
 /// we wrap in double quotes and backslash-escape `"` and `\`, dropping control
 /// characters. This keeps a stray value from breaking out of the `<style>` rule.
-fn css_font_family(name: &str) -> String {
+pub(crate) fn css_font_family(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 2);
     out.push('"');
     for c in name.chars() {
@@ -634,9 +644,9 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options, has_math: bool) -> Stri
          {user_css}\
          </head>\n\
          <body id=\"top\">\n\
-         <main id=\"content\" class=\"markdown-body\">\n\
+         {main_open}\
          {body}\
-         </main>\n\
+         {main_close}\
          </body>\n\
          </html>\n",
         html_open = HTML_OPEN,
@@ -651,6 +661,8 @@ fn assemble(body: &str, toc: &[Heading], opts: &Options, has_math: bool) -> Stri
         math_css = math_css,
         user_css = user_css,
         body = body,
+        main_open = MAIN_OPEN,
+        main_close = MAIN_CLOSE,
     )
 }
 
