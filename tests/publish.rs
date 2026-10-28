@@ -11,6 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use jumanji::core::obsidian::percent_decode;
+
 /// A directory under the system temp dir, removed on drop.
 struct Temp(PathBuf);
 
@@ -84,25 +86,6 @@ fn css_urls(html: &str) -> Vec<&str> {
         .collect()
 }
 
-fn decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16)
-        {
-            out.push(b);
-            i += 3;
-            continue;
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(out).unwrap()
-}
-
 /// Check every link of every page in the site at `dir`; return the problems.
 fn broken_links(dir: &Path) -> Vec<String> {
     let mut broken = Vec::new();
@@ -134,12 +117,12 @@ fn broken_links(dir: &Path) -> Vec<String> {
             }
             let (path, fragment) = link.split_once('#').unwrap_or((&link, ""));
             if path.is_empty() {
-                if !ids.contains(&decode(fragment)) {
+                if !ids.contains(&percent_decode(fragment)) {
                     broken.push(format!("{}: no #{fragment} in the page", page.display()));
                 }
                 continue;
             }
-            let target = page.parent().unwrap().join(decode(path));
+            let target = page.parent().unwrap().join(percent_decode(path));
             if !dir.join(&target).is_file() {
                 broken.push(format!("{}: {link} does not exist", page.display()));
             }
@@ -182,7 +165,7 @@ fn only_what_the_entry_note_reaches_is_published() {
     let vault = tmp.0.join("wiki");
     tmp.write(
         "wiki/index.md",
-        "# Wiki\n\n[Topic](topic/index.md) and [[Lone Note]].\n\n\
+        "# Wiki\n\n[Topic](topic/index.md) and [[Lone Note]], [[Hidden Plans|later]].\n\n\
          The [paper](../papers/A%20B.pdf) lives outside.\n\n\
          <a href=\"draft.md\">raw</a> <img src=\"secret.png\" alt=\"s\"> \
          <img src=\"file:///etc/passwd\"> <img src=\"topic/fig%201.svg\" alt=\"ok\">\n\n\

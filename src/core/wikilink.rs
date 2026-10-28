@@ -65,9 +65,11 @@ pub fn transform_wikilinks<'a>(
 
         node.insert_before(html_inline(
             arena,
-            &open_tag(&vault.resolve(&reference), &raw, |path| {
-                style.href(path, vault.source())
-            }),
+            &open_tag(
+                &vault.resolve(&reference),
+                style.shows_unresolved_targets().then_some(raw.as_str()),
+                |path| style.href(path, vault.source()),
+            ),
         ));
         node.insert_after(html_inline(arena, "</a>"));
         // The node itself *becomes* the label: comrak's default label is the raw
@@ -81,9 +83,9 @@ pub fn transform_wikilinks<'a>(
 }
 
 /// The opening `<a …>` for a resolved (or unresolved) target. `raw` is the
-/// decoded target as written, kept for the unresolved form's feedback; `href`
-/// spells a resolved path.
-fn open_tag(target: &Target, raw: &str, href: impl Fn(&Path) -> String) -> String {
+/// decoded target as written, for the unresolved form's feedback, or `None`
+/// where that must not be shown; `href` spells a resolved path.
+fn open_tag(target: &Target, raw: Option<&str>, href: impl Fn(&Path) -> String) -> String {
     match target {
         Target::Note { path, anchor } => {
             let fragment = anchor
@@ -100,13 +102,13 @@ fn open_tag(target: &Target, raw: &str, href: impl Fn(&Path) -> String) -> Strin
         Target::Asset { path, .. } => {
             format!("<a class=\"internal-link\" href=\"{}\">", href(path))
         }
-        Target::Unresolved => {
-            let raw = escape_html(raw);
-            format!(
+        Target::Unresolved => match raw.map(escape_html) {
+            Some(raw) => format!(
                 "<a class=\"internal-link is-unresolved\" data-href=\"{raw}\" \
                  title=\"unresolved: {raw}\">"
-            )
-        }
+            ),
+            None => "<a class=\"internal-link is-unresolved\">".to_string(),
+        },
     }
 }
 
@@ -230,7 +232,7 @@ mod tests {
         let arena = Arena::new();
         let root = parse_document(
             &arena,
-            "[[My Note#Getting Started]] [[My Note#^abc123]] [[#Local]]\n",
+            "[[My Note#Getting Started]] [[My Note#^abc123]] [[#Local]] [[Hidden|later]]\n",
             &opts,
         );
         transform_wikilinks(&arena, root, &vault, &site);
@@ -246,6 +248,12 @@ mod tests {
         );
         assert!(html.contains("href=\"doc.html#local\""), "{html}");
         assert!(!html.contains("file:"), "{html}");
+        // A dead link on a site names nothing it was not shown as.
+        assert!(
+            html.contains("<a class=\"internal-link is-unresolved\">later</a>"),
+            "{html}"
+        );
+        assert!(!html.contains("Hidden"), "{html}");
     }
 
     #[test]

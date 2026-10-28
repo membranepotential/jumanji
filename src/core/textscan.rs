@@ -279,9 +279,12 @@ pub fn transform_embeds<'a>(
                 .filter_map(|(range, construct)| match construct {
                     Construct::Embed(reference) => Some((
                         range,
-                        Some(embed_html(&vault.resolve(&reference), &reference, |path| {
-                            style.href(path, vault.source())
-                        })),
+                        Some(embed_html(
+                            &vault.resolve(&reference),
+                            &reference,
+                            style.shows_unresolved_targets(),
+                            |path| style.href(path, vault.source()),
+                        )),
                     )),
                     _ => None,
                 }),
@@ -320,8 +323,14 @@ pub fn embeds_at<'a>(node: &'a AstNode<'a>) -> Vec<WikiRef> {
 /// Note/heading/block transclusion is deferred (it needs recursive rendering
 /// with cycle detection), and a card is the honest degradation: a real link, so
 /// click, `f` hints and the jumplist all work, and it reads as a door rather
-/// than as the content.
-fn embed_html(target: &Target, reference: &WikiRef, href: impl Fn(&Path) -> String) -> String {
+/// than as the content. `show_unresolved` says whether an unresolved card
+/// names its target.
+fn embed_html(
+    target: &Target,
+    reference: &WikiRef,
+    show_unresolved: bool,
+    href: impl Fn(&Path) -> String,
+) -> String {
     let label = escape_html(&obsidian::display_label(reference));
     match target {
         Target::Asset {
@@ -344,7 +353,7 @@ fn embed_html(target: &Target, reference: &WikiRef, href: impl Fn(&Path) -> Stri
                 href(path)
             )
         }
-        Target::Asset { path, kind } => card(kind.token(), Some(&href(path)), &label, reference),
+        Target::Asset { path, kind } => card(kind.token(), Some(&href(path)), &label, None),
         Target::Note { path, anchor } => {
             let fragment = anchor
                 .as_deref()
@@ -354,27 +363,32 @@ fn embed_html(target: &Target, reference: &WikiRef, href: impl Fn(&Path) -> Stri
                 "note",
                 Some(&format!("{}{fragment}", href(path))),
                 &label,
-                reference,
+                None,
             )
         }
-        Target::Unresolved => card("note", None, &label, reference),
+        Target::Unresolved => card(
+            "note",
+            None,
+            &label,
+            show_unresolved.then(|| reference.note.as_deref().unwrap_or_default()),
+        ),
     }
 }
 
 /// The link-card. Without an `href` it is inert and unhintable, exactly like an
-/// unresolved wikilink.
-fn card(kind: &str, href: Option<&str>, label: &str, reference: &WikiRef) -> String {
-    match href {
-        Some(href) => format!(
+/// unresolved wikilink; `raw` is the target it names on hover, if any.
+fn card(kind: &str, href: Option<&str>, label: &str, raw: Option<&str>) -> String {
+    match (href, raw.map(escape_html)) {
+        (Some(href), _) => format!(
             "<a class=\"internal-embed embed-card\" data-embed=\"{kind}\" href=\"{href}\">{label}</a>"
         ),
-        None => {
-            let raw = escape_html(reference.note.as_deref().unwrap_or_default());
-            format!(
-                "<a class=\"internal-embed embed-card is-unresolved\" data-embed=\"{kind}\" \
-                 title=\"unresolved: {raw}\">{label}</a>"
-            )
-        }
+        (None, Some(raw)) => format!(
+            "<a class=\"internal-embed embed-card is-unresolved\" data-embed=\"{kind}\" \
+             title=\"unresolved: {raw}\">{label}</a>"
+        ),
+        (None, None) => format!(
+            "<a class=\"internal-embed embed-card is-unresolved\" data-embed=\"{kind}\">{label}</a>"
+        ),
     }
 }
 
@@ -637,12 +651,13 @@ mod tests {
         };
         let opts = options();
         let arena = Arena::new();
-        let root = parse_document(&arena, "![[diagram.png]] ![[Note#H]]\n", &opts);
+        let root = parse_document(&arena, "![[diagram.png]] ![[Note#H]] ![[Hidden]]\n", &opts);
         transform_embeds(&arena, root, &vault, &site);
         let mut html = String::new();
         format_html(root, &opts, &mut html).unwrap();
         assert!(html.contains("src=\"diagram.png\""), "{html}");
         assert!(html.contains("href=\"Note.html#h\""), "{html}");
+        assert!(!html.contains("title=\"unresolved"), "{html}");
         assert!(!html.contains("file:"), "{html}");
     }
 

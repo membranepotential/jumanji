@@ -107,8 +107,9 @@ can be published, and nothing above it.
 - **Dead links:** a link to anything not published (outside `DIR`, missing,
   or a `file://` URL) renders like an unresolved wikilink: a dead link with
   no `href`. A markdown link's URL never appears in a page; a dead image
-  becomes an inert link-card naming its alt text. (An unresolved `[[…]]`
-  keeps the reader's markup, which repeats the written name in `title`.) The publisher prints every dead
+  becomes an inert link-card naming its alt text. A dead `[[…]]` or `![[…]]`
+  carries no `title` / `data-href` on a site either (the reader's hover
+  feedback), so an alias does not reveal the name it hides. The publisher prints every dead
   link with its source note and line, so a link that should work is noticed
   before deploying. Example: the thesis wiki's `index.md` links to
   `../papers/Matthaiou 2024 … .pdf`, which lies outside `wiki/` and will be

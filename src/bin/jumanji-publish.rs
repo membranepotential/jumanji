@@ -91,7 +91,10 @@ fn run(cli: &Cli) -> Result<()> {
             return Err(err);
         }
     };
-    swap(&staging, &out)?;
+    if let Err(err) = swap(&staging, &out) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(err);
+    }
     report(&plan, &built, &out);
     Ok(())
 }

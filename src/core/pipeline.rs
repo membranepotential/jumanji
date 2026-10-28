@@ -195,6 +195,13 @@ impl LinkStyle {
         }
     }
 
+    /// Whether an unresolved link names the target it was written with (the
+    /// reader's hover feedback). A site's does not: an alias must not reveal
+    /// the name of a note that is not published.
+    pub fn shows_unresolved_targets(&self) -> bool {
+        matches!(self, Self::File)
+    }
+
     /// The href for `target`, written in the document `from`. Both are
     /// absolute paths.
     pub fn href(&self, target: &Path, from: &Path) -> String {
