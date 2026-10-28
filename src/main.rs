@@ -307,12 +307,16 @@ mod tests {
     }
 
     #[test]
-    fn publish_is_a_subcommand() {
-        let publish = parse(&["publish", "wiki", "--out", "site"]);
-        assert!(matches!(publish.command, Some(Commands::Publish(_))));
-        assert!(publish.file.is_none());
+    fn publish_is_a_subcommand_that_needs_a_name_or_an_out_dir() {
+        let deploy = parse(&["publish", "wiki", "--name", "thesis-wiki"]);
+        assert!(matches!(deploy.command, Some(Commands::Publish(_))));
+        assert!(deploy.file.is_none());
+        assert!(try_parse(&["publish", "wiki", "--out", "site"]).is_ok());
+        assert!(try_parse(&["publish", "wiki", "--name", "w", "-o", "site", "--password"]).is_ok());
         for bad in [
             &["publish", "wiki"][..],
+            &["publish", "wiki", "--out", "site", "--password"],
+            &["publish", "wiki", "--name", "Not_A_Name"],
             &["--no-focus", "publish", "wiki", "--out", "site"],
         ] {
             assert!(try_parse(bad).is_err(), "{bad:?}");

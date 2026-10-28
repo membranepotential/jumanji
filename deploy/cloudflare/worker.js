@@ -1,5 +1,6 @@
-// The password in front of a site published with jumanji-publish
-// (docs/publish/README.md, D15).
+// The password in front of a site published with `jumanji publish`
+// (docs/publish/README.md, D15). The binary embeds this file
+// (src/publish/wrangler.rs) and deploys it with a generated wrangler config.
 //
 // `run_worker_first` sends every request here before a file is served. Without
 // the right password the answer is 401 with `WWW-Authenticate: Basic`, which

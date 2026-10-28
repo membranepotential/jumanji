@@ -5,13 +5,17 @@
 //!
 //! The publisher runs with an empty config directory, so the developer's own
 //! configuration (fonts, themes, fence renderers) cannot change the result,
-//! and with no display, as over ssh: publishing must never need GTK. Nothing
-//! here deploys: without `--name` there is no network.
+//! and with no display, as over ssh: publishing must never need GTK.
+//!
+//! Nothing here touches the network. The deploy test puts a fake `pnpm` on
+//! PATH that plays wrangler's part and logs every call.
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use jumanji::core::obsidian::percent_decode;
 
@@ -273,4 +277,109 @@ fn only_what_the_entry_note_reaches_is_published() {
     let refused = publish(&vault, &tmp.0.join("mine"), &config);
     assert!(!refused.status.success());
     assert!(tmp.0.join("mine/notes.txt").exists());
+}
+
+/// A stand-in for `pnpm --silent dlx wrangler@VERSION …`: it logs the
+/// wrangler arguments, answers `whoami` with `$FAKE_WHOAMI`, records the
+/// deploy's config and URL as wrangler does, lists the secrets in
+/// `$FAKE_SECRETS`, and on `secret put` reads the password from stdin.
+const FAKE_PNPM: &str = r#"#!/bin/sh
+[ "$1 $2 $3" = "--silent dlx wrangler@4.151.3" ] || exit 99
+shift 3
+echo "$*" >> "$FAKE_DIR/log"
+case "$1 $2" in
+  "whoami --json") exit "${FAKE_WHOAMI:-0}" ;;
+  "login "*) exit 0 ;;
+  "deploy --config")
+    cp "$3" "$FAKE_DIR/wrangler.json"
+    echo '{"type":"deploy","version":1,"targets":["https://demo.me.workers.dev"]}' \
+      >> "$WRANGLER_OUTPUT_FILE_PATH" ;;
+  "secret list") cat "$FAKE_DIR/secrets" ;;
+  "secret put")
+    read -r password && [ "$password" = "hunter2" ] || exit 98
+    echo '[{"name":"SITE_PASSWORD","type":"secret_text"}]' > "$FAKE_DIR/secrets" ;;
+  *) exit 97 ;;
+esac
+"#;
+
+#[test]
+fn a_deploy_asks_for_the_password_once_and_after_the_upload() {
+    let tmp = Temp::new("deploy");
+    let fake = tmp.0.join("fake");
+    tmp.write("fake/pnpm", FAKE_PNPM);
+    fs::set_permissions(fake.join("pnpm"), fs::Permissions::from_mode(0o755)).unwrap();
+    tmp.write("fake/secrets", "[]");
+    let path = std::env::join_paths(
+        std::iter::once(fake.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let deploy = |whoami: &str| {
+        let _ = fs::remove_file(fake.join("log"));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_jumanji"))
+            .args(["publish", "--name", "demo"])
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("demo/graph"))
+            .env("PATH", &path)
+            .env("FAKE_DIR", &fake)
+            .env("FAKE_WHOAMI", whoami)
+            .env("XDG_CONFIG_HOME", tmp.0.join("config"))
+            .env("XDG_CACHE_HOME", tmp.0.join("cache"))
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hunter2\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        let log = fs::read_to_string(fake.join("log")).unwrap_or_default();
+        (output, log)
+    };
+    let site = tmp.0.join("cache/jumanji/sites/demo");
+
+    // First deploy: logged in, no password yet. The site goes up first, then
+    // wrangler asks for the password.
+    let (first, log) = deploy("0");
+    let stdout = String::from_utf8_lossy(&first.stdout);
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(first.status.success(), "{stdout}{stderr}");
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 4, "{log}");
+    assert_eq!(lines[0], "whoami --json");
+    assert!(lines[1].starts_with("deploy --config /"), "{log}");
+    assert!(lines[1].ends_with("/wrangler.json"), "{log}");
+    assert_eq!(lines[2], "secret list --name demo --format json");
+    assert_eq!(lines[3], "secret put SITE_PASSWORD --name demo");
+    assert!(
+        stderr.contains("Set the password readers will need for https://demo.me.workers.dev:"),
+        "{stderr}"
+    );
+    assert!(
+        stdout.contains("README.md:20: guides/ (not in the vault)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.ends_with("the site is at https://demo.me.workers.dev\n"),
+        "{stdout}"
+    );
+    assert!(site.join("index.html").is_file());
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fake.join("wrangler.json")).unwrap()).unwrap();
+    assert_eq!(config["name"], "demo");
+    assert_eq!(config["assets"]["directory"], site.to_str().unwrap());
+    assert_eq!(config["assets"]["run_worker_first"], true);
+
+    // Again: the password is set, so nobody is asked.
+    let (again, log) = deploy("0");
+    assert!(again.status.success());
+    assert!(!log.contains("secret put"), "{log}");
+    assert!(!String::from_utf8_lossy(&again.stderr).contains("Set the password"));
+
+    // Logged out, over ssh: the device login, before anything else.
+    let (_, log) = deploy("1");
+    assert_eq!(
+        log.lines().take(2).collect::<Vec<_>>(),
+        ["whoami --json", "login --device"]
+    );
 }
