@@ -266,6 +266,19 @@ fn only_what_the_entry_note_reaches_is_published() {
         "a dead link's URL never reaches the page"
     );
 
+    // The output may not land inside the vault, however it is spelled.
+    std::os::unix::fs::symlink(&vault, tmp.0.join("link")).unwrap();
+    for sneaky in [tmp.0.join("link/out"), tmp.0.join("nowhere/../wiki/out")] {
+        let refused = publish(&vault, &sneaky, &config);
+        assert!(!refused.status.success(), "{}", sneaky.display());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("lies inside the vault"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+    }
+    assert!(!vault.join("out").exists());
+
     // Publishing again replaces the earlier output; a foreign folder is safe.
     assert!(publish(&vault, &out, &config).status.success());
     tmp.write("mine/notes.txt", "keep me");

@@ -205,7 +205,8 @@ jumanji-publish ~/Documents/Sandeep/thesis/wiki -o ~/Documents/Sandeep/thesis/wi
 4. Write into a temporary sibling directory, then swap it with the output
    directory. The publisher refuses to replace a non-empty directory that
    lacks its marker file `.jumanji-site`, so a typo in `-o` cannot delete a
-   real folder. It also refuses an output inside the vault or containing it.
+   real folder. It also refuses an output inside the vault or containing it,
+   judged after resolving the output's `..` and symlinks.
    It writes an `.assetsignore` so wrangler does not upload the marker.
 
 The publisher performs no network I/O. Deploying is a separate step, which

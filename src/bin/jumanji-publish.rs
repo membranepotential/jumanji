@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result, bail};
@@ -62,7 +62,7 @@ fn run(cli: &Cli) -> Result<()> {
         .vault
         .canonicalize()
         .with_context(|| format!("cannot open the vault {}", cli.vault.display()))?;
-    let out = std::path::absolute(&cli.output)?;
+    let out = real_path(&cli.output)?;
     check_output(&out, &root)?;
 
     let config_dir = config::xdg_config_dir();
@@ -94,6 +94,30 @@ fn run(cli: &Cli) -> Result<()> {
     swap(&staging, &out)?;
     report(&plan, &built, &out);
     Ok(())
+}
+
+/// Where `path` really is: absolute, every `..` and symlink of its existing
+/// part resolved by the filesystem, and the part that does not exist yet
+/// resolved lexically. The output checks compare this with the canonical
+/// vault root, so `-o wiki/../wiki/out` or `-o link-to-wiki/out` cannot slip
+/// past them.
+fn real_path(path: &Path) -> Result<PathBuf> {
+    let mut real = PathBuf::new();
+    for part in std::path::absolute(path)?.components() {
+        let next = match part {
+            Component::ParentDir => real.parent().unwrap_or(&real).to_path_buf(),
+            Component::CurDir => continue,
+            part => real.join(part),
+        };
+        // Once a component does not exist, nothing after it can, and no
+        // symlink is left to follow.
+        real = if next.exists() {
+            next.canonicalize()?
+        } else {
+            next
+        };
+    }
+    Ok(real)
 }
 
 /// Refuse an output directory whose replacement could lose something: one
