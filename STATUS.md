@@ -9,7 +9,7 @@ content pipeline, modal vim/zathura keys, Obsidian dialect. Linux-first.
 
 ## Now
 
-Shipped through **v1.15.0** (`jumanji publish`, `font-ui`).
+Shipped through **v1.15.1** (unknown config keys warn instead of resetting).
 
 - **macOS port (issue #1)** — [05-macos-port.md](docs/research/05-macos-port.md);
   tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
@@ -21,6 +21,8 @@ Shipped through **v1.15.0** (`jumanji publish`, `font-ui`).
 
 ## Done (recent)
 
+- **v1.15.1 (2026-10-29, f092666)** — an unknown config key is skipped with a
+  warning instead of resetting everything; config notices show in the statusbar.
 - **v1.15.0 / publishing (2026-10-28, 4119c73..6953998)** — `jumanji publish DIR --name N`
   builds + deploys via wrangler, password Worker ([D15](docs/publish/README.md));
   reviewed twice; thesis wiki live on workers.dev.
@@ -36,9 +38,6 @@ Shipped through **v1.15.0** (`jumanji publish`, `font-ui`).
   `resources/theme.example.css` (the built-in colours).
 - **v1.10.0 (2026-09-19)** — the document graph; after it: zoom clamp, peek
   drawn as scene nodes, arrow keys + Tab, view line, mermaid docs test.
-- **document graph v2 (2026-09-19, e4aa0b2)** — [interaction model](docs/graph/interaction.md):
-  one node, one handle, `Space` folds, peek, route-first framing;
-  [docs/graph/](docs/graph/README.md) with screenshots + demo tree.
 
 ## Next
 
