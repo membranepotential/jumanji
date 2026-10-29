@@ -16,6 +16,7 @@ notify-debouncer-full = "0.7.0"
 pulldown-latex = "0.8.0"
 rayon = "1.12.0"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_ignored = "0.1.14"
 serde_json = "1.0.150"
 syntect = "5.3.0"
 thiserror = "2.0.18"

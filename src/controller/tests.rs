@@ -446,6 +446,20 @@ fn q_asks_the_host_to_close_the_window() {
     assert!(r.host.quit_called());
 }
 
+#[test]
+fn a_startup_notice_outlasts_the_first_load_until_escape() {
+    // A config warning the shell hands over as the window opens: the vault
+    // scan, the render failsafe and the finished load leave it standing.
+    let r = Reader::open("# Doc\n\n[[other]]\n");
+    r.controller.notify("config: ignored unknown key options.x");
+    r.land_work();
+    r.run_timers();
+    r.finish_load();
+    assert_eq!(r.chrome.message(), "config: ignored unknown key options.x");
+    r.press_key(Key::Escape);
+    assert_eq!(r.chrome.message(), "");
+}
+
 // ---------------------------------------------------------------------------
 // Mode machine / TOC
 // ---------------------------------------------------------------------------

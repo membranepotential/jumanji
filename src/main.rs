@@ -239,13 +239,21 @@ fn main() -> ExitCode {
     };
 
     // Malformed config is surfaced but non-fatal: the reader must still open.
-    let config = match Config::load(config::xdg_config_dir().as_deref()) {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            eprintln!("jumanji: config error, using defaults: {err}");
-            Config::default()
+    // The notice goes to the terminal and to the window's statusbar, since a
+    // reader launched in the background has no terminal anyone reads.
+    let (config, notice) = match Config::load(config::xdg_config_dir().as_deref()) {
+        Ok(loaded) => {
+            let notice = loaded.warning();
+            (loaded.config, notice)
         }
+        Err(err) => (
+            Config::default(),
+            Some(format!("config error, using defaults: {err}")),
+        ),
     };
+    if let Some(notice) = &notice {
+        eprintln!("jumanji: {notice}");
+    }
 
     // Hand the prompt back, last thing before the window opens. Everything above
     // reports its problems on the terminal — a bad path, a malformed config, a
@@ -257,7 +265,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let exit = shell::gtk::run(source, config, cli.forward, cli.open_focus());
+    let exit = shell::gtk::run(source, config, notice, cli.forward, cli.open_focus());
     if exit == glib::ExitCode::SUCCESS {
         ExitCode::SUCCESS
     } else {

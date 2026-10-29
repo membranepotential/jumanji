@@ -60,6 +60,7 @@ pub enum OpenFocus {
 pub fn run(
     source: Source,
     config: Config,
+    notice: Option<String>,
     forward: Option<u32>,
     focus: OpenFocus,
 ) -> glib::ExitCode {
@@ -84,6 +85,7 @@ pub fn run(
             source.clone(),
             options.clone(),
             keymap.clone(),
+            notice.as_deref(),
             forward,
             focus,
         );
@@ -100,6 +102,7 @@ fn build_ui(
     source: Source,
     options: Options,
     keymap: Keymap,
+    notice: Option<&str>,
     forward: Option<u32>,
     focus: OpenFocus,
 ) {
@@ -125,6 +128,9 @@ fn build_ui(
         keymap,
         forward,
     );
+    if let Some(notice) = notice {
+        controller.notify(notice);
+    }
 
     install_view_handlers(&controller, &view);
     connect_toc_activate(&controller, &chrome);

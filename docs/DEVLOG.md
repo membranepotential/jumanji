@@ -2,7 +2,27 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-10-28 (latest) — `jumanji publish` review fixes
+## 2026-10-29 (latest) — an unknown config key is a warning, shown in the window
+
+Adding `font-ui` (new in v1.15.0) to the config while v1.14.0 was still
+installed made the reader start in light mode: every raw config struct had
+`deny_unknown_fields`, so one unknown key failed the whole file and the
+reader fell back to all defaults. The error went to stderr only, which
+nobody reads when the reader is launched in the background (the jumanji
+skill does that).
+
+Now `Config::parse` reads through `serde_ignored` and returns a `Loaded`:
+the settings plus the skipped keys as dotted paths (`options.font-ui`).
+Every known key still applies; a known key with a bad value still fails the
+file, as before. `main` turns the skipped keys, or a hard config error,
+into one notice, prints it to stderr and passes it to the shell, which
+shows it in the statusbar through the new `Controller::notify`. It stays
+there until the breadcrumb next replaces it (Esc, a jump, the TOC).
+`jumanji publish` prints the warning too. The old regression test for a
+top-level `default-recolor` (the pre-`[options]` format) now asserts the key
+is reported, not that the file fails.
+
+## 2026-10-28 — `jumanji publish` review fixes
 
 An independent review found the deploy directory guessable and shared:
 `$TMPDIR/jumanji-deploy-<pid>` was reused if it existed, and pnpm and

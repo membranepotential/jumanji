@@ -659,6 +659,13 @@ impl<T: Toolkit + 'static> Controller<T> {
         });
     }
 
+    /// Show `msg` in the statusbar until the breadcrumb next replaces it: for a
+    /// problem the shell met before the window existed, such as a config
+    /// warning.
+    pub fn notify(&self, msg: &str) {
+        self.0.borrow().chrome.set_message(msg);
+    }
+
     /// One message posted from inside the document (see
     /// [`scripts::message`](crate::controller::scripts::message)), demultiplexed
     /// by name. An unrecognised name is ignored.

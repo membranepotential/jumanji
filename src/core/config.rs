@@ -619,24 +619,51 @@ pub enum ConfigError {
     OptionValue { key: &'static str, message: String },
 }
 
+/// A config file as read: the settings, and every key in it that names no
+/// setting. Such a key is skipped rather than failing the file, so a config
+/// written for a newer jumanji, or with one typo, keeps every setting this
+/// version knows; the caller reports the skipped keys ([`Loaded::warning`]).
+#[derive(Debug, Clone, Default)]
+pub struct Loaded {
+    pub config: Config,
+    /// The skipped keys as dotted paths (`options.font-ui`).
+    pub unknown_keys: Vec<String>,
+}
+
+impl Loaded {
+    /// The one-line report of the skipped keys; `None` when there are none.
+    pub fn warning(&self) -> Option<String> {
+        match self.unknown_keys.as_slice() {
+            [] => None,
+            [key] => Some(format!("config: ignored unknown key {key}")),
+            keys => Some(format!("config: ignored unknown keys {}", keys.join(", "))),
+        }
+    }
+}
+
 impl Config {
     /// Resolve `<config_dir>/jumanji/config.toml`, read and parse it. A missing
     /// file is not an error (returns defaults); a malformed file returns the
     /// error so the caller can log it and fall back to defaults.
-    pub fn load(config_dir: Option<&Path>) -> Result<Self, ConfigError> {
+    pub fn load(config_dir: Option<&Path>) -> Result<Loaded, ConfigError> {
         let Some(path) = config_dir.map(|d| d.join("jumanji").join("config.toml")) else {
-            return Ok(Self::default());
+            return Ok(Loaded::default());
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => Self::parse(&text),
-            Err(_) => Ok(Self::default()),
+            Err(_) => Ok(Loaded::default()),
         }
     }
 
     /// Parse config text into a [`Config`], overlaying user key bindings onto
-    /// the defaults.
-    pub fn parse(text: &str) -> Result<Self, ConfigError> {
-        let raw: RawConfig = toml::from_str(text)?;
+    /// the defaults. Unknown keys are collected, not fatal (see [`Loaded`]); a
+    /// known key with a bad value still fails the whole file.
+    pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
+        let mut unknown_keys = Vec::new();
+        let raw: RawConfig =
+            serde_ignored::deserialize(toml::Deserializer::parse(text)?, |path| {
+                unknown_keys.push(dotted(&path))
+            })?;
         let raw_opts = raw.options.unwrap_or_default();
 
         let defaults = Options::default();
@@ -732,7 +759,10 @@ impl Config {
             apply_key_table(&mut keymap, Mode::Graph, "graph", keys.graph)?;
         }
 
-        Ok(Self { options, keymap })
+        Ok(Loaded {
+            config: Self { options, keymap },
+            unknown_keys,
+        })
     }
 }
 
@@ -1061,22 +1091,38 @@ pub fn action_names() -> &'static [&'static str] {
     ]
 }
 
+/// `path` as the file spells it, `options.font-ui`. `serde_ignored`'s own
+/// `Display` also writes a segment for each `Option` layer (`options.?.font-ui`),
+/// which names nothing a user wrote.
+fn dotted(path: &serde_ignored::Path) -> String {
+    use serde_ignored::Path;
+    match path {
+        Path::Root => String::new(),
+        Path::Map { parent, key } => match dotted(parent) {
+            p if p.is_empty() => key.clone(),
+            p => format!("{p}.{key}"),
+        },
+        Path::Seq { parent, index } => format!("{}[{index}]", dotted(parent)),
+        Path::Some { parent }
+        | Path::NewtypeStruct { parent }
+        | Path::NewtypeVariant { parent } => dotted(parent),
+    }
+}
+
 /// The file's top level: an `[options]` table and `[keys.<mode>]` tables, as
-/// documented in the README. `deny_unknown_fields` everywhere: a misplaced or
-/// misspelled key must error loudly (surfaced non-fatally by the caller), not
-/// be silently ignored.
+/// documented in the README. A misplaced or misspelled key is not silently
+/// dropped: [`Config::parse`] collects it into [`Loaded::unknown_keys`] for
+/// the caller to report.
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawConfig {
     options: Option<RawOptions>,
     keys: Option<RawKeys>,
     /// `[renderers]` table: fence language token → shell command string. A free
-    /// map (any language key is valid), so no `deny_unknown_fields` here.
+    /// map (any language key is valid), so no key in it is ever unknown.
     renderers: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawOptions {
     #[serde(rename = "scroll-step")]
     scroll_step: Option<u32>,
@@ -1121,7 +1167,6 @@ struct RawOptions {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawKeys {
     normal: Option<BTreeMap<String, String>>,
     toc: Option<BTreeMap<String, String>>,
@@ -1133,23 +1178,54 @@ mod tests {
     use super::*;
     use crate::core::keymap::{MatchResult, Matcher};
 
+    /// The parsed settings alone, for the tests that don't look at warnings.
+    fn parse(text: &str) -> Result<Config, ConfigError> {
+        Config::parse(text).map(|loaded| loaded.config)
+    }
+
     #[test]
-    fn unknown_or_misplaced_keys_error_loudly() {
-        // Top-level option keys (the pre-[options] format) must error, not be
-        // silently ignored — regression for default-recolor being swallowed.
-        assert!(Config::parse("default-recolor = true").is_err());
-        assert!(Config::parse("[options]\ntypo-key = 1").is_err());
+    fn unknown_or_misplaced_keys_are_reported_not_swallowed() {
+        // A top-level option key (the pre-[options] format) is reported, not
+        // silently dropped — regression for default-recolor being swallowed.
+        let loaded = Config::parse("default-recolor = true").unwrap();
+        assert_eq!(loaded.unknown_keys, ["default-recolor"]);
+        assert!(!loaded.config.options.default_recolor);
+        assert_eq!(
+            Config::parse("[options]\ntypo-key = 1\n[keys.visual]\nx = \"quit\"")
+                .unwrap()
+                .unknown_keys,
+            ["keys.visual", "options.typo-key"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_keeps_every_other_setting() {
+        // A config written for a newer jumanji: the option this version does not
+        // know is skipped, and the ones it does know still apply.
+        let loaded =
+            Config::parse("[options]\ndefault-recolor = true\nfont-future = \"X\"\n").unwrap();
+        assert!(loaded.config.options.default_recolor);
+        assert_eq!(
+            loaded.warning().as_deref(),
+            Some("config: ignored unknown key options.font-future")
+        );
+        assert_eq!(Config::parse("").unwrap().warning(), None);
+        let two = Config::parse("a = 1\nb = 2\n").unwrap();
+        assert_eq!(
+            two.warning().as_deref(),
+            Some("config: ignored unknown keys a, b")
+        );
     }
 
     #[test]
     fn empty_config_is_defaults() {
-        let c = Config::parse("").unwrap();
+        let c = parse("").unwrap();
         assert_eq!(c.options, Options::default());
     }
 
     #[test]
     fn options_parse() {
-        let c = Config::parse(
+        let c = parse(
             r#"
             [options]
             scroll-step = 120
@@ -1167,7 +1243,7 @@ mod tests {
 
     #[test]
     fn partial_options_keep_defaults() {
-        let c = Config::parse("[options]\nscroll-step = 42").unwrap();
+        let c = parse("[options]\nscroll-step = 42").unwrap();
         assert_eq!(c.options.scroll_step_px, 42);
         assert_eq!(c.options.zoom_step, Options::default().zoom_step);
     }
@@ -1208,7 +1284,7 @@ mod tests {
 
     #[test]
     fn remap_override_applies() {
-        let c = Config::parse(
+        let c = parse(
             r#"
             [keys.normal]
             j = "quit"
@@ -1227,7 +1303,7 @@ mod tests {
 
     #[test]
     fn remap_new_sequence() {
-        let c = Config::parse(
+        let c = parse(
             r#"
             [keys.normal]
             "gg" = "goto bottom"
@@ -1248,7 +1324,7 @@ mod tests {
 
     #[test]
     fn bad_action_string_errors() {
-        let err = Config::parse(
+        let err = parse(
             r#"
             [keys.normal]
             x = "explode"
@@ -1263,7 +1339,7 @@ mod tests {
 
     #[test]
     fn bad_key_notation_errors() {
-        let err = Config::parse(
+        let err = parse(
             r#"
             [keys.normal]
             "<Nope>" = "quit"
@@ -1310,7 +1386,7 @@ mod tests {
 
     #[test]
     fn font_and_zoom_options_parse() {
-        let c = Config::parse(
+        let c = parse(
             r#"
             [options]
             font-body = "Inter"
@@ -1332,9 +1408,9 @@ mod tests {
 
     #[test]
     fn copy_on_select_is_off_by_default_and_settable() {
-        assert!(!Config::parse("").unwrap().options.copy_on_select);
+        assert!(!parse("").unwrap().options.copy_on_select);
         assert!(
-            Config::parse("[options]\ncopy-on-select = true")
+            parse("[options]\ncopy-on-select = true")
                 .unwrap()
                 .options
                 .copy_on_select
@@ -1348,18 +1424,18 @@ mod tests {
     #[test]
     fn selection_clipboard_parses_and_defaults() {
         assert_eq!(
-            Config::parse("").unwrap().options.selection_clipboard,
+            parse("").unwrap().options.selection_clipboard,
             SelectionClipboard::Primary
         );
         assert_eq!(
-            Config::parse("[options]\nselection-clipboard = \"clipboard\"")
+            parse("[options]\nselection-clipboard = \"clipboard\"")
                 .unwrap()
                 .options
                 .selection_clipboard,
             SelectionClipboard::Clipboard
         );
         assert_eq!(
-            Config::parse("[options]\nselection-clipboard = \"PRIMARY\"")
+            parse("[options]\nselection-clipboard = \"PRIMARY\"")
                 .unwrap()
                 .options
                 .selection_clipboard,
@@ -1369,7 +1445,7 @@ mod tests {
 
     #[test]
     fn bad_selection_clipboard_errors() {
-        let err = Config::parse("selection-clipboard = \"middle\"").unwrap_err();
+        let err = parse("[options]\nselection-clipboard = \"middle\"").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("selection-clipboard"), "{msg}");
         assert!(msg.contains("middle"), "{msg}");
@@ -1377,7 +1453,7 @@ mod tests {
 
     #[test]
     fn renderers_table_parses_and_lowercases_keys() {
-        let c = Config::parse(
+        let c = parse(
             r#"
             [renderers]
             d2 = "d2 - -"
@@ -1393,20 +1469,20 @@ mod tests {
 
     #[test]
     fn no_renderers_table_is_empty() {
-        assert!(Config::parse("").unwrap().options.renderers.is_empty());
+        assert!(parse("").unwrap().options.renderers.is_empty());
     }
 
     #[test]
     fn editor_command_defaults_and_parses() {
         use std::path::Path;
         // Default is the `$EDITOR +%l %f` template.
-        let default = Config::parse("").unwrap().options.editor_command;
+        let default = parse("").unwrap().options.editor_command;
         assert_eq!(
             default.to_argv(12, Path::new("/a/b.md")),
             vec!["$EDITOR", "+12", "/a/b.md"]
         );
         // A configured template is parsed and applied.
-        let c = Config::parse("[options]\neditor-command = \"code -g %f:%l\"").unwrap();
+        let c = parse("[options]\neditor-command = \"code -g %f:%l\"").unwrap();
         assert_eq!(
             c.options.editor_command.to_argv(3, Path::new("n.md")),
             vec!["code", "-g", "n.md:3"]
@@ -1415,13 +1491,15 @@ mod tests {
 
     #[test]
     fn empty_editor_command_errors() {
-        let err = Config::parse("[options]\neditor-command = \"\"").unwrap_err();
+        let err = parse("[options]\neditor-command = \"\"").unwrap_err();
         assert!(err.to_string().contains("editor-command"), "{err}");
     }
 
     #[test]
     fn missing_file_is_defaults() {
-        let c = Config::load(Some(Path::new("/nonexistent/xyz"))).unwrap();
+        let c = Config::load(Some(Path::new("/nonexistent/xyz")))
+            .unwrap()
+            .config;
         assert_eq!(c.options, Options::default());
     }
 
@@ -1471,7 +1549,7 @@ mod tests {
 
     #[test]
     fn key_table_mark_without_register_is_char_arg_binding() {
-        let c = Config::parse(
+        let c = parse(
             r#"
             [keys.normal]
             "g" = "mark set"
@@ -1501,7 +1579,7 @@ mod tests {
 
     #[test]
     fn toc_key_table_remaps() {
-        let c = Config::parse(
+        let c = parse(
             r#"
             [keys.toc]
             "n" = "toc next"
@@ -1520,7 +1598,7 @@ mod tests {
 
     #[test]
     fn graph_key_table_remaps_and_t_opens_the_graph_by_default() {
-        let c = Config::parse(
+        let c = parse(
             r#"
             [keys.graph]
             "o" = "graph open"
@@ -1617,10 +1695,10 @@ mod tests {
         assert!(o.set("diagram-look", "dark").is_err());
 
         for (value, look) in [("classic", DiagramLook::Classic), ("neo", DiagramLook::Neo)] {
-            let c = Config::parse(&format!("[options]\ndiagram-look = \"{value}\"\n")).unwrap();
+            let c = parse(&format!("[options]\ndiagram-look = \"{value}\"\n")).unwrap();
             assert_eq!(c.options.diagram_look, look);
         }
-        let err = Config::parse("[options]\ndiagram-look = \"dark\"\n").unwrap_err();
+        let err = parse("[options]\ndiagram-look = \"dark\"\n").unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1644,12 +1722,12 @@ mod tests {
         assert_eq!(o.highlight_color.to_string(), "rgba(255, 255, 0, 1)");
         assert!(o.set("highlight-color", "nope").is_err());
 
-        let c = Config::parse("[options]\nhighlight-color = \"rgba(0, 188, 0, 0.5)\"\n").unwrap();
+        let c = parse("[options]\nhighlight-color = \"rgba(0, 188, 0, 0.5)\"\n").unwrap();
         assert_eq!(
             c.options.highlight_color.to_string(),
             "rgba(0, 188, 0, 0.5)"
         );
-        assert!(Config::parse("[options]\nhighlight-color = \"blue\"\n").is_err());
+        assert!(parse("[options]\nhighlight-color = \"blue\"\n").is_err());
     }
 
     #[test]
@@ -1664,12 +1742,12 @@ mod tests {
         assert_eq!(o.highlight_active_color.to_string(), "rgba(255, 0, 0, 1)");
         assert!(o.set("highlight-active-color", "nope").is_err());
 
-        let c = Config::parse("[options]\nhighlight-active-color = \"#00ff0080\"\n").unwrap();
+        let c = parse("[options]\nhighlight-active-color = \"#00ff0080\"\n").unwrap();
         assert_eq!(
             c.options.highlight_active_color.to_string(),
             "rgba(0, 255, 0, 0.5019607843137255)"
         );
-        assert!(Config::parse("[options]\nhighlight-active-color = \"green\"\n").is_err());
+        assert!(parse("[options]\nhighlight-active-color = \"green\"\n").is_err());
     }
 
     #[test]
@@ -1701,7 +1779,7 @@ mod tests {
 
     #[test]
     fn show_frontmatter_reads_from_the_config_file() {
-        let c = Config::parse("[options]\nshow-frontmatter = true\n").unwrap();
+        let c = parse("[options]\nshow-frontmatter = true\n").unwrap();
         assert!(c.options.show_frontmatter);
     }
 
@@ -1776,11 +1854,11 @@ mod tests {
         assert!(d.wide, "the breakout ships on");
         assert_eq!(d.wide_blocks, WideBlocks::default());
 
-        let c = Config::parse("[options]\nwide = false\nwide-blocks = \"all\"\n").unwrap();
+        let c = parse("[options]\nwide = false\nwide-blocks = \"all\"\n").unwrap();
         assert!(!c.options.wide);
         assert_eq!(c.options.wide_blocks, WideBlocks::all());
 
-        let err = Config::parse("[options]\nwide-blocks = \"widgets\"\n").unwrap_err();
+        let err = parse("[options]\nwide-blocks = \"widgets\"\n").unwrap_err();
         assert!(err.to_string().contains("widgets"), "{err}");
     }
 
@@ -1816,7 +1894,7 @@ mod tests {
         // breakout already recovers most of the width fit would buy.
         assert!(!Options::default().diagram_fit);
         assert!(
-            Config::parse("[options]\ndiagram-fit = true\n")
+            parse("[options]\ndiagram-fit = true\n")
                 .unwrap()
                 .options
                 .diagram_fit
@@ -1845,13 +1923,13 @@ mod tests {
     fn background_is_off_by_default_and_reads_from_the_config_file() {
         assert!(!Options::default().background);
         assert!(
-            Config::parse("[options]\nbackground = true\n")
+            parse("[options]\nbackground = true\n")
                 .unwrap()
                 .options
                 .background
         );
         assert!(
-            !Config::parse("[options]\nbackground = false\n")
+            !parse("[options]\nbackground = false\n")
                 .unwrap()
                 .options
                 .background
@@ -1887,9 +1965,9 @@ mod tests {
     #[test]
     fn graph_view_defaults_to_links_and_is_a_set_target_that_re_lays_out() {
         assert_eq!(Options::default().graph_view, GraphView::Links);
-        let c = Config::parse("[options]\ngraph-view = \"tree\"\n").unwrap();
+        let c = parse("[options]\ngraph-view = \"tree\"\n").unwrap();
         assert_eq!(c.options.graph_view, GraphView::Tree);
-        let err = Config::parse("[options]\ngraph-view = \"forest\"\n").unwrap_err();
+        let err = parse("[options]\ngraph-view = \"forest\"\n").unwrap_err();
         assert!(err.to_string().contains("forest"), "{err}");
 
         let mut o = Options::default();

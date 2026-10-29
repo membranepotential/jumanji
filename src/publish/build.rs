@@ -35,10 +35,18 @@ pub fn site(vault: &Path, out: &Path) -> Result<Report> {
     let (root, out) = check(vault, out)?;
 
     let config_dir = config::xdg_config_dir();
-    let config = Config::load(config_dir.as_deref()).unwrap_or_else(|err| {
-        eprintln!("warning: {err}; publishing with the default configuration");
-        Config::default()
-    });
+    let config = match Config::load(config_dir.as_deref()) {
+        Ok(loaded) => {
+            if let Some(warning) = loaded.warning() {
+                eprintln!("warning: {warning}");
+            }
+            loaded.config
+        }
+        Err(err) => {
+            eprintln!("warning: {err}; publishing with the default configuration");
+            Config::default()
+        }
+    };
 
     // Every note is read once, during the walk, and rendered from that copy.
     let mut sources: HashMap<PathBuf, String> = HashMap::new();

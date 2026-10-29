@@ -257,7 +257,7 @@ seams, in order of arrival:
      (SVG or HTML) replaces the fence. Language keys are normalised to lowercase
      and matched case-insensitively against the fence's first info token. Typed
      as a `BTreeMap<String,String>` on `Options`, parsed from a free `[renderers]`
-     table (no `deny_unknown_fields` — any language key is valid). It is not a
+     table (any language key is valid, so none is reported unknown). It is not a
      `:set` target (a table, wired once at render construction).
    - **Safety.** Hard **5 s** wall-clock timeout (child killed on expiry), **4
      MiB** stdout cap, stderr discarded. Any failure — spawn error, non-zero
