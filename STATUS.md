@@ -21,6 +21,8 @@ Shipped through **v1.15.1** (unknown config keys warn instead of resetting).
 
 ## Done (recent)
 
+- **window title (2026-11-13, 2588e40)** — the document's header (frontmatter
+  `title`, else first H1), else the statusbar trail. Unreleased.
 - **v1.15.1 (2026-10-29, f092666)** — an unknown config key is skipped with a
   warning instead of resetting everything; config notices show in the statusbar.
 - **v1.15.0 / publishing (2026-10-28, 4119c73..6953998)** — `jumanji publish DIR --name N`
@@ -48,6 +50,8 @@ Shipped through **v1.15.1** (unknown config keys warn instead of resetting).
 3. Delete `.flash-investigation/` (gitignored).
 4. Report upstream to merman: per-mindmap config clone (cose-bilkent vs elk).
 5. Search: SVG `<text>` matches are found but not painted.
+6. e2e `ctrl_wheel_after_a_resize_zooms_about_the_unmoved_pointer` fails
+   locally (before 2588e40 too); find out why.
 
 ## Open questions
 
