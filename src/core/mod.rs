@@ -44,6 +44,9 @@ pub struct RenderedDocument {
     /// diagrams, no external resources except document-relative images).
     pub html: String,
     pub toc: Vec<Heading>,
+    /// The document's header: frontmatter `title`, else the first `# H1`,
+    /// trimmed; `None` when neither exists or both are blank.
+    pub title: Option<String>,
 }
 
 /// Scroll directions for [`Action::Scroll`].

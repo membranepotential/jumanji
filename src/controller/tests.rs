@@ -1321,6 +1321,25 @@ fn the_breadcrumb_records_the_route_into_a_second_document() {
     );
 }
 
+#[test]
+fn the_window_title_is_the_header_and_follows_a_link() {
+    let r = Reader::loaded_with_sibling(DOC);
+    assert_eq!(r.chrome.title(), "Alpha");
+    r.navigate(&file_uri(&r.sibling()));
+    assert_eq!(r.chrome.title(), "Other");
+}
+
+#[test]
+fn without_a_header_the_window_title_is_the_trail() {
+    let r = Reader::open_with("[link](other.md)\n", |vault| {
+        std::fs::write(vault.join("other.md"), "Elsewhere.\n").expect("write sibling");
+    });
+    r.finish_load();
+    assert_eq!(r.chrome.title(), "doc.md");
+    r.navigate(&file_uri(&r.sibling()));
+    assert_eq!(r.chrome.title(), "doc.md > other.md");
+}
+
 // ---------------------------------------------------------------------------
 // Quickmarks
 // ---------------------------------------------------------------------------

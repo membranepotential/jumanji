@@ -2,7 +2,21 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-10-29 (latest) — an unknown config key is a warning, shown in the window
+## 2026-11-13 (latest) — the window title is the document's header
+
+The window title was always `jumanji`. Now it is the document's header (the
+frontmatter `title`, else the first `# H1`, the same header the graph
+labels a node with), and without one it is the untruncated trail the
+statusbar shows (`index.md > note.md`). `RenderedDocument` carries the
+header as `title`, computed from the frontmatter node and the TOC that is
+already extracted, so the render adds no extra walk. The controller sets it
+through a new `Chrome::set_title` after every render and every trail
+repaint; GTK sets it on the window that holds the chrome.
+
+Unrelated: the e2e test `ctrl_wheel_after_a_resize_zooms_about_the_unmoved_pointer`
+fails locally on the tree before this change too. Not investigated yet.
+
+## 2026-10-29 — an unknown config key is a warning, shown in the window
 
 Adding `font-ui` (new in v1.15.0) to the config while v1.14.0 was still
 installed made the reader start in light mode: every raw config struct had

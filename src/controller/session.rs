@@ -350,6 +350,9 @@ struct Session<T: Toolkit> {
     /// Timers, worker threads, and the operating system.
     host: T::Host,
     toc: Vec<Heading>,
+    /// The live document's header (`RenderedDocument::title`), which the
+    /// window title shows in place of the trail.
+    title: Option<String>,
     section: usize,
     dark: bool,
     /// Whether the wide-block breakout is on (DESIGN D5a). Mirrored into
@@ -561,6 +564,7 @@ impl<T: Toolkit + 'static> Controller<T> {
             chrome,
             host,
             toc: Vec::new(),
+            title: None,
             section: 0,
             dark: options.default_recolor,
             wide: options.wide,
@@ -906,6 +910,8 @@ impl<T: Toolkit + 'static> Controller<T> {
                 s.doc_uses_vault = vault::may_reference_vault(&md);
                 let doc = pipeline::render(&md, &s.render_opts, &s.vault);
                 s.toc = doc.toc.clone();
+                s.title = doc.title.clone();
+                s.show_title();
                 s.section = 0;
                 // Re-assert the recolor on the outgoing document, and hand the same
                 // state to `load_document` so it pre-applies the `dark` class on
@@ -2634,6 +2640,15 @@ impl<T: Toolkit> Session<T> {
     /// document switch, a jumplist hop, and whenever a transient message clears.
     fn show_trail(&self) {
         self.chrome.set_trail(self.trail_segments());
+        self.show_title();
+    }
+
+    /// Set the window title: the document's header, else the untruncated
+    /// trail the statusbar shows. Renders and trail repaints both call it, so
+    /// it follows a document switch whichever lands first.
+    fn show_title(&self) {
+        let title = self.title.clone().unwrap_or_else(|| self.trail_string());
+        self.chrome.set_title(&title);
     }
 
     /// The breadcrumb segments: the jumplist's route to the live document, as

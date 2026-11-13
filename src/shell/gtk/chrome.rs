@@ -85,6 +85,14 @@ impl Chrome for GtkChrome {
         self.bar.set_message(msg);
     }
 
+    fn set_title(&self, title: &str) {
+        // The column is the window's child from construction on, so the root
+        // is the window by the time the controller sets a title.
+        if let Some(window) = self.layout.root().and_downcast::<gtk::Window>() {
+            window.set_title(Some(title));
+        }
+    }
+
     fn open_input(&self, prompt: Prompt) {
         self.bar.open_input(prompt);
     }

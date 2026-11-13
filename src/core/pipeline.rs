@@ -424,13 +424,31 @@ pub fn render(md: &str, opts: &Options, vault: &Vault) -> RenderedDocument {
     annotate_html_block_lines(root);
 
     let toc = toc::extract(root);
+    let title = document_title(root, &toc);
 
     let mut body = String::new();
     format_html(root, &comrak_opts, &mut body)
         .expect("formatting a comrak AST into a String cannot fail");
 
     let html = assemble(&body, &toc, opts, has_math);
-    RenderedDocument { html, toc }
+    RenderedDocument { html, toc, title }
+}
+
+/// The document's header, the same one the graph labels it with: the
+/// frontmatter `title`, else the first `# H1`. Frontmatter is always the
+/// root's first child, and the H1 comes from the TOC already extracted, so
+/// this costs no extra walk.
+fn document_title<'a>(root: &'a AstNode<'a>, toc: &[Heading]) -> Option<String> {
+    let front = root
+        .first_child()
+        .and_then(|node| match &node.data.borrow().value {
+            NodeValue::FrontMatter(block) => super::graph::title_property(block),
+            _ => None,
+        });
+    front
+        .or_else(|| toc.iter().find(|h| h.level == 1).map(|h| h.text.clone()))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
 }
 
 /// comrak options: GFM (tables, strikethrough, autolink, tasklist), footnotes,
@@ -736,6 +754,25 @@ mod tests {
 
     fn render_str(md: &str) -> String {
         render(md, &Options::default(), &test_vault()).html
+    }
+
+    #[test]
+    fn the_title_is_the_frontmatter_title_else_the_first_h1() {
+        let title = |md: &str| render(md, &Options::default(), &test_vault()).title;
+        assert_eq!(
+            title("## Sub\n\n# First *one*\n\n# Second\n").as_deref(),
+            Some("First one")
+        );
+        assert_eq!(
+            title("---\ntitle: Front\n---\n\n# Heading\n").as_deref(),
+            Some("Front")
+        );
+        assert_eq!(
+            title("---\ntags: [a]\n---\n\n# Heading\n").as_deref(),
+            Some("Heading")
+        );
+        assert_eq!(title("## Only a subsection\n\ntext\n"), None);
+        assert_eq!(title("#  \n"), None);
     }
 
     #[test]

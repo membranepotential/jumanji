@@ -102,6 +102,8 @@ pub trait Chrome {
     fn set_status_right(&self, percent: u32, pending: &str, search: &str, zoom: &str);
     /// A transient notice on the left (`no links in view`, errors, `Index`).
     fn set_message(&self, msg: &str);
+    /// The window's title, as the window manager shows it.
+    fn set_title(&self, title: &str);
 
     /// Open the input bar for `prompt`, seeded with its prefix, focused.
     fn open_input(&self, prompt: Prompt);

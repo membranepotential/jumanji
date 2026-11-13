@@ -249,6 +249,7 @@ pub struct FakeChrome(Rc<RefCell<ChromeState>>);
 #[derive(Default)]
 struct ChromeState {
     trail: Vec<String>,
+    title: String,
     message: String,
     right: StatusRight,
     prompt: Option<Prompt>,
@@ -271,6 +272,11 @@ impl FakeChrome {
     /// The breadcrumb segments last set.
     pub fn trail(&self) -> Vec<String> {
         self.0.borrow().trail.clone()
+    }
+
+    /// The window title last set.
+    pub fn title(&self) -> String {
+        self.0.borrow().title.clone()
     }
 
     /// The transient message, or `""` once a breadcrumb has replaced it.
@@ -314,6 +320,10 @@ impl Chrome for FakeChrome {
             search: search.to_string(),
             zoom: zoom.to_string(),
         };
+    }
+
+    fn set_title(&self, title: &str) {
+        self.0.borrow_mut().title = title.to_string();
     }
 
     fn set_message(&self, msg: &str) {

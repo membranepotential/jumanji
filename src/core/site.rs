@@ -615,6 +615,7 @@ mod tests {
         let doc = RenderedDocument {
             html: format!("<body>\n{MAIN_OPEN}<h1>N</h1>\n{MAIN_CLOSE}</body>\n"),
             toc: vec![heading(1, "N"), heading(2, "Part")],
+            title: Some("N".to_string()),
         };
         let html = page(&plan, at(&plan, "topic/n.md"), &doc).html;
         let order = [

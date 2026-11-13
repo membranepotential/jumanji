@@ -171,7 +171,7 @@ pub fn references(md: &str, source: &Path, index: &VaultIndex) -> References {
 }
 
 /// The frontmatter `title`, if it is a plain non-empty value.
-fn title_property(block: &str) -> Option<String> {
+pub(crate) fn title_property(block: &str) -> Option<String> {
     frontmatter::parse(block)
         .into_iter()
         .find(|p| p.key.eq_ignore_ascii_case("title"))
