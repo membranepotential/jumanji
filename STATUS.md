@@ -47,10 +47,9 @@ Shipped through **v1.15.2** (the window title names the document).
    `05-macos-port.md` §5.3 is the guide. Owner side: review PRs, keep CI green.
 2. Trim the e2e suite toward what needs a real engine (unit tests now cover
    the flows in ms).
-3. Delete `.flash-investigation/` (gitignored).
-4. Report upstream to merman: per-mindmap config clone (cose-bilkent vs elk).
-5. Search: SVG `<text>` matches are found but not painted.
-6. e2e `ctrl_wheel_after_a_resize_zooms_about_the_unmoved_pointer` fails
+3. Report upstream to merman: per-mindmap config clone (cose-bilkent vs elk).
+4. Search: SVG `<text>` matches are found but not painted.
+5. e2e `ctrl_wheel_after_a_resize_zooms_about_the_unmoved_pointer` fails
    locally (before 2588e40 too); find out why.
 
 ## Open questions
