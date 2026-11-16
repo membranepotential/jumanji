@@ -1,6 +1,6 @@
 pkgbase = jumanji
 	pkgdesc = A zathura-inspired markdown reader: minimal chrome, vim keybindings, real typography
-	pkgver = 1.15.1
+	pkgver = 1.15.2
 	pkgrel = 1
 	url = https://github.com/membranepotential/jumanji
 	arch = x86_64
@@ -10,7 +10,7 @@ pkgbase = jumanji
 	depends = gtk4
 	depends = webkitgtk-6.0
 	optdepends = xdg-utils: register jumanji as the default handler for text/markdown
-	source = jumanji-1.15.1.tar.gz::https://github.com/membranepotential/jumanji/archive/refs/tags/v1.15.1.tar.gz
-	sha256sums = d7a1e8ef6fe8d260deb0480068c7423b334d502fc96bfccc46e5dae3bc698d9a
+	source = jumanji-1.15.2.tar.gz::https://github.com/membranepotential/jumanji/archive/refs/tags/v1.15.2.tar.gz
+	sha256sums = 818a456618bc8a7c87fc62a3898ac8e73da4bd56e1e6fcf6bf39fb78382156d9
 
 pkgname = jumanji
