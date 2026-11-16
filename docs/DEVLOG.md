@@ -2,7 +2,25 @@
 
 Newest entries first. Each entry: what happened, what was decided, what's next.
 
-## 2026-11-13 (latest) — the window title is the document's header
+## 2026-11-16 (latest) — idle CPU checked; the DMABUF workaround stays
+
+The reader looked busy while idle in btop. Measured: it is not. Three
+instances sat at 0.1–0.5 % of a core while untouched; the only steady
+activity is the file watcher's 120 ms poll (~8 wakeups/s, negligible). The
+spikes in btop are redraws while the window is used: scrolling, re-showing
+it after an i3 workspace switch (~0.4 s CPU each headless), hover.
+
+Redraws are CPU-heavy because `main` disables WebKit's DMABUF renderer, so
+WebKit rasterises on the CPU. A real-GPU A/B with the renderer on roughly
+halved the CPU while scrolling, but held `j`/`k` still drops the
+composited scroll-box layers on WebKitGTK 2.54.2; the wheel does not.
+Decision: keep the workaround. The re-test is recorded under the risk in
+`docs/architecture/README.md`.
+
+Next: nothing scheduled. Revisit only with a `j`/`k` scroll path that does
+not trigger the dropouts.
+
+## 2026-11-13 — the window title is the document's header
 
 The window title was always `jumanji`. Now it is the document's header (the
 frontmatter `title`, else the first `# H1`, the same header the graph

@@ -397,6 +397,17 @@ The core is pure and toolkit-free; so is the controller.
   it lives at the very top of `main`. Env-var + no-GPU-headless means this can't
   be e2e-asserted; verified on evidence + upstream precedent, feel-tested on the
   real GPU before release.
+  *Re-tested 2026-11-16 (WebKitGTK 2.54.2, Intel UHD 630 + NVIDIA, X11):*
+  still needed. With the renderer on (`WEBKIT_DISABLE_DMABUF_RENDERER=0`),
+  wheel scrolling is clean, but held `j`/`k` (a `window.scrollBy` per key
+  repeat) still drops the layers. The cost of the workaround: WebKit
+  rasterises on the CPU, so every redraw (scroll, re-show after a workspace
+  switch, hover) costs CPU in both processes — roughly 2× the GPU renderer's
+  total while scrolling (~40 % vs ~23 % of a core; rough, different
+  documents). Idle cost is unaffected (~0.1–0.5 % of a core, mostly the
+  watcher's 120 ms poll). With the renderer on, WebKit may also open a context
+  on a hybrid laptop's discrete GPU. Kept; revisit only with a `j`/`k` scroll
+  path that does not trigger the dropouts.
 - **merman parity gaps** — degrade to highlighted code block + error note;
   external-renderer seam ([D6.2](#d6-extensibility--pipeline-seams-not-a-plugin-abi)) as user-side fallback.
 - **Editor save races** — editors rename-replace on save; watch the parent
