@@ -9,7 +9,7 @@ content pipeline, modal vim/zathura keys, Obsidian dialect. Linux-first.
 
 ## Now
 
-Shipped through **v1.15.1** (unknown config keys warn instead of resetting).
+Shipped through **v1.15.2** (the window title names the document).
 
 - **macOS port (issue #1)** — [05-macos-port.md](docs/research/05-macos-port.md);
   tier-2 cfg-gated mac shell. Owner side now: mac scaffold branch.
@@ -21,8 +21,8 @@ Shipped through **v1.15.1** (unknown config keys warn instead of resetting).
 
 ## Done (recent)
 
-- **window title (2026-11-13, 2588e40)** — the document's header (frontmatter
-  `title`, else first H1), else the statusbar trail. Unreleased.
+- **v1.15.2 / window title (2026-11-16, 2588e40)** — the document's header
+  (frontmatter `title`, else first H1), else the statusbar trail.
 - **v1.15.1 (2026-10-29, f092666)** — an unknown config key is skipped with a
   warning instead of resetting everything; config notices show in the statusbar.
 - **v1.15.0 / publishing (2026-10-28, 4119c73..6953998)** — `jumanji publish DIR --name N`
